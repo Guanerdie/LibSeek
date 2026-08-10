@@ -1,0 +1,129 @@
+name: unin
+
+x-backend-environment: &backend_environment
+  APP_ENV: production
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://unin:change-me-before-production@postgres:5432/unin}
+  ALLOWED_EXTERNAL_HOSTS: ${ALLOWED_EXTERNAL_HOSTS:-nextfind.example}
+  NEXTFIND_BASE_URL: ${NEXTFIND_BASE_URL:-https://nextfind.example}
+  NEXTFIND_USERNAME: ${NEXTFIND_USERNAME:-}
+  NEXTFIND_PASSWORD: ${NEXTFIND_PASSWORD:-}
+  ENABLE_TMDB_LIVE: ${ENABLE_TMDB_LIVE:-false}
+  TMDB_BASE_URL: ${TMDB_BASE_URL:-https://api.themoviedb.org}
+  TMDB_ACCESS_TOKEN: ${TMDB_ACCESS_TOKEN:-}
+  TMDB_MIN_INTERVAL_SECONDS: ${TMDB_MIN_INTERVAL_SECONDS:-0.25}
+  TMDB_CACHE_TTL_SECONDS: ${TMDB_CACHE_TTL_SECONDS:-86400}
+  TMDB_ALLOW_FUTURE_EPISODES: ${TMDB_ALLOW_FUTURE_EPISODES:-false}
+  ENABLE_AVISTAZ_LIVE_SEARCH: ${ENABLE_AVISTAZ_LIVE_SEARCH:-false}
+  AVISTAZ_BASE_URL: ${AVISTAZ_BASE_URL:-https://avistaz.to}
+  AVISTAZ_USERNAME: ${AVISTAZ_USERNAME:-}
+  AVISTAZ_PASSWORD: ${AVISTAZ_PASSWORD:-}
+  AVISTAZ_PID: ${AVISTAZ_PID:-}
+  AVISTAZ_MIN_INTERVAL_SECONDS: ${AVISTAZ_MIN_INTERVAL_SECONDS:-6}
+  EXTERNAL_CONNECT_TIMEOUT_SECONDS: ${EXTERNAL_CONNECT_TIMEOUT_SECONDS:-5}
+  EXTERNAL_READ_TIMEOUT_SECONDS: ${EXTERNAL_READ_TIMEOUT_SECONDS:-30}
+  EXTERNAL_MAX_RESPONSE_BYTES: ${EXTERNAL_MAX_RESPONSE_BYTES:-10485760}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-unin}
+      POSTGRES_USER: ${POSTGRES_USER:-unin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-production}
+      TZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [internal]
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    environment:
+      <<: *backend_environment
+      ENABLE_QB_READ_ONLY: ${ENABLE_QB_READ_ONLY:-false}
+      QB_BASE_URL: ${QB_BASE_URL:-}
+      QB_USERNAME: ${QB_USERNAME:-}
+      QB_PASSWORD: ${QB_PASSWORD:-}
+      QB_ALLOWED_HOSTS: ${QB_ALLOWED_HOSTS:-}
+      QB_ALLOW_INSECURE_HTTP: ${QB_ALLOW_INSECURE_HTTP:-false}
+      QB_TARGET_CATEGORY: ${QB_TARGET_CATEGORY:-}
+      QB_TARGET_SAVE_PATH: ${QB_TARGET_SAVE_PATH:-}
+      QB_SAVE_PATH_REF: ${QB_SAVE_PATH_REF:-qb-default-save-path}
+      QB_ALLOWED_SAVE_PATHS: ${QB_ALLOWED_SAVE_PATHS:-}
+      QB_PLAN_TAGS: ${QB_PLAN_TAGS:-}
+      AVISTAZ_FORBIDDEN_QB_VERSIONS: ${AVISTAZ_FORBIDDEN_QB_VERSIONS:-}
+      APPROVAL_DEFAULT_TTL_MINUTES: ${APPROVAL_DEFAULT_TTL_MINUTES:-60}
+      APPROVAL_MAX_TTL_MINUTES: ${APPROVAL_MAX_TTL_MINUTES:-10080}
+      APPROVAL_PREFLIGHT_MAX_AGE_SECONDS: ${APPROVAL_PREFLIGHT_MAX_AGE_SECONDS:-300}
+      MAX_CANDIDATE_SIZE_BYTES: ${MAX_CANDIDATE_SIZE_BYTES:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [internal]
+
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.main"]
+    environment: *backend_environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.healthcheck"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 20s
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [internal]
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:

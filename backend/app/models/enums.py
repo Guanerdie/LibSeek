@@ -1,0 +1,54 @@
+from enum import StrEnum
+
+
+class JobStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    RETRY_WAIT = "RETRY_WAIT"
+    CANCELLED = "CANCELLED"
+
+
+class MediaType(StrEnum):
+    MOVIE = "movie"
+    TV = "tv"
+
+
+class IdentityConfidence(StrEnum):
+    HIGH = "HIGH"
+    NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
+
+
+class MetadataStatus(StrEnum):
+    RESOLVED = "RESOLVED"
+    NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
+    UNRESOLVED = "UNRESOLVED"
+
+
+class WorkflowStatus(StrEnum):
+    DISCOVERED = "DISCOVERED"
+    METADATA_PENDING = "METADATA_PENDING"
+    IDENTITY_REVIEW = "IDENTITY_REVIEW"
+    IDENTITY_CONFIRMED = "IDENTITY_CONFIRMED"
+    PT_SEARCH_PENDING = "PT_SEARCH_PENDING"
+    PT_SEARCHING = "PT_SEARCHING"
+    TORRENT_REVIEW = "TORRENT_REVIEW"
+    NO_CANDIDATE = "NO_CANDIDATE"
+    SEARCH_FAILED = "SEARCH_FAILED"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+    CONSUMED = "CONSUMED"
+
+
+class PreflightStatus(StrEnum):
+    PASS = "PASS"
+    WARNING = "WARNING"
+    BLOCKED = "BLOCKED"
+    UNKNOWN = "UNKNOWN"

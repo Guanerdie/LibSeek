@@ -1,0 +1,2 @@
+"""Recoverable PostgreSQL-backed worker."""
+
