@@ -4,13 +4,16 @@ import asyncio
 import logging
 import os
 import socket
+from urllib.parse import urlparse
 
 from app.adapters.media_sources import NextFindAdapter
 from app.adapters.metadata import TmdbProvider
 from app.adapters.pt_sites import AvistaZAdapter
 from app.core.config import get_settings
+from app.core.security import validate_external_url
 from app.db.session import SessionFactory
 from app.errors import AppError
+from app.services.site_rate_limit import PostgresAdvisoryRequestGate
 from app.workers.processor import JobProcessor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -22,10 +25,16 @@ def build_nextfind_adapter() -> NextFindAdapter:
     credentials = settings.nextfind_credentials()
     if credentials is None:
         raise AppError("NEXTFIND_NOT_CONFIGURED", "NextFind 尚未配置运行时凭据")
+    validated_base_url = validate_external_url(
+        settings.nextfind_base_url, settings.allowed_external_hosts
+    )
+    nextfind_host = urlparse(validated_base_url).hostname
+    if nextfind_host is None:
+        raise AppError("INVALID_EXTERNAL_URL", "NextFind 地址格式无效", status_code=400)
     username, password = credentials
     return NextFindAdapter(
-        base_url=settings.nextfind_base_url,
-        allowed_hosts=settings.allowed_external_hosts,
+        base_url=validated_base_url,
+        allowed_hosts=(nextfind_host.lower(),),
         username=username,
         password=password,
         max_response_bytes=settings.external_max_response_bytes,
@@ -68,6 +77,11 @@ def build_avistaz_adapter() -> AvistaZAdapter:
     if "avistaz.to" not in settings.allowed_external_hosts:
         raise AppError("EXTERNAL_HOST_NOT_ALLOWED", "AvistaZ 域名不在外部访问白名单")
     username, password, pid = credentials
+    request_gate = PostgresAdvisoryRequestGate(
+        SessionFactory,
+        "avistaz",
+        cooldown_seconds=settings.avistaz_min_interval_seconds,
+    )
     return AvistaZAdapter(
         username=username,
         password=password,
@@ -78,6 +92,7 @@ def build_avistaz_adapter() -> AvistaZAdapter:
         read_timeout=settings.external_read_timeout_seconds,
         max_response_bytes=settings.external_max_response_bytes,
         min_interval_seconds=settings.avistaz_min_interval_seconds,
+        request_gate=request_gate.limit,
     )
 
 
@@ -90,6 +105,8 @@ async def run() -> None:
         build_nextfind_adapter,
         build_tmdb_provider,
         build_avistaz_adapter,
+        lease_seconds=settings.job_lease_seconds,
+        lease_renew_interval_seconds=settings.job_lease_renew_interval_seconds,
     )
     logger.info("Worker started: %s", worker_id)
     while True:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.dependencies import DbSession
+from app.api.dependencies import DbSession, OperatorPrincipal, ViewerPrincipal
 from app.core.config import get_settings
 from app.errors import AppError
 from app.models.entities import MediaItem, TorrentSearchRun
@@ -41,7 +41,9 @@ def _run_response(run: TorrentSearchRun) -> TorrentSearchRunResponse:
 
 
 @router.post("/media/{media_id}/resolve", response_model=ResolveAccepted, status_code=202)
-async def resolve_media(media_id: str, session: DbSession) -> ResolveAccepted:
+async def resolve_media(
+    media_id: str, session: DbSession, _principal: OperatorPrincipal
+) -> ResolveAccepted:
     settings = get_settings()
     if not settings.enable_tmdb_live:
         raise AppError("TMDB_LIVE_DISABLED", "TMDB 真实只读连接默认关闭", status_code=409)
@@ -64,7 +66,7 @@ async def resolve_media(media_id: str, session: DbSession) -> ResolveAccepted:
     "/media/{media_id}/metadata-candidates", response_model=list[MetadataMatchResponse]
 )
 async def get_metadata_candidates(
-    media_id: str, session: DbSession
+    media_id: str, session: DbSession, _principal: ViewerPrincipal
 ) -> list[MetadataMatchResponse]:
     await _media_or_404(session, media_id)
     matches = await list_metadata_matches(session, media_id)
@@ -93,9 +95,10 @@ async def create_identity_confirmation(
     media_id: str,
     request: IdentityConfirmationRequest,
     session: DbSession,
+    principal: OperatorPrincipal,
 ) -> IdentityReviewResponse:
     media = await _media_or_404(session, media_id)
-    review = await confirm_identity(session, media, request)
+    review = await confirm_identity(session, media, request, actor=principal.username)
     await session.commit()
     return IdentityReviewResponse(
         id=review.id,
@@ -117,6 +120,7 @@ async def create_torrent_search(
     media_id: str,
     request: TorrentSearchCreateRequest,
     session: DbSession,
+    _principal: OperatorPrincipal,
 ) -> TorrentSearchAccepted:
     settings = get_settings()
     if not settings.enable_avistaz_live_search:
@@ -141,7 +145,7 @@ async def create_torrent_search(
     "/media/{media_id}/torrent-searches", response_model=list[TorrentSearchRunResponse]
 )
 async def get_media_torrent_searches(
-    media_id: str, session: DbSession
+    media_id: str, session: DbSession, _principal: ViewerPrincipal
 ) -> list[TorrentSearchRunResponse]:
     await _media_or_404(session, media_id)
     runs = await list_torrent_search_runs(session, media_id)
@@ -149,7 +153,9 @@ async def get_media_torrent_searches(
 
 
 @router.get("/torrent-searches/{search_id}", response_model=TorrentSearchRunResponse)
-async def get_torrent_search(search_id: str, session: DbSession) -> TorrentSearchRunResponse:
+async def get_torrent_search(
+    search_id: str, session: DbSession, _principal: ViewerPrincipal
+) -> TorrentSearchRunResponse:
     run = await session.get(TorrentSearchRun, search_id)
     if run is None:
         raise AppError("SEARCH_RUN_NOT_FOUND", "PT 搜索任务不存在", status_code=404)
@@ -161,7 +167,7 @@ async def get_torrent_search(search_id: str, session: DbSession) -> TorrentSearc
     response_model=list[TorrentCandidateResponse],
 )
 async def get_torrent_candidates(
-    search_id: str, session: DbSession
+    search_id: str, session: DbSession, _principal: ViewerPrincipal
 ) -> list[TorrentCandidateResponse]:
     run = await session.get(TorrentSearchRun, search_id)
     if run is None:
@@ -179,4 +185,3 @@ async def get_torrent_candidates(
         )
         for candidate in candidates
     ]
-

@@ -68,12 +68,13 @@ class ApprovalCandidateSnapshot(BaseModel):
 
 
 class ApprovalCreateRequest(BaseModel):
-    operator: str = Field(min_length=1, max_length=120)
+    model_config = ConfigDict(extra="ignore")
+
     expires_in_minutes: int | None = Field(default=None, ge=5, le=10_080)
 
 
 class ApprovalDecisionRequest(BaseModel):
-    operator: str = Field(min_length=1, max_length=120)
+    model_config = ConfigDict(extra="ignore")
 
 
 class ApprovalApproveRequest(ApprovalDecisionRequest):

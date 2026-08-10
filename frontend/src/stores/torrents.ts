@@ -2,7 +2,12 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 import { mediaApi, torrentApi } from '../api/client'
-import type { MediaItem, TorrentCandidateResult, TorrentSearchRun } from '../types'
+import type {
+  MediaItem,
+  TorrentCandidateResult,
+  TorrentSearchPreferences,
+  TorrentSearchRun,
+} from '../types'
 
 export const useTorrentStore = defineStore('torrents', () => {
   const media = ref<MediaItem | null>(null)
@@ -10,13 +15,24 @@ export const useTorrentStore = defineStore('torrents', () => {
   const selectedRun = ref<TorrentSearchRun | null>(null)
   const candidates = ref<TorrentCandidateResult[]>([])
   const loading = ref(false)
+  const selecting = ref(false)
   const working = ref(false)
   const error = ref<string | null>(null)
   const notice = ref<string | null>(null)
   let generation = 0
+  let selectionGeneration = 0
+  let selectionController: AbortController | null = null
+
+  function cancelSelection(): void {
+    selectionGeneration += 1
+    selectionController?.abort()
+    selectionController = null
+    selecting.value = false
+  }
 
   async function load(mediaId: string): Promise<void> {
     const current = ++generation
+    cancelSelection()
     media.value = null
     runs.value = []
     selectedRun.value = null
@@ -43,33 +59,43 @@ export const useTorrentStore = defineStore('torrents', () => {
   }
 
   async function selectRun(searchId: string): Promise<void> {
+    const current = ++selectionGeneration
+    selectionController?.abort()
+    const controller = new AbortController()
+    selectionController = controller
     candidates.value = []
     error.value = null
+    selecting.value = true
     try {
       const [run, results] = await Promise.all([
-        torrentApi.get(searchId),
-        torrentApi.candidates(searchId),
+        torrentApi.get(searchId, controller.signal),
+        torrentApi.candidates(searchId, controller.signal),
       ])
+      if (current !== selectionGeneration) return
       selectedRun.value = run
       candidates.value = results
     } catch (caught) {
-      error.value = caught instanceof Error ? caught.message : '加载搜索结果失败'
+      if (current === selectionGeneration && !(caught instanceof Error && caught.name === 'AbortError')) {
+        error.value = caught instanceof Error ? caught.message : '加载搜索结果失败'
+      }
+    } finally {
+      if (current === selectionGeneration) {
+        selecting.value = false
+        selectionController = null
+      }
     }
   }
 
-  async function create(mediaId: string): Promise<void> {
+  async function create(mediaId: string, preferences: TorrentSearchPreferences): Promise<void> {
     working.value = true
     error.value = null
     notice.value = null
     try {
-      const result = await torrentApi.create(mediaId, {
-        preferred_resolutions: ['2160p', '1080p'],
-        preferred_sources: ['BluRay', 'WEB-DL'],
-        preferred_audio: [],
-        preferred_subtitles: ['Chinese', '中文'],
-      })
+      const result = await torrentApi.create(mediaId, preferences)
       await load(mediaId)
-      notice.value = result.deduplicated ? '已有只读搜索正在运行' : 'AvistaZ 只读搜索已创建'
+      notice.value = result.deduplicated
+        ? '已有只读搜索正在运行；可点击“刷新结果”查看 Worker 的最新结果'
+        : 'AvistaZ 只读搜索已创建；任务异步执行，可点击“刷新结果”查看最新结果'
     } catch (caught) {
       error.value = caught instanceof Error ? caught.message : '创建 PT 搜索失败'
     } finally {
@@ -83,11 +109,13 @@ export const useTorrentStore = defineStore('torrents', () => {
     selectedRun,
     candidates,
     loading,
+    selecting,
     working,
     error,
     notice,
     load,
     selectRun,
+    cancelSelection,
     create,
   }
 })

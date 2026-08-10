@@ -4,8 +4,7 @@ import { computed } from 'vue'
 import { statusLabel } from '../utils/format'
 
 const props = defineProps<{ status: string }>()
-const stateClass = computed(() => `state-${props.status.toLowerCase().replace('_', '-')}`)
+const stateClass = computed(() => `state-${props.status.toLowerCase().replaceAll('_', '-')}`)
 </script>
 
 <template><span class="status-pill" :class="stateClass">{{ statusLabel(status) }}</span></template>
-

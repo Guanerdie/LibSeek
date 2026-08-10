@@ -133,3 +133,28 @@ def test_candidate_score_emits_risk_warnings() -> None:
     ):
         assert warning in scored.warnings
 
+
+def test_season_pack_is_not_reported_as_exact_episode_coverage() -> None:
+    season_pack = TorrentCandidate(
+        site_id="avistaz",
+        torrent_id="season-pack",
+        release_title="Example Show 2026 S01 1080p WEB-DL",
+        details_ref="avistaz:details:season-pack",
+        media_type=MediaType.TV,
+        tmdb_id=123,
+        year=2026,
+        season=1,
+        episodes=None,
+        collection_type="season",
+        seeders=1,
+    )
+    scored = score_torrent_candidate(
+        metadata(),
+        season_pack,
+        missing_episodes=["S01E03", "S01E04"],
+        preferences=MatchPreferences(),
+    )
+
+    assert "EPISODE_COVERAGE_EXACT" not in scored.match_reasons
+    assert "SEASON_PACK_COVERS_TARGET_SEASON" in scored.match_reasons
+    assert "EPISODE_COVERAGE_UNKNOWN" in scored.warnings

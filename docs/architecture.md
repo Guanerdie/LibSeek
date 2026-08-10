@@ -1,10 +1,11 @@
 # 架构与状态流
 
-第三阶段保留 NextFind、TMDB 和 AvistaZ 的只读发现与候选链路，并在人工审阅之后增加不可变候选审批、qBittorrent 只读预检和非执行下载计划。TMDB/AvistaZ 的外部任务仍由独立 Worker 执行；qBittorrent Secret 只挂载给 API，预检由 API 在一次人工请求中执行，Worker 和前端都拿不到 qB 凭据。
+第三阶段保留 NextFind、TMDB 和 AvistaZ 的只读发现与候选链路，并在人工审阅之后增加不可变候选审批、qBittorrent 只读预检和非执行下载计划。浏览器先通过 API 的本地单账号认证与 RBAC；TMDB/AvistaZ 的外部任务仍由独立 Worker 执行。本地认证与 qBittorrent Secret 只挂载给 API，Worker 和前端都拿不到这些凭据。
 
 ```mermaid
 flowchart LR
-  UI[Vue 管理端] -->|创建任务、人工确认与审批| API[FastAPI]
+  UI[Vue 管理端] -->|签名 Cookie + CSRF| Auth[本地认证与 RBAC]
+  Auth -->|授权后的查询与操作| API[FastAPI]
   API -->|队列与查询| DB[(PostgreSQL 16)]
   Worker[独立 Worker] -->|FOR UPDATE SKIP LOCKED| DB
   Worker -->|HTTPS 只读发现| NF[NextFind]
@@ -17,6 +18,21 @@ flowchart LR
   API -->|固定快照、预检与计划| DB
   Plan[不可执行 DownloadPlan] -.不获取 torrent / 不提交任务.-> QB
 ```
+
+## 认证与授权流
+
+```text
+GET /api/auth/csrf
+  -> bootstrap CSRF Cookie + token
+POST /api/auth/login (Cookie + X-CSRF-Token + 本地凭据)
+  -> HttpOnly 签名会话 Cookie + 会话绑定 CSRF Cookie
+GET 受保护资源
+  -> 验证会话签名、有效期与 viewer 以上权限
+POST 状态变更
+  -> 额外验证 CSRF Cookie/Header + operator 或 admin 权限
+```
+
+认证材料不完整时受保护链路 fail closed。角色按 `viewer < operator < admin` 继承：读取用户数据至少需要 viewer；一般工作流写入需要 operator；审批批准与撤销需要 admin。服务端把会话用户名传入工作流和审批服务作为 actor，不信任请求体中的操作者字段。会话无状态且由 HMAC 签名，轮换 `auth_session_signing_key` 会使全部现有会话失效。
 
 ## 身份工作流
 
@@ -60,7 +76,7 @@ stateDiagram-v2
 
 审批只绑定一个 `torrent_candidates` 记录在申请时的完整快照。快照包含影视与候选标识、发布名、大小、info hash、季集、规格、字幕、做种、促销、H&R、匹配分数、理由、警告和有效期；不重新读取后续变化的候选。规范 JSON 使用 SHA-256 生成 `snapshot_hash`，读取和每次状态动作前都重新校验，且 `media_item_id`、`torrent_candidate_id`、申请时间和有效期必须与固定列一致。ORM 事件与 PostgreSQL trigger 禁止修改或删除固定审批字段；数据库的部分唯一索引禁止同一候选同时存在第二个 `PENDING` 或 `APPROVED` 审批。
 
-`approval_events` 追加记录申请、预检、批准、下载计划创建、拒绝、撤销、过期和内部消费等事件，包括前后状态、操作者、原因、快照哈希与脱敏详情。事件外键为 `RESTRICT`，ORM 与 PostgreSQL trigger 禁止 UPDATE/DELETE。`CONSUMED` 只有内部服务保护函数，本阶段没有对应 API，也没有执行器；该函数自行使用 `SELECT ... FOR UPDATE` 串行化同一审批的消费。
+`approval_events` 追加记录申请、预检、批准、下载计划创建、执行意图、执行请求、拒绝、撤销、过期和内部消费等事件，包括前后状态、操作者、原因、快照哈希与脱敏详情。事件外键为 `RESTRICT`，ORM 与 PostgreSQL trigger 禁止 UPDATE/DELETE。`CONSUMED` 仍只有内部服务保护函数，没有对应公开 API；阶段 4 的控制面创建队列记录时不会提前消费审批。
 
 批准前必须满足全部条件：
 
@@ -71,6 +87,23 @@ stateDiagram-v2
 - 下载计划目标分类已配置。
 
 批准与 `DownloadPlan` 在同一数据库事务中创建，但不会发起网络下载。一个审批最多对应一个计划；计划保存 `approval_snapshot_hash`、`preflight_policy_fingerprint` 和规范化 `plan_hash`，每次读取或内部消费前重新校验，ORM 与 PostgreSQL trigger 禁止计划 UPDATE/DELETE。
+
+## 下载执行控制面
+
+阶段 4 增加纯数据库控制面，默认由 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 关闭。创建执行意图和提交执行请求只允许 `admin`，所有写请求继续要求会话 CSRF；查询允许 `viewer`。控制面没有 AvistaZ 取种、qBittorrent 请求或文件操作代码路径。
+
+```text
+POST /api/approval-requests/{id}/execution-intents
+  -> 返回一次 nonce；数据库只保存 SHA-256
+POST /api/approval-requests/{id}/execute + Idempotency-Key
+  -> 只创建 PENDING download_execution
+POST /api/download-executions/{id}/reconcile
+  -> OUTCOME_UNKNOWN/RECONCILIATION_REQUIRED 仅进入 RECONCILIATION_PENDING
+```
+
+执行意图绑定审批快照哈希、不可变下载计划哈希、qB 目标指纹、启动模式和有效期。同一审批最多一个 `ACTIVE` 意图；nonce 只在创建响应出现一次，审批事件、执行事件、后续 GET 和数据库都不保存原文。执行请求以全局唯一的 `Idempotency-Key` SHA-256、审批唯一约束和 intent 唯一约束共同防重；相同键与相同请求返回原记录，不同请求复用同一键返回冲突。审批行使用 `SELECT ... FOR UPDATE` 串行化创建。
+
+`download_executions` 初始状态固定为 `PENDING`，审批继续保持 `APPROVED`。未来执行器必须重新锁定审批与执行记录并确认审批仍有效，且在任何 qB add 之前先把实际 info hash 和 `SUBMITTING` 状态提交到数据库。撤销或过期审批无法越过该闸门。`OUTCOME_UNKNOWN`、`RECONCILIATION_REQUIRED` 与 `RECONCILIATION_PENDING` 均禁止自动重试；本阶段 reconcile 只记录对账请求，不访问 qB。表中已预留 `locked_at`、`locked_by`、`lease_token`、`attempts` 与 `next_retry_at` 供后续 executor 实现租约和 fencing。
 
 ## qBittorrent 只读边界
 
@@ -115,6 +148,9 @@ API 对前端只暴露 `/api/downloaders/qbittorrent/status` 和 `/api/downloade
 - `approval_requests`：固定候选快照、SHA-256、有效期、状态和最近一次预检。
 - `approval_events`：审批状态变化和预检的追加式脱敏审计记录。
 - `download_plans`：每个已批准审批至多一个非执行计划，只含内部种子引用与保存位置引用。
+- `execution_intents`：一次性 nonce 摘要及审批、计划、qB 目标和启动模式绑定。
+- `download_executions`：幂等的纯数据库执行请求、租约预留字段、实际 info hash 和对账状态。
+- `download_execution_events`：不可变的执行状态与对账审计事件。
 - `jobs`：发现、身份解析、PT 搜索共用的可恢复数据库队列。
 - `audit_events`：关键状态变更与人工操作的脱敏审计记录。
 

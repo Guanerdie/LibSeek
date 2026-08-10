@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.models.enums import AuthRole
 
 
 class Settings(BaseSettings):
@@ -19,6 +22,16 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_prefix: str = "/api"
     database_url: str = "postgresql+psycopg://unin:unin@postgres:5432/unin"
+    auth_local_username: SecretStr | None = None
+    auth_local_password: SecretStr | None = None
+    auth_session_signing_key: SecretStr | None = None
+    auth_local_username_file: Path | None = None
+    auth_local_password_file: Path | None = None
+    auth_session_signing_key_file: Path | None = None
+    auth_local_role: AuthRole = AuthRole.ADMIN
+    auth_session_ttl_seconds: int = Field(default=8 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+    auth_bootstrap_csrf_ttl_seconds: int = Field(default=10 * 60, ge=60, le=60 * 60)
+    auth_cookie_secure: bool = False
     allowed_external_hosts: tuple[str, ...] = (
         "nextfind.example",
         "api.themoviedb.org",
@@ -64,7 +77,11 @@ class Settings(BaseSettings):
     qb_save_path_ref: str = "qb-default-save-path"
     qb_allowed_save_paths: tuple[str, ...] = ()
     qb_plan_tags: tuple[str, ...] = ()
+    qb_target_instance_ref: str = "qb-primary"
     avistaz_forbidden_qb_versions: tuple[str, ...] = ()
+    enable_download_execution_control_plane: bool = False
+    execution_intent_default_ttl_seconds: int = Field(default=300, ge=30, le=3600)
+    execution_intent_max_ttl_seconds: int = Field(default=900, ge=30, le=3600)
     approval_default_ttl_minutes: int = 60
     approval_max_ttl_minutes: int = 7 * 24 * 60
     approval_preflight_max_age_seconds: int = 300
@@ -73,9 +90,25 @@ class Settings(BaseSettings):
     preferred_audio: tuple[str, ...] = ()
     preferred_subtitles: tuple[str, ...] = ("Chinese", "中文")
     max_candidate_size_bytes: int | None = None
-    worker_poll_seconds: float = 2.0
-    worker_heartbeat_stale_seconds: int = 30
-    job_max_attempts: int = 3
+    worker_poll_seconds: float = Field(default=2.0, ge=0.1, le=60)
+    worker_heartbeat_stale_seconds: int = Field(default=30, ge=5, le=3600)
+    job_max_attempts: int = Field(default=3, ge=1, le=20)
+    job_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    job_lease_renew_interval_seconds: float = Field(default=60, ge=1, le=1800)
+
+    @model_validator(mode="after")
+    def validate_job_lease(self) -> Self:
+        if self.job_lease_renew_interval_seconds >= self.job_lease_seconds:
+            raise ValueError("job lease renewal interval must be shorter than the lease")
+        return self
+
+    @model_validator(mode="after")
+    def validate_execution_intent_ttl(self) -> Self:
+        if self.execution_intent_default_ttl_seconds > self.execution_intent_max_ttl_seconds:
+            raise ValueError("execution intent default TTL cannot exceed the maximum TTL")
+        if not self.qb_target_instance_ref.strip() or len(self.qb_target_instance_ref) > 180:
+            raise ValueError("qb target instance ref must be between 1 and 180 characters")
+        return self
 
     @field_validator(
         "allowed_external_hosts",
@@ -118,6 +151,22 @@ class Settings(BaseSettings):
             return None
         return username, password
 
+    def auth_material(self) -> tuple[str, str, str, AuthRole] | None:
+        username = self._read_secret(self.auth_local_username, self.auth_local_username_file)
+        password = self._read_secret(self.auth_local_password, self.auth_local_password_file)
+        signing_key = self._read_secret(
+            self.auth_session_signing_key, self.auth_session_signing_key_file
+        )
+        if (
+            not username
+            or len(username) > 120
+            or not password
+            or not signing_key
+            or len(signing_key) < 32
+        ):
+            return None
+        return username, password, signing_key, self.auth_local_role
+
     def tmdb_token_value(self) -> str | None:
         return self._read_secret(self.tmdb_access_token, self.tmdb_access_token_file)
 
@@ -137,10 +186,20 @@ class Settings(BaseSettings):
             return None
         return base_url, username, password
 
+    def qb_base_url_value(self) -> str | None:
+        return self._read_secret(self.qb_base_url, self.qb_base_url_file)
+
     @property
     def nextfind_configured(self) -> bool:
         try:
             return self.nextfind_credentials() is not None
+        except OSError:
+            return False
+
+    @property
+    def auth_configured(self) -> bool:
+        try:
+            return self.auth_material() is not None
         except OSError:
             return False
 

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.base import MediaSourceAdapter, MetadataProvider, PtSiteAdapter
 from app.core.config import get_settings
+from app.core.episodes import derive_missing_episode_codes
 from app.core.security import sanitize_details
 from app.core.time import utc_now
 from app.errors import AppError
@@ -44,12 +49,21 @@ class JobProcessor:
         adapter_factory: Callable[[], MediaSourceAdapter],
         metadata_provider_factory: Callable[[], MetadataProvider] | None = None,
         pt_site_factory: Callable[[], PtSiteAdapter] | None = None,
+        *,
+        lease_seconds: int = 300,
+        lease_renew_interval_seconds: float = 60,
     ) -> None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if not 0 < lease_renew_interval_seconds < lease_seconds:
+            raise ValueError("lease renewal interval must be shorter than the lease")
         self.session_factory = session_factory
         self.worker_id = worker_id
         self.adapter_factory = adapter_factory
         self.metadata_provider_factory = metadata_provider_factory
         self.pt_site_factory = pt_site_factory
+        self.lease_seconds = lease_seconds
+        self.lease_renew_interval_seconds = lease_renew_interval_seconds
 
     async def heartbeat(self) -> None:
         async with self.session_factory() as session:
@@ -62,7 +76,7 @@ class JobProcessor:
 
     async def claim_job(self) -> Job | None:
         now = utc_now()
-        stale_before = now - timedelta(minutes=5)
+        stale_before = now - timedelta(seconds=self.lease_seconds)
         claimable = or_(
             Job.status == JobStatus.PENDING,
             and_(
@@ -90,6 +104,7 @@ class JobProcessor:
             job.attempts += 1
             job.locked_at = now
             job.locked_by = self.worker_id
+            job.lease_token = str(uuid.uuid4())
             job.next_retry_at = None
             run = await session.get(DiscoveryRun, job.run_id) if job.run_id else None
             if run is not None:
@@ -126,17 +141,64 @@ class JobProcessor:
         job = await self.claim_job()
         if job is None:
             return False
-        if job.job_type == "DISCOVER_NEXTFIND" and job.run_id:
-            await self._run_discovery(job)
+        stop_renewal = asyncio.Event()
+        renewal = asyncio.create_task(
+            self._renew_lease_loop(job.id, job.lease_token, stop_renewal)
+        )
+        try:
+            if job.job_type == "DISCOVER_NEXTFIND" and job.run_id:
+                await self._run_discovery(job)
+                return True
+            if job.job_type.startswith("RESOLVE_METADATA:"):
+                await self._run_metadata_resolution(job)
+                return True
+            if job.job_type.startswith("TORRENT_SEARCH:"):
+                await self._run_torrent_search(job)
+                return True
+            await self._fail(
+                job.id,
+                AppError("UNKNOWN_JOB_TYPE", "无法识别的任务类型"),
+                lease_token=job.lease_token,
+            )
             return True
-        if job.job_type.startswith("RESOLVE_METADATA:"):
-            await self._run_metadata_resolution(job)
+        finally:
+            stop_renewal.set()
+            renewal.cancel()
+            with suppress(asyncio.CancelledError):
+                await renewal
+
+    async def _renew_lease_loop(
+        self, job_id: str, lease_token: str | None, stop: asyncio.Event
+    ) -> None:
+        if lease_token is None:
+            return
+        while True:
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=self.lease_renew_interval_seconds
+                )
+                return
+            except TimeoutError:
+                if not await self.renew_lease(job_id, lease_token):
+                    return
+
+    async def renew_lease(self, job_id: str, lease_token: str) -> bool:
+        async with self.session_factory() as session:
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None or not self._owns_lease(job, lease_token):
+                return False
+            job.locked_at = utc_now()
+            await session.commit()
             return True
-        if job.job_type.startswith("TORRENT_SEARCH:"):
-            await self._run_torrent_search(job)
-            return True
-        await self._fail(job.id, AppError("UNKNOWN_JOB_TYPE", "无法识别的任务类型"))
-        return True
+
+    def _owns_lease(self, job: Job | None, lease_token: str | None) -> bool:
+        return bool(
+            job is not None
+            and lease_token
+            and job.status == JobStatus.RUNNING
+            and job.locked_by == self.worker_id
+            and job.lease_token == lease_token
+        )
 
     async def _run_discovery(self, job: Job) -> None:
         adapter: MediaSourceAdapter | None = None
@@ -148,9 +210,15 @@ class JobProcessor:
                 adapter, result.items, result.warnings
             )
             if job.run_id is not None:
-                await self._complete_discovery(job.id, job.run_id, items, warnings)
+                await self._complete_discovery(
+                    job.id,
+                    job.run_id,
+                    items,
+                    warnings,
+                    lease_token=job.lease_token,
+                )
         except AppError as exc:
-            await self._fail(job.id, exc)
+            await self._fail(job.id, exc, lease_token=job.lease_token)
         except Exception as exc:  # defensive boundary: never expose exception text
             await self._fail(
                 job.id,
@@ -159,6 +227,7 @@ class JobProcessor:
                     "Worker 处理任务时发生内部错误",
                     retryable=False,
                 ),
+                lease_token=job.lease_token,
             )
             del exc
         finally:
@@ -201,25 +270,33 @@ class JobProcessor:
                         raise
             else:
                 candidates = await provider.search(media.media_type, media.title, media.year)
-            await self._complete_metadata_resolution(job.id, media.id, candidates)
+            await self._complete_metadata_resolution(
+                job.id, media.id, candidates, lease_token=job.lease_token
+            )
         except AppError as exc:
-            await self._fail(job.id, exc)
+            await self._fail(job.id, exc, lease_token=job.lease_token)
         except Exception as exc:
             await self._fail(
                 job.id,
                 AppError("INTERNAL_WORKER_ERROR", "Worker 解析影视身份时发生内部错误"),
+                lease_token=job.lease_token,
             )
             del exc
         finally:
             await self._close_adapter(provider)
 
     async def _complete_metadata_resolution(
-        self, job_id: str, media_id: str, candidates: list[MetadataRecord]
+        self,
+        job_id: str,
+        media_id: str,
+        candidates: list[MetadataRecord],
+        *,
+        lease_token: str | None,
     ) -> None:
         async with self.session_factory() as session:
             job = await session.get(Job, job_id, with_for_update=True)
             media = await session.get(MediaItem, media_id, with_for_update=True)
-            if job is None or media is None:
+            if job is None or not self._owns_lease(job, lease_token) or media is None:
                 return
             unique: dict[int, MetadataRecord] = {
                 candidate.tmdb_id: candidate for candidate in candidates
@@ -237,6 +314,24 @@ class JobProcessor:
                 key=lambda item: item[1].score,
                 reverse=True,
             )[:5]
+            exact_tv_candidate = next(
+                (
+                    candidate
+                    for candidate, match in ranked
+                    if media.tmdb_id is not None
+                    and candidate.tmdb_id == media.tmdb_id
+                    and media.media_type == MediaType.TV
+                    and candidate.media_type == MediaType.TV
+                    and not match.conflicts
+                ),
+                None,
+            )
+            if exact_tv_candidate is not None:
+                media.missing_episodes = derive_missing_episode_codes(
+                    exact_tv_candidate.episode_matrix,
+                    media.local_episode_matrix,
+                    media.missing_episodes,
+                )
             for rank, (candidate, match) in enumerate(ranked, start=1):
                 session.add(
                     MetadataMatch(
@@ -252,6 +347,7 @@ class JobProcessor:
             job.status = JobStatus.SUCCEEDED
             job.locked_at = None
             job.locked_by = None
+            job.lease_token = None
             job.error_code = None
             job.error_message = None
             media.workflow_status = WorkflowStatus.IDENTITY_REVIEW
@@ -335,14 +431,20 @@ class JobProcessor:
                 )
                 seen_titles.add(normalized_title)
             await self._complete_torrent_search(
-                job.id, search_run_id, media_id, scored, strategy_log
+                job.id,
+                search_run_id,
+                media_id,
+                scored,
+                strategy_log,
+                lease_token=job.lease_token,
             )
         except AppError as exc:
-            await self._fail(job.id, exc)
+            await self._fail(job.id, exc, lease_token=job.lease_token)
         except Exception as exc:
             await self._fail(
                 job.id,
                 AppError("INTERNAL_WORKER_ERROR", "Worker 搜索 PT 候选时发生内部错误"),
+                lease_token=job.lease_token,
             )
             del exc
         finally:
@@ -411,12 +513,19 @@ class JobProcessor:
         media_id: str,
         candidates: list[TorrentCandidate],
         strategy_log: list[dict[str, object]],
+        *,
+        lease_token: str | None,
     ) -> None:
         async with self.session_factory() as session:
             job = await session.get(Job, job_id, with_for_update=True)
             run = await session.get(TorrentSearchRun, search_run_id, with_for_update=True)
             media = await session.get(MediaItem, media_id, with_for_update=True)
-            if job is None or run is None or media is None:
+            if (
+                job is None
+                or not self._owns_lease(job, lease_token)
+                or run is None
+                or media is None
+            ):
                 return
             for candidate in candidates:
                 session.add(
@@ -444,6 +553,7 @@ class JobProcessor:
             job.status = JobStatus.SUCCEEDED
             job.locked_at = None
             job.locked_by = None
+            job.lease_token = None
             job.error_code = None
             job.error_message = None
             session.add(
@@ -488,6 +598,7 @@ class JobProcessor:
                     value is None
                     for value in (
                         item.local_episodes,
+                        item.local_episode_matrix,
                         item.total_episodes,
                         item.aired_episodes,
                         item.missing_episodes,
@@ -514,10 +625,20 @@ class JobProcessor:
                 )
                 enriched.append(item)
                 continue
+            except (ValidationError, ValueError):
+                result_warnings.append(
+                    DiscoveryWarning(
+                        error_code="LIBRARY_DETAILS_ISOLATED",
+                        message="单个媒体的本地详情无效，已保留未知字段",
+                    )
+                )
+                enriched.append(item)
+                continue
             updates = {
                 field: value
                 for field, value in {
                     "local_episodes": details.local_episodes,
+                    "local_episode_matrix": details.local_episode_matrix,
                     "total_episodes": details.total_episodes,
                     "aired_episodes": details.aired_episodes,
                     "missing_episodes": details.missing_episodes,
@@ -533,6 +654,8 @@ class JobProcessor:
         run_id: str,
         items: list[MediaItemData],
         warnings: list[DiscoveryWarning],
+        *,
+        lease_token: str | None,
     ) -> None:
         unique_items: dict[tuple[str, str, int | str], MediaItemData] = {}
         for item in items:
@@ -542,7 +665,7 @@ class JobProcessor:
         async with self.session_factory() as session:
             job = await session.get(Job, job_id, with_for_update=True)
             run = await session.get(DiscoveryRun, run_id, with_for_update=True)
-            if job is None or run is None:
+            if job is None or not self._owns_lease(job, lease_token) or run is None:
                 return
             created_count = 0
             updated_count = 0
@@ -573,6 +696,7 @@ class JobProcessor:
             job.status = JobStatus.SUCCEEDED
             job.locked_at = None
             job.locked_by = None
+            job.lease_token = None
             job.error_code = None
             job.error_message = None
             run.status = JobStatus.SUCCEEDED
@@ -597,10 +721,12 @@ class JobProcessor:
             )
             await session.commit()
 
-    async def _fail(self, job_id: str, error: AppError) -> None:
+    async def _fail(
+        self, job_id: str, error: AppError, *, lease_token: str | None
+    ) -> None:
         async with self.session_factory() as session:
             job = await session.get(Job, job_id, with_for_update=True)
-            if job is None:
+            if job is None or not self._owns_lease(job, lease_token):
                 return
             retry = error.retryable and job.attempts < job.max_attempts
             status = JobStatus.RETRY_WAIT if retry else JobStatus.FAILED
@@ -609,6 +735,7 @@ class JobProcessor:
             job.error_message = error.message
             job.locked_at = None
             job.locked_by = None
+            job.lease_token = None
             job.next_retry_at = utc_now() + timedelta(seconds=2**job.attempts) if retry else None
             run = await session.get(DiscoveryRun, job.run_id) if job.run_id else None
             if run is not None:

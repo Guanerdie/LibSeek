@@ -8,8 +8,11 @@ import pytest
 import respx
 
 from app.adapters.media_sources.nextfind import NextFindAdapter
+from app.core.config import Settings
 from app.errors import AppError
 from app.models.enums import IdentityConfidence, MediaType
+from app.schemas.adapters import LibraryDetails
+from app.workers import main as worker_main
 
 BASE_URL = "https://nextfind.example"
 
@@ -84,7 +87,9 @@ async def test_ndjson_chunks_blank_and_bad_lines_are_isolated(adapter: NextFindA
     )
     chunks = [
         b'{"data":{"id":123,"tmdb_id":999,"type":"tv","title":"Example",',
-        b'"year":"2026","local_episodes":2,"total_episodes":8,',
+        b'"year":"2026","local_episodes":2,"existing_episodes":',
+        b'["S01E01","S01E03",{"season_number":2,"episode_number":1}],',
+        b'"total_episodes":8,',
         b'"aired_episodes":6,"missing_episodes":["S01E03"]}}\n\n{broken',
         b' json}\n{"data":{"type":"movie","title":"No ID","year":2025}}',
     ]
@@ -102,6 +107,7 @@ async def test_ndjson_chunks_blank_and_bad_lines_are_isolated(adapter: NextFindA
     first, second = result.items
     assert first.tmdb_id == 123
     assert first.media_type == MediaType.TV
+    assert first.local_episode_matrix == {1: [1, 3], 2: [1]}
     assert first.missing_episodes == ["S01E03"]
     assert first.identity_confidence == IdentityConfidence.HIGH
     assert second.tmdb_id is None
@@ -158,6 +164,7 @@ async def test_library_details_are_validated(adapter: NextFindAdapter) -> None:
             json={
                 "data": {
                     "local_episodes": 4,
+                    "local_episode_matrix": {"1": [1, 2, 4], "2": [1]},
                     "total_episodes": 10,
                     "aired_episodes": 8,
                     "missing_episodes": ["S01E05", "S01E06"],
@@ -167,8 +174,23 @@ async def test_library_details_are_validated(adapter: NextFindAdapter) -> None:
     )
     details = await adapter.get_library_details(MediaType.TV, 123)
     assert details.tmdb_id == 123
+    assert details.local_episode_matrix == {1: [1, 2, 4], 2: [1]}
     assert details.missing_episodes == ["S01E05", "S01E06"]
     await adapter.aclose()
+
+
+def test_library_details_schema_normalizes_matrix_and_exact_missing_codes() -> None:
+    details = LibraryDetails.model_validate(
+        {
+            "tmdb_id": 123,
+            "media_type": "tv",
+            "local_episode_matrix": {"S01": ["E02", 1, 2]},
+            "missing_episodes": ["s01e04", "S01E04"],
+        }
+    )
+
+    assert details.local_episode_matrix == {1: [1, 2]}
+    assert details.missing_episodes == ["S01E04"]
 
 
 @pytest.mark.asyncio
@@ -207,6 +229,62 @@ async def test_redirect_target_is_revalidated(adapter: NextFindAdapter) -> None:
         await adapter.authenticate()
     assert caught.value.error_code == "EXTERNAL_HOST_NOT_ALLOWED"
     await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    "redirect_url",
+    (
+        "https://api.themoviedb.org/redirected-login",
+        "https://nextfind.example:444/redirected-login",
+    ),
+)
+async def test_login_body_is_not_forwarded_across_origins(redirect_url: str) -> None:
+    broad_adapter = NextFindAdapter(
+        base_url=BASE_URL,
+        allowed_hosts=("nextfind.example", "api.themoviedb.org"),
+        username="reader",
+        password="super-secret",
+    )
+    respx.post(f"{BASE_URL}/api/admin/login").mock(
+        return_value=httpx.Response(
+            307,
+            headers={"location": redirect_url},
+        )
+    )
+    redirected = respx.post(redirect_url).mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+
+    with pytest.raises(AppError) as caught:
+        await broad_adapter.authenticate()
+
+    assert caught.value.error_code == "UPSTREAM_CROSS_ORIGIN_REDIRECT"
+    assert not redirected.called
+    await broad_adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_worker_factory_scopes_nextfind_to_base_url_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        nextfind_base_url=BASE_URL,
+        nextfind_username="reader",
+        nextfind_password="super-secret",
+        allowed_external_hosts=(
+            "nextfind.example",
+            "api.themoviedb.org",
+            "avistaz.to",
+        ),
+    )
+    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
+
+    built_adapter = worker_main.build_nextfind_adapter()
+
+    assert built_adapter.allowed_hosts == ("nextfind.example",)
+    await built_adapter.aclose()
 
 
 @pytest.mark.asyncio

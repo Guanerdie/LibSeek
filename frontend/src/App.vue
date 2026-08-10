@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from 'vue-router'
+import { computed } from 'vue'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+
+import { useAuthStore } from './stores/auth'
+
+const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
 
 const navItems = [
   { to: '/', label: '系统状态', icon: '◉' },
@@ -7,11 +14,19 @@ const navItems = [
   { to: '/discovery', label: '发现任务', icon: '↻' },
   { to: '/adapters', label: '适配器', icon: '◇' },
   { to: '/approvals', label: '审批计划', icon: '✓' },
+  { to: '/qbittorrent', label: 'qB 状态', icon: '⇄' },
 ]
+
+const isPublicRoute = computed(() => Boolean(route.meta.public))
+
+async function logout(): Promise<void> {
+  if (await auth.logout()) await router.replace('/login')
+}
 </script>
 
 <template>
-  <div class="app-shell">
+  <RouterView v-if="isPublicRoute" />
+  <div v-else class="app-shell">
     <aside class="sidebar">
       <div class="brand">
         <span class="brand-mark">U</span>
@@ -33,8 +48,17 @@ const navItems = [
     <main class="main-content">
       <header class="topbar">
         <div><span class="eyebrow">CONTROL PLANE</span><span class="divider">/</span> 本地管理端</div>
-        <span class="safe-badge">无下载写操作</span>
+        <div class="topbar-actions">
+          <span class="safe-badge">无下载写操作</span>
+          <div v-if="auth.principal" class="session-summary">
+            <span><strong>{{ auth.principal.username }}</strong><small>{{ auth.roleLabel }}</small></span>
+            <button class="button secondary small" :disabled="auth.working" @click="logout">
+              {{ auth.working ? '退出中…' : '退出' }}
+            </button>
+          </div>
+        </div>
       </header>
+      <div v-if="auth.error" class="session-error" role="alert">{{ auth.error }}</div>
       <RouterView />
     </main>
   </div>

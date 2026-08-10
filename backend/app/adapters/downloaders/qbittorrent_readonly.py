@@ -36,6 +36,7 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         allow_insecure_http: bool = False,
         connect_timeout: float = 5,
         read_timeout: float = 30,
+        max_response_bytes: int = 10 * 1024 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = self._validate_url(
@@ -46,6 +47,7 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         self._username = username
         self._password = password
         self._authenticated = False
+        self._max_response_bytes = max(1, max_response_bytes)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
@@ -159,6 +161,7 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         require_auth: bool = True,
         params: dict[str, Any] | None = None,
         data: dict[str, str] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> httpx.Response:
         normalized_method = method.upper()
         if (normalized_method, path) not in self._ALLOWED_REQUESTS:
@@ -171,8 +174,28 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
             raise AppError("QB_NOT_AUTHENTICATED", "qBittorrent SID 会话不存在", status_code=401)
         url = urljoin(f"{self._base_url}/", path.lstrip("/"))
         try:
-            response = await self._client.request(
-                normalized_method, url, params=params, data=data, follow_redirects=False
+            request = self._client.build_request(
+                normalized_method, url, params=params, data=data, files=files
+            )
+            upstream = await self._client.send(request, stream=True, follow_redirects=False)
+            content = bytearray()
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > self._max_response_bytes:
+                        raise AppError(
+                            "QB_RESPONSE_TOO_LARGE",
+                            "qBittorrent 响应体超过安全限制",
+                            status_code=502,
+                        )
+            finally:
+                await upstream.aclose()
+            response = httpx.Response(
+                upstream.status_code,
+                headers=upstream.headers,
+                content=bytes(content),
+                request=request,
+                extensions=upstream.extensions,
             )
         except httpx.TimeoutException as exc:
             raise AppError(

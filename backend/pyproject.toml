@@ -9,6 +9,7 @@ description = "Read-only media orchestration with immutable approval and downloa
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.14,<2",
+  "bencodepy>=0.9.5,<1",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
   "psycopg[binary]>=3.2,<4",

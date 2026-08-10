@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -56,6 +56,16 @@ class SafeAsyncHttpClient:
     async def aclose(self) -> None:
         await self.client.aclose()
 
+    @staticmethod
+    def _origin(url: str) -> tuple[str, str, int | None]:
+        parsed = urlparse(url)
+        default_port = 443 if parsed.scheme.casefold() == "https" else 80
+        return (
+            parsed.scheme.casefold(),
+            (parsed.hostname or "").casefold(),
+            parsed.port or default_port,
+        )
+
     async def request(
         self,
         method: str,
@@ -100,8 +110,20 @@ class SafeAsyncHttpClient:
                 await response.aclose()
                 if not location:
                     raise AppError("UPSTREAM_INVALID_REDIRECT", "上游返回了无效跳转")
-                current_url = urljoin(current_url, location)
-                validate_external_url(current_url, self.allowed_hosts)
+                redirect_url = urljoin(current_url, location)
+                validate_external_url(redirect_url, self.allowed_hosts)
+                has_authorization = any(
+                    key.casefold() == "authorization" for key in (headers or {})
+                )
+                if (current_body is not None or has_authorization) and self._origin(
+                    redirect_url
+                ) != self._origin(current_url):
+                    raise AppError(
+                        "UPSTREAM_CROSS_ORIGIN_REDIRECT",
+                        "携带认证信息的外部请求拒绝跨源跳转",
+                        status_code=502,
+                    )
+                current_url = redirect_url
                 current_params = None
                 if redirect_status in {301, 302, 303}:
                     current_method, current_body = "GET", None

@@ -142,6 +142,8 @@ async def create_approval_request(
     candidate_id: str,
     request: ApprovalCreateRequest,
     settings: Settings,
+    *,
+    actor: str,
 ) -> ApprovalRequest:
     candidate_record = await session.get(TorrentCandidateRecord, candidate_id)
     if candidate_record is None:
@@ -223,7 +225,7 @@ async def create_approval_request(
         status=ApprovalStatus.PENDING,
         candidate_snapshot=immutable_data,
         snapshot_hash=digest,
-        requested_by=request.operator.strip(),
+        requested_by=actor,
         requested_at=now,
         expires_at=expires_at,
     )
@@ -235,7 +237,7 @@ async def create_approval_request(
         event_type="REQUESTED",
         from_status=None,
         to_status=ApprovalStatus.PENDING,
-        actor=request.operator.strip(),
+        actor=actor,
         details={"expires_at": expires_at.isoformat()},
     )
     await session.flush()
@@ -333,6 +335,8 @@ async def approve_request(
     approval: ApprovalRequest,
     request: ApprovalApproveRequest,
     settings: Settings,
+    *,
+    actor: str,
 ) -> tuple[ApprovalRequest, DownloadPlan]:
     now = utc_now()
     snapshot = require_pending_approval(session, approval, now)
@@ -395,7 +399,7 @@ async def approve_request(
         session,
         approval,
         ApprovalStatus.APPROVED,
-        actor=request.operator.strip(),
+        actor=actor,
         event_type="APPROVED",
         reason=None,
         now=now,
@@ -433,7 +437,7 @@ async def approve_request(
         event_type="DOWNLOAD_PLAN_CREATED",
         from_status=ApprovalStatus.APPROVED,
         to_status=ApprovalStatus.APPROVED,
-        actor=request.operator.strip(),
+        actor=actor,
         details={
             "plan_hash": plan.plan_hash,
             "policy_fingerprint": plan.preflight_policy_fingerprint,
@@ -447,6 +451,8 @@ async def reject_request(
     session: AsyncSession,
     approval: ApprovalRequest,
     request: ApprovalRejectRequest,
+    *,
+    actor: str,
 ) -> ApprovalRequest:
     now = utc_now()
     require_pending_approval(session, approval, now)
@@ -454,7 +460,7 @@ async def reject_request(
         session,
         approval,
         ApprovalStatus.REJECTED,
-        actor=request.operator.strip(),
+        actor=actor,
         event_type="REJECTED",
         reason=request.reason.strip() if request.reason else None,
         now=now,
@@ -467,6 +473,8 @@ async def revoke_request(
     session: AsyncSession,
     approval: ApprovalRequest,
     request: ApprovalRevokeRequest,
+    *,
+    actor: str,
 ) -> ApprovalRequest:
     now = utc_now()
     snapshot = verify_snapshot(approval)
@@ -481,7 +489,7 @@ async def revoke_request(
         session,
         approval,
         ApprovalStatus.REVOKED,
-        actor=request.operator.strip(),
+        actor=actor,
         event_type="REVOKED",
         reason=request.reason.strip() if request.reason else None,
         now=now,

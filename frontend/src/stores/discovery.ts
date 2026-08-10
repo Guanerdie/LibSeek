@@ -13,6 +13,7 @@ export const useDiscoveryStore = defineStore('discovery', () => {
   const loading = ref(false)
   const creating = ref(false)
   const error = ref<string | null>(null)
+  const notice = ref<string | null>(null)
   let listGeneration = 0
   let detailGeneration = 0
 
@@ -37,6 +38,13 @@ export const useDiscoveryStore = defineStore('discovery', () => {
     }
   }
 
+  async function refresh(): Promise<void> {
+    const selectedId = selected.value?.id
+    notice.value = null
+    await load()
+    if (selectedId) await selectRun(selectedId)
+  }
+
   async function selectRun(id: string): Promise<void> {
     const requestGeneration = ++detailGeneration
     selected.value = null
@@ -54,10 +62,14 @@ export const useDiscoveryStore = defineStore('discovery', () => {
   async function create(): Promise<void> {
     creating.value = true
     error.value = null
+    notice.value = null
     try {
       const run = await discoveryApi.create()
       await load()
       await selectRun(run.id)
+      notice.value = run.deduplicated
+        ? '已有发现任务正在运行；可点击“刷新进度”查看 Worker 的最新结果'
+        : '发现任务已创建；任务异步执行，可点击“刷新进度”查看最新结果'
     } catch (caught) {
       error.value = caught instanceof Error ? caught.message : '创建发现任务失败'
     } finally {
@@ -74,9 +86,10 @@ export const useDiscoveryStore = defineStore('discovery', () => {
     loading,
     creating,
     error,
+    notice,
     load,
+    refresh,
     selectRun,
     create,
   }
 })
-

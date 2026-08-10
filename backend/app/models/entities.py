@@ -26,6 +26,9 @@ from app.core.time import utc_now
 from app.db.base import Base
 from app.models.enums import (
     ApprovalStatus,
+    DownloadExecutionStatus,
+    DownloadLaunchMode,
+    ExecutionIntentStatus,
     IdentityConfidence,
     JobStatus,
     MediaType,
@@ -100,6 +103,7 @@ class MediaItem(Base):
     poster_path: Mapped[str | None] = mapped_column(Text)
     raw_type: Mapped[str | None] = mapped_column(String(80))
     local_episodes: Mapped[int | None] = mapped_column(Integer)
+    local_episode_matrix: Mapped[dict[str, list[int]] | None] = mapped_column(JSON)
     total_episodes: Mapped[int | None] = mapped_column(Integer)
     aired_episodes: Mapped[int | None] = mapped_column(Integer)
     missing_episodes: Mapped[list[str] | None] = mapped_column(JSON)
@@ -145,6 +149,7 @@ class Job(Base):
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(String(180))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
     error_code: Mapped[str | None] = mapped_column(String(80))
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -364,6 +369,123 @@ class DownloadPlan(Base):
     )
 
 
+class ExecutionIntent(Base):
+    __tablename__ = "execution_intents"
+    __table_args__ = (
+        Index(
+            "uq_execution_intent_active_approval",
+            "approval_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    approval_id: Mapped[str] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    nonce_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    approval_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    qb_target_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    launch_mode: Mapped[DownloadLaunchMode] = mapped_column(
+        Enum(DownloadLaunchMode, native_enum=False, length=30), nullable=False
+    )
+    status: Mapped[ExecutionIntentStatus] = mapped_column(
+        Enum(ExecutionIntentStatus, native_enum=False, length=20),
+        default=ExecutionIntentStatus.ACTIVE,
+        nullable=False,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_by: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class DownloadExecution(Base):
+    __tablename__ = "download_executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    approval_id: Mapped[str] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    intent_id: Mapped[str] = mapped_column(
+        ForeignKey("execution_intents.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    idempotency_key_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True
+    )
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    qb_target_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    launch_mode: Mapped[DownloadLaunchMode] = mapped_column(
+        Enum(DownloadLaunchMode, native_enum=False, length=30), nullable=False
+    )
+    status: Mapped[DownloadExecutionStatus] = mapped_column(
+        Enum(DownloadExecutionStatus, native_enum=False, length=40),
+        default=DownloadExecutionStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(String(180))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    actual_info_hash: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    requested_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reconciliation_requested_by: Mapped[str | None] = mapped_column(String(120))
+    reconciliation_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    reconciliation_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class DownloadExecutionEvent(Base):
+    __tablename__ = "download_execution_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    download_execution_id: Mapped[str] = mapped_column(
+        ForeignKey("download_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(40))
+    to_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), nullable=False)
+    sanitized_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
 _APPROVAL_IMMUTABLE_FIELDS = (
     "media_item_id",
     "torrent_candidate_id",
@@ -372,6 +494,32 @@ _APPROVAL_IMMUTABLE_FIELDS = (
     "requested_by",
     "requested_at",
     "expires_at",
+    "created_at",
+)
+
+_EXECUTION_INTENT_IMMUTABLE_FIELDS = (
+    "approval_id",
+    "nonce_sha256",
+    "approval_snapshot_hash",
+    "plan_hash",
+    "qb_target_fingerprint",
+    "launch_mode",
+    "created_by",
+    "expires_at",
+    "created_at",
+)
+
+_DOWNLOAD_EXECUTION_IMMUTABLE_FIELDS = (
+    "approval_id",
+    "intent_id",
+    "idempotency_key_sha256",
+    "request_hash",
+    "approval_snapshot_hash",
+    "plan_hash",
+    "qb_target_fingerprint",
+    "launch_mode",
+    "requested_by",
+    "requested_at",
     "created_at",
 )
 
@@ -390,11 +538,56 @@ def reject_approval_identity_update(
         raise ValueError(f"approval immutable fields cannot change: {', '.join(changed)}")
 
 
+@event.listens_for(ExecutionIntent, "before_update")
+def reject_execution_intent_binding_update(
+    _mapper: Mapper[ExecutionIntent],
+    _connection: Connection,
+    target: ExecutionIntent,
+) -> None:
+    state = inspect(target)
+    changed = [
+        field
+        for field in _EXECUTION_INTENT_IMMUTABLE_FIELDS
+        if state.attrs[field].history.has_changes()
+    ]
+    if changed:
+        raise ValueError(f"execution intent immutable fields cannot change: {', '.join(changed)}")
+
+
+@event.listens_for(DownloadExecution, "before_update")
+def reject_download_execution_binding_update(
+    _mapper: Mapper[DownloadExecution],
+    _connection: Connection,
+    target: DownloadExecution,
+) -> None:
+    state = inspect(target)
+    changed = [
+        field
+        for field in _DOWNLOAD_EXECUTION_IMMUTABLE_FIELDS
+        if state.attrs[field].history.has_changes()
+    ]
+    if changed:
+        raise ValueError(
+            f"download execution immutable fields cannot change: {', '.join(changed)}"
+        )
+    info_hash_history = state.attrs.actual_info_hash.history
+    if (
+        info_hash_history.has_changes()
+        and info_hash_history.deleted
+        and info_hash_history.deleted[0] is not None
+    ):
+        raise ValueError("download execution actual_info_hash cannot change once persisted")
+
+
 @event.listens_for(ApprovalRequest, "before_delete")
 @event.listens_for(ApprovalEvent, "before_update")
 @event.listens_for(ApprovalEvent, "before_delete")
 @event.listens_for(DownloadPlan, "before_update")
 @event.listens_for(DownloadPlan, "before_delete")
+@event.listens_for(ExecutionIntent, "before_delete")
+@event.listens_for(DownloadExecution, "before_delete")
+@event.listens_for(DownloadExecutionEvent, "before_update")
+@event.listens_for(DownloadExecutionEvent, "before_delete")
 def reject_immutable_audit_mutation(
     _mapper: Mapper[object],
     _connection: Connection,

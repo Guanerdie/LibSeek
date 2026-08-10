@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query
 
-from app.api.dependencies import DbSession
+from app.api.dependencies import DbSession, ViewerPrincipal
 from app.errors import AppError
 from app.models.entities import MediaItem
 from app.models.enums import MediaType
@@ -14,6 +14,7 @@ router = APIRouter(prefix="/media", tags=["media"])
 @router.get("", response_model=Page[MediaItemResponse])
 async def get_media(
     session: DbSession,
+    _principal: ViewerPrincipal,
     page: int = Query(default=1, ge=1, le=100000),
     page_size: int = Query(default=20, ge=1, le=100),
     media_type: MediaType | None = None,
@@ -32,9 +33,10 @@ async def get_media(
 
 
 @router.get("/{media_id}", response_model=MediaItemResponse)
-async def get_media_item(media_id: str, session: DbSession) -> MediaItemResponse:
+async def get_media_item(
+    media_id: str, session: DbSession, _principal: ViewerPrincipal
+) -> MediaItemResponse:
     item = await session.get(MediaItem, media_id)
     if item is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
     return MediaItemResponse.model_validate(item)
-

@@ -6,12 +6,13 @@ import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useApprovalStore } from '../stores/approvals'
+import { useAuthStore } from '../stores/auth'
 import type { ApprovalCandidateSnapshot } from '../types'
 import { formatShanghai } from '../utils/format'
 
 const route = useRoute()
+const auth = useAuthStore()
 const store = useApprovalStore()
-const operator = ref('')
 const ttl = ref(60)
 const reason = ref('')
 const acknowledgesHnr = ref(false)
@@ -58,6 +59,8 @@ const preflightPassable = computed(() => {
   const status = store.approval?.preflight_result?.overall_status
   return status === 'PASS' || status === 'WARNING'
 })
+const canOperate = computed(() => auth.hasRole('operator'))
+const canAdmin = computed(() => auth.hasRole('admin'))
 
 onMounted(() => {
   const approvalId = route.params.id
@@ -85,8 +88,8 @@ function formatBytes(value: number | null): string {
 }
 
 function createApproval(): void {
-  if (!snapshot.value || !operator.value.trim()) return
-  void store.create(snapshot.value.torrent_candidate_id, operator.value.trim(), ttl.value)
+  if (!snapshot.value || !canOperate.value) return
+  void store.create(snapshot.value.torrent_candidate_id, ttl.value)
 }
 </script>
 
@@ -102,6 +105,7 @@ function createApproval(): void {
     <div class="phase-banner"><span>禁止执行</span>当前阶段只生成下载计划，不获取 .torrent，不向 qBittorrent 添加任务。</div>
     <PageState :loading="store.loading" :error="store.error" />
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
+    <div v-if="store.planError" class="notice-state warning-state">{{ store.planError }}</div>
 
     <template v-if="snapshot && !store.loading">
       <section class="source-strip approval-source">
@@ -155,30 +159,34 @@ function createApproval(): void {
         </div>
 
         <aside class="approval-controls">
-          <label>操作者<input v-model="operator" maxlength="120" placeholder="审计记录中的操作者" /></label>
+          <div class="approval-actor">
+            <span>当前登录账号</span>
+            <strong>{{ auth.principal?.username }} · {{ auth.roleLabel }}</strong>
+            <small>审计操作者由服务端会话确定；服务端仍会独立校验权限。</small>
+          </div>
           <template v-if="!store.approval">
             <label>审批有效期（分钟）<input v-model.number="ttl" type="number" min="5" max="10080" /></label>
-            <button class="button primary" :disabled="store.working || !operator.trim()" @click="createApproval">创建固定快照审批</button>
+            <button class="button primary" :disabled="store.working || !canOperate" @click="createApproval">创建固定快照审批</button>
           </template>
           <template v-else>
             <div class="approval-expiry"><span>申请时间</span><strong>{{ formatShanghai(store.approval.requested_at) }}</strong><span>到期时间</span><strong>{{ formatShanghai(store.approval.expires_at) }}</strong></div>
-            <button v-if="store.approval.status === 'PENDING'" class="button secondary" :disabled="store.working || !operator.trim()" @click="store.preflight(store.approval.id, operator.trim())">运行 qB 只读预检</button>
+            <button v-if="store.approval.status === 'PENDING'" class="button secondary" :disabled="store.working || !canOperate" @click="store.preflight(store.approval.id)">运行 qB 只读预检</button>
             <div v-if="store.approval.status === 'PENDING'" class="acknowledgements">
-              <label><input v-model="acknowledgesHnr" type="checkbox" />已了解该站 H&R 规则</label>
-              <label><input v-model="acknowledgesSeeding" type="checkbox" />下载完成后需要继续做种</label>
-              <label><input v-model="acknowledgesPlanOnly" type="checkbox" />当前阶段仅创建下载计划，不开始下载</label>
+              <label><input v-model="acknowledgesHnr" type="checkbox" :disabled="!canAdmin || store.working" />已了解该站 H&R 规则</label>
+              <label><input v-model="acknowledgesSeeding" type="checkbox" :disabled="!canAdmin || store.working" />下载完成后需要继续做种</label>
+              <label><input v-model="acknowledgesPlanOnly" type="checkbox" :disabled="!canAdmin || store.working" />当前阶段仅创建下载计划，不开始下载</label>
             </div>
             <button
               v-if="store.approval.status === 'PENDING'"
               class="button primary"
-              :disabled="store.working || !operator.trim() || !acknowledgementsComplete || !preflightPassable"
-              @click="store.approve(store.approval.id, operator.trim())"
+              :disabled="store.working || !canAdmin || !acknowledgementsComplete || !preflightPassable"
+              @click="store.approve(store.approval.id)"
             >
               批准并生成计划
             </button>
-            <label v-if="store.approval.status === 'PENDING' || store.approval.status === 'APPROVED'">原因（可选）<textarea v-model="reason" maxlength="1000" /></label>
-            <button v-if="store.approval.status === 'PENDING'" class="button danger-button" :disabled="store.working || !operator.trim()" @click="store.reject(store.approval.id, operator.trim(), reason)">拒绝</button>
-            <button v-if="store.approval.status === 'APPROVED'" class="button danger-button" :disabled="store.working || !operator.trim()" @click="store.revoke(store.approval.id, operator.trim(), reason)">撤销审批</button>
+            <label v-if="store.approval.status === 'PENDING' || store.approval.status === 'APPROVED'">原因（可选）<textarea v-model="reason" maxlength="1000" :disabled="store.approval.status === 'PENDING' ? !canOperate : !canAdmin" /></label>
+            <button v-if="store.approval.status === 'PENDING'" class="button danger-button" :disabled="store.working || !canOperate" @click="store.reject(store.approval.id, reason)">拒绝</button>
+            <button v-if="store.approval.status === 'APPROVED'" class="button danger-button" :disabled="store.working || !canAdmin" @click="store.revoke(store.approval.id, reason)">撤销审批</button>
           </template>
         </aside>
       </section>

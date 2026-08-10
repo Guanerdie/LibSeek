@@ -7,6 +7,7 @@ UNIN 当前版本为 `0.3.0`，完成到第三阶段：从 NextFind 只读发现
 ## 已实现
 
 - Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、httpx。
+- 本地单账号认证与分级授权：签名会话 Cookie、登录前 bootstrap CSRF、所有状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级；认证材料缺失时受保护 API 默认拒绝访问。
 - PostgreSQL 任务队列、`FOR UPDATE SKIP LOCKED`、锁租约恢复、幂等任务与可审计重试。
 - NextFind 只读发现：独立 Cookie、HTTPS 主机白名单、跳转复验、NDJSON 流式解析和响应大小限制。
 - TMDB 真实只读 Provider：Bearer Token、中文/英文详情、外部 ID、最多 5 个搜索候选、已播剧集矩阵、TTL 缓存、限速、429 退避与超时。
@@ -19,7 +20,7 @@ UNIN 当前版本为 `0.3.0`，完成到第三阶段：从 NextFind 只读发现
 - 只读下载前预检：检查 qB 连接与版本、AvistaZ 禁止版本规则、分类、重复任务、允许保存路径、大小限制、活跃做种、候选做种者和 H&R。预检绑定策略指纹，必需检查必须完整且汇总状态必须与明细一致；`UNKNOWN` 永远不等于 `PASS`。
 - 非执行下载计划：只有新鲜且总体为 `PASS`/`WARNING` 的预检，以及三项人工确认完成后才能生成；计划以审批快照哈希、预检策略指纹和自身规范哈希绑定，并禁止更新/删除，不含下载 URL、announce、Cookie、Token、PID 或密码。
 - 人工审批页展示固定快照、预检、有效期、审计事件和下载计划。qB 前端状态使用请求 generation，失败会清除旧数据，避免旧响应覆盖新响应。
-- Docker Compose 四服务部署；API 与前端端口只绑定 `127.0.0.1`。qB 的三个 Secret 只挂载给 API，不挂载给 Worker 或前端。
+- Docker Compose 四服务部署；API 与前端端口只绑定 `127.0.0.1`。本地认证和 qB 的 Secret 只挂载给 API，不挂载给 Worker 或前端。
 
 架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)。
 
@@ -31,7 +32,7 @@ frontend/                Vue 3、Pinia、Router、身份与 PT 候选页面、Vi
 deploy/                  Docker Secret Compose override 示例
 docs/                    架构、安全、测试文档
 scripts/                 Windows/Linux 启动与测试脚本
-secrets/                 7 个本地 Secret 文件目录，*.txt 已被 Git 忽略
+secrets/                 10 个本地 Secret 文件目录，*.txt 已被 Git 忽略
 compose.yaml             api、worker、frontend、postgres
 .env.example             无真实密钥的配置样例，真实连接默认关闭
 ```
@@ -48,7 +49,7 @@ notepad .env
 docker compose ps
 ```
 
-先同时修改 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的同一个密码。NextFind 凭据留空时系统仍可启动，但不会创建真实发现任务。不要把任何密码、PID、Cookie、Token 或 TMDB Key 发送到聊天或提交到版本库。
+先同时修改 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的同一个密码。本机快速启动还需在 `.env` 填写 `AUTH_LOCAL_USERNAME`、`AUTH_LOCAL_PASSWORD` 和至少 32 个字符的 `AUTH_SESSION_SIGNING_KEY`；此方式只把值传给 API。生产部署推荐让这三项在 `.env` 保持空白，改用下文 Docker Secret override 和双 Compose 文件命令。NextFind 凭据留空时系统仍可启动，但不会创建真实发现任务；认证材料缺失时健康检查仍可用，但受保护 API 会返回 `AUTH_NOT_CONFIGURED`。不要把任何密码、签名密钥、PID、Cookie、Token 或 TMDB Key 发送到聊天或提交到版本库。
 
 Linux / Docker：
 
@@ -62,6 +63,21 @@ docker compose ps
 ```
 
 验收：打开 `http://127.0.0.1:8080`；API 文档位于 `http://127.0.0.1:8000/api/docs`；`docker compose ps` 中四个服务应为 healthy。
+
+## 本地登录与权限
+
+系统只配置一个本地账号。`AUTH_LOCAL_ROLE` 决定该账号的最高权限：`viewer` 只能读取影视、候选、审批和 qB 只读状态；`operator` 继承读取权限，并可创建发现/解析/搜索/审批申请、执行预检、确认身份和拒绝审批；`admin` 继承前两级权限，并可批准或撤销审批。服务端始终以登录会话中的用户名写审计操作者，忽略客户端伪造的操作者字段。
+
+认证接口：
+
+- `GET /api/auth/csrf`：登录前获取 bootstrap CSRF；响应同时设置可由前端读取的 `unin_csrf` Cookie。
+- `POST /api/auth/login`：提交用户名和密码，同时让 `unin_csrf` Cookie 与 `X-CSRF-Token` 请求头携带相同 token。
+- `GET /api/auth/me`：读取当前账号与角色。
+- `POST /api/auth/logout`：必须携带当前会话 CSRF，并清除认证 Cookie。
+
+登录成功后，`unin_session` 为 `HttpOnly`，两个 Cookie 均为 `SameSite=Strict`、`Path=/api`；浏览器端不得把会话或密码写入 Web Storage。所有状态变更请求都必须同时携带 CSRF Cookie 和同值的 `X-CSRF-Token`。`AUTH_SESSION_TTL_SECONDS` 默认 28800 秒，登录前 token 的 `AUTH_BOOTSTRAP_CSRF_TTL_SECONDS` 默认 600 秒。本机 HTTP 保持 `AUTH_COOKIE_SECURE=false`；经 HTTPS 反向代理的生产部署必须设为 `true`。
+
+三个认证材料应通过下文 Docker Secret 提供：`auth_local_username`、`auth_local_password`、`auth_session_signing_key`。签名密钥至少 32 个字符且应为独立高熵随机值。任一材料缺失、文件不可读或签名密钥过短时，系统 fail closed，不允许匿名降级。
 
 ## 第二阶段 API
 
@@ -100,7 +116,7 @@ ENABLE_AVISTAZ_LIVE_SEARCH=false
 ENABLE_QB_READ_ONLY=false
 ```
 
-推荐使用项目内的本地 Secret 文件和 Compose override。共需 7 个文件：TMDB 1 个、AvistaZ 3 个、qBittorrent 3 个。以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。
+推荐使用项目内的本地 Secret 文件和 Compose override。共需 10 个文件：本地认证 3 个、TMDB 1 个、AvistaZ 3 个、qBittorrent 3 个。以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。
 
 ```powershell
 Set-Location D:\project\unin
@@ -123,6 +139,9 @@ function Write-LocalSecret([string]$Path, [string]$Prompt) {
     }
 }
 
+Write-LocalSecret '.\secrets\auth_local_username.txt' 'UNIN local username'
+Write-LocalSecret '.\secrets\auth_local_password.txt' 'UNIN local password'
+Write-LocalSecret '.\secrets\auth_session_signing_key.txt' 'UNIN session signing key (minimum 32 characters)'
 Write-LocalSecret '.\secrets\tmdb_access_token.txt' 'TMDB Bearer Access Token'
 Write-LocalSecret '.\secrets\avistaz_username.txt' 'AvistaZ username'
 Write-LocalSecret '.\secrets\avistaz_password.txt' 'AvistaZ password'
@@ -133,9 +152,12 @@ Write-LocalSecret '.\secrets\qb_password.txt' 'qBittorrent password'
 icacls .\secrets\*.txt /inheritance:r /grant:r "$($env:USERNAME):(R)"
 ```
 
-7 个文件名必须与 [deploy/compose.secrets.yaml.example](deploy/compose.secrets.yaml.example) 一致：
+10 个文件名必须与 [deploy/compose.secrets.yaml.example](deploy/compose.secrets.yaml.example) 一致：
 
 ```text
+secrets/auth_local_username.txt
+secrets/auth_local_password.txt
+secrets/auth_session_signing_key.txt
 secrets/tmdb_access_token.txt
 secrets/avistaz_username.txt
 secrets/avistaz_password.txt
@@ -145,7 +167,7 @@ secrets/qb_username.txt
 secrets/qb_password.txt
 ```
 
-qB 的非密钥策略仍在本机 `.env` 中配置。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
+认证与 qB 的非密钥策略仍在本机 `.env` 中配置。认证策略包括 `AUTH_LOCAL_ROLE`、会话/CSRF TTL 和 `AUTH_COOKIE_SECURE`；不要在使用 Secret override 时把三个认证值同时写入 `.env`。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
 
 只在用户明确批准真实冒烟测试后，才把本机 `.env` 中对应开关设为 `true`，并使用两个 Compose 文件启动：
 

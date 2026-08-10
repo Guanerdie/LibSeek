@@ -13,6 +13,14 @@ uv run mypy app
 uv run alembic upgrade head --sql
 ```
 
+认证与授权覆盖：
+
+- 认证 Secret 未配置、文件不可读或签名密钥过短时 fail closed；公开健康/状态接口不泄露用户数据。
+- 登录前 bootstrap CSRF、缺失/错误/过期 token、统一的错误用户名或密码响应，以及正确登录、`/auth/me` 和注销清除 Cookie。
+- 会话 Cookie 的 `HttpOnly`/`SameSite=Strict`/`Path=/api`、CSRF Cookie 可读、认证响应禁止缓存，以及篡改和过期会话拒绝。
+- 所有状态变更必须提供匹配的 CSRF Cookie 与 `X-CSRF-Token`；`viewer` 不能写、`operator` 不能批准/撤销、`admin` 继承 operator 权限。
+- 客户端伪造操作者字段不生效，数据库与响应中的 actor 必须来自服务端 Principal 用户名。
+
 第二阶段覆盖：
 
 - TMDB ID 精确详情、无 ID 多候选、电影/电视剧冲突、429、超时、双语字段与已播 episode matrix。
@@ -61,9 +69,12 @@ Secret override 配置结构：
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example config --quiet
 ```
 
-第二条命令只解析配置，但要求 `secrets` 下 7 个本地文件存在：
+第二条命令只解析服务配置和 Secret 引用。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此它成功不代表以下 10 个文件已经就绪：
 
 ```text
+auth_local_username.txt
+auth_local_password.txt
+auth_session_signing_key.txt
 tmdb_access_token.txt
 avistaz_username.txt
 avistaz_password.txt
@@ -73,7 +84,24 @@ qb_username.txt
 qb_password.txt
 ```
 
-不得为了配置解析把真实凭据写入命令行、聊天或版本库。可以使用内容为 `compose-config-placeholder` 的本地占位文件完成 `config --quiet`，检查后移除；不要用这些占位值启动容器。Secret 文件格式和服务可见范围见 `docs/security.md`。
+启动容器前应单独检查文件存在性，不读取或打印其内容：
+
+```powershell
+$requiredSecrets = @(
+    'auth_local_username.txt', 'auth_local_password.txt',
+    'auth_session_signing_key.txt',
+    'tmdb_access_token.txt', 'avistaz_username.txt', 'avistaz_password.txt',
+    'avistaz_pid.txt', 'qb_base_url.txt', 'qb_username.txt', 'qb_password.txt'
+)
+$missingSecrets = $requiredSecrets | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path '.\secrets' $_))
+}
+if ($missingSecrets) {
+    throw "缺少本地 Secret 文件：$($missingSecrets -join ', ')"
+}
+```
+
+不得把真实凭据写入命令行、聊天或版本库，也不得使用占位值启动容器。Secret 文件格式和服务可见范围见 `docs/security.md`。
 
 ## 静态安全验收
 
@@ -84,9 +112,19 @@ Set-Location D:\project\unin
 rg -n 'localStorage|sessionStorage|pinia-plugin-persist' frontend\src
 rg -n '@router\.(post|put|patch|delete)' backend\app\api\routes\downloaders.py
 rg -n '(/api/v2/torrents/(add|pause|resume|delete|recheck)|download_url|announce|passkey)' backend\app frontend\src
+rg -n 'proxy_hide_header\s+Set-Cookie' frontend\nginx.conf
 ```
 
-预期：前两条无匹配；第三条只能命中显式禁止/脱敏校验或测试断言，不得出现可执行 qB 写调用或可返回的真实下载字段。最终还应读取 `/api/openapi.json`，确认 `/api/downloaders/qbittorrent/*` 只有 `GET`。
+预期：第一、第二和第四条无匹配；第三条可命中默认关闭的内部 qB 写适配器、安全校验或测试断言，但不得出现在业务路由中，也不得返回真实下载字段。最终还应读取 `/api/openapi.json`，确认认证端点存在、执行 intent/execute/reconcile 端点具有 admin RBAC 与 CSRF，且 `/api/downloaders/qbittorrent/*` 仍只有 `GET`。
+
+阶段 4 控制面定向验收：
+
+```powershell
+Set-Location D:\project\unin\backend
+uv run pytest tests\test_execution_control_plane.py -q
+```
+
+该测试使用 SQLite 与 ASGI Mock，不配置真实 Secret、不访问网络。它覆盖 nonce 仅保存 SHA-256、intent 过期、qB 目标漂移、幂等重放/冲突、审批/intent/幂等键唯一约束、撤销后的提交闸门、实际 info hash 先持久化、未知结果禁止重试及纯数据库对账。
 
 ## 验收边界
 

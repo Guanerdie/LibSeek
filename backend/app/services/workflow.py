@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.episodes import derive_missing_episode_codes
 from app.core.security import sanitize_details
 from app.errors import AppError
 from app.models.entities import (
@@ -17,6 +18,7 @@ from app.models.entities import (
 from app.models.enums import (
     IdentityConfidence,
     JobStatus,
+    MediaType,
     MetadataStatus,
     WorkflowStatus,
 )
@@ -74,6 +76,8 @@ async def confirm_identity(
     session: AsyncSession,
     media: MediaItem,
     request: IdentityConfirmationRequest,
+    *,
+    actor: str,
 ) -> IdentityReview:
     existing = await session.scalar(
         select(IdentityReview)
@@ -110,11 +114,20 @@ async def confirm_identity(
         media_id=media.id,
         metadata_match_id=match.id,
         status="CONFIRMED",
-        confirmed_by=request.operator.strip(),
+        confirmed_by=actor,
         candidate_snapshot=candidate.model_dump(mode="json"),
     )
     media.tmdb_id = candidate.tmdb_id
     media.media_type = candidate.media_type
+    media.missing_episodes = (
+        derive_missing_episode_codes(
+            candidate.episode_matrix,
+            media.local_episode_matrix,
+            media.missing_episodes,
+        )
+        if candidate.media_type == MediaType.TV
+        else None
+    )
     media.identity_confidence = IdentityConfidence.HIGH
     media.metadata_status = MetadataStatus.RESOLVED
     media.workflow_status = WorkflowStatus.IDENTITY_CONFIRMED
@@ -129,7 +142,7 @@ async def confirm_identity(
                     {
                         "metadata_match_id": match.id,
                         "tmdb_id": candidate.tmdb_id,
-                        "operator": request.operator.strip(),
+                        "operator": actor,
                         "candidate_snapshot": candidate.model_dump(mode="json"),
                     }
                 ),

@@ -4,14 +4,24 @@ import asyncio
 import hashlib
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from app.adapters.base import PtSiteAdapter
 from app.core.http import SafeAsyncHttpClient, SafeHttpResult, SerializedRateLimiter
+from app.core.security import validate_external_url
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.schemas.adapters import (
@@ -29,35 +39,65 @@ class AvistaZAuthResponse(BaseModel):
     token: str = Field(validation_alias=AliasChoices("token", "access_token", "jwt"))
 
 
+class AvistaZMovieTv(BaseModel):
+    """Public media identifiers nested by the Jackett-compatible AvistaZ API."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    tmdb: Any = Field(default=None, validation_alias=AliasChoices("tmdb", "tmdb_id"))
+    imdb: Any = Field(default=None, validation_alias=AliasChoices("imdb", "imdb_id"))
+    tvdb: Any = Field(default=None, validation_alias=AliasChoices("tvdb", "tvdb_id"))
+    media_type: Any = Field(default=None, validation_alias=AliasChoices("media_type", "type"))
+
+
 class AvistaZRawCandidate(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    # Drop unmodelled fields instead of retaining personal download URLs, PID-bearing links,
+    # announce URLs, or passkeys returned by the upstream API.
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     torrent_id: Any = Field(validation_alias=AliasChoices("torrent_id", "id"))
     release_title: Any = Field(validation_alias=AliasChoices("release_title", "title", "name"))
     media_type: Any = Field(default=None, validation_alias=AliasChoices("media_type", "type"))
     category: Any = None
+    movie_tv: AvistaZMovieTv | None = None
     tmdb_id: Any = Field(default=None, validation_alias=AliasChoices("tmdb_id", "tmdb"))
     imdb_id: Any = Field(default=None, validation_alias=AliasChoices("imdb_id", "imdb"))
     season: Any = None
     episodes: Any = None
     collection_type: Any = None
-    resolution: Any = None
-    source: Any = None
-    codec: Any = None
+    resolution: Any = Field(
+        default=None, validation_alias=AliasChoices("resolution", "video_quality")
+    )
+    source: Any = Field(default=None, validation_alias=AliasChoices("source", "media"))
+    codec: Any = Field(default=None, validation_alias=AliasChoices("codec", "format"))
     hdr: Any = None
     audio: Any = None
-    subtitles: Any = None
-    size_bytes: Any = Field(default=None, validation_alias=AliasChoices("size_bytes", "size"))
+    subtitles: Any = Field(
+        default=None, validation_alias=AliasChoices("subtitles", "subtitle")
+    )
+    size_bytes: Any = Field(
+        default=None, validation_alias=AliasChoices("size_bytes", "size", "file_size")
+    )
     file_count: Any = None
-    seeders: Any = None
-    leechers: Any = None
+    seeders: Any = Field(default=None, validation_alias=AliasChoices("seeders", "seed"))
+    leechers: Any = Field(default=None, validation_alias=AliasChoices("leechers", "leech"))
     completed: Any = None
-    download_factor: Any = None
-    upload_factor: Any = None
+    download_factor: Any = Field(
+        default=None,
+        validation_alias=AliasChoices("download_factor", "download_multiply"),
+    )
+    upload_factor: Any = Field(
+        default=None,
+        validation_alias=AliasChoices("upload_factor", "upload_multiply"),
+    )
     hit_and_run: Any = None
     info_hash: Any = None
+    download_url: Any = Field(
+        default=None, validation_alias=AliasChoices("download", "download_url")
+    )
     published_at: Any = Field(
-        default=None, validation_alias=AliasChoices("published_at", "created_at")
+        default=None,
+        validation_alias=AliasChoices("published_at", "created_at", "created_at_iso"),
     )
 
 
@@ -65,6 +105,24 @@ class AvistaZSearchResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     results: list[AvistaZRawCandidate] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_envelope(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return {"results": value}
+        if not isinstance(value, dict):
+            return value
+        if isinstance(value.get("results"), list):
+            return value
+        data = value.get("data")
+        if isinstance(data, list):
+            return {**value, "results": data}
+        if isinstance(data, dict):
+            nested = data.get("results")
+            if isinstance(nested, list):
+                return {**value, "results": nested}
+        return value
 
 
 class AvistaZAdapter(PtSiteAdapter):
@@ -82,6 +140,8 @@ class AvistaZAdapter(PtSiteAdapter):
         max_response_bytes: int = 10 * 1024 * 1024,
         min_interval_seconds: float = 6.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        request_gate: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+        enable_torrent_fetch: bool = False,
     ) -> None:
         if not username or not password or not pid:
             raise AppError("AVISTAZ_NOT_CONFIGURED", "AvistaZ 运行时凭据未配置", status_code=409)
@@ -99,8 +159,11 @@ class AvistaZAdapter(PtSiteAdapter):
         )
         self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.sleep = sleep
+        self.request_gate = request_gate
+        self.enable_torrent_fetch = enable_torrent_fetch
         self._site_lock = asyncio.Lock()
         self._candidate_memory: dict[str, TorrentCandidate] = {}
+        self._download_memory: dict[str, str] = {}
 
     def manifest(self) -> AdapterManifest:
         return AdapterManifest(
@@ -121,13 +184,15 @@ class AvistaZAdapter(PtSiteAdapter):
                 "promotion_parsing": True,
                 "hit_and_run_parsing": True,
                 "direct_torrent_download": True,
-                "fetch_torrent_enabled": False,
+                "fetch_torrent_enabled": self.enable_torrent_fetch,
                 "write_operations": False,
             },
         )
 
     async def aclose(self) -> None:
         self._token = None
+        self._download_memory.clear()
+        self._candidate_memory.clear()
         await self.http.aclose()
 
     async def probe(self) -> ProbeResult:
@@ -154,14 +219,16 @@ class AvistaZAdapter(PtSiteAdapter):
     ) -> SafeHttpResult:
         async with self._site_lock:
             for attempt in range(3):
-                await self.limiter.acquire(path)
-                response = await self.http.request(
-                    method,
-                    path,
-                    params=params,
-                    json_body=json_body,
-                    headers=headers,
-                )
+                gate = self.request_gate(path) if self.request_gate else nullcontext()
+                async with gate:
+                    await self.limiter.acquire(path)
+                    response = await self.http.request(
+                        method,
+                        path,
+                        params=params,
+                        json_body=json_body,
+                        headers=headers,
+                    )
                 if response.status_code != 429:
                     return response
                 if attempt == 2:
@@ -230,11 +297,12 @@ class AvistaZAdapter(PtSiteAdapter):
                 raise AppError("AVISTAZ_HTTP_ERROR", "AvistaZ 搜索返回了无法处理的状态")
             try:
                 payload = response.json()
-                envelope = {"results": payload} if isinstance(payload, list) else payload
-                parsed = AvistaZSearchResponse.model_validate(envelope)
+                parsed = AvistaZSearchResponse.model_validate(payload)
+                candidates = [self._normalize(raw, request.type) for raw in parsed.results]
             except ValidationError as exc:
                 raise AppError("AVISTAZ_VALIDATION_ERROR", "AvistaZ 搜索响应格式无效") from exc
-            candidates = [self._normalize(raw, request.type) for raw in parsed.results]
+            for raw, candidate in zip(parsed.results, candidates, strict=True):
+                self._remember_download_url(candidate.torrent_id, raw.download_url)
             self._candidate_memory.update(
                 {candidate.torrent_id: candidate for candidate in candidates}
             )
@@ -248,12 +316,74 @@ class AvistaZAdapter(PtSiteAdapter):
         return TorrentDetails(candidate=candidate, description=None, files=[])
 
     async def fetch_torrent(self, torrent_id: str) -> bytes:
-        del torrent_id
-        raise AppError(
-            "PHASE_NOT_ENABLED",
-            "当前阶段禁止访问 AvistaZ download URL 或下载 .torrent",
-            status_code=403,
-        )
+        if not self.enable_torrent_fetch:
+            raise AppError(
+                "PHASE_NOT_ENABLED",
+                "当前阶段禁止访问 AvistaZ download URL 或下载 .torrent",
+                status_code=403,
+            )
+        download_url = self._download_memory.get(torrent_id)
+        if download_url is None:
+            raise AppError(
+                "TORRENT_REFERENCE_NOT_IN_SESSION",
+                "当前认证会话中没有该种子的临时下载引用，请先重新搜索",
+                status_code=409,
+            )
+        for auth_attempt in range(2):
+            if self._token is None:
+                await self._authenticate()
+            response = await self._send(
+                "GET",
+                download_url,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Accept": "application/x-bittorrent, application/octet-stream",
+                },
+            )
+            if response.status_code in {401, 412}:
+                self._token = None
+                if auth_attempt == 0:
+                    continue
+                raise AppError("AVISTAZ_AUTH_EXPIRED", "AvistaZ 会话已失效", status_code=401)
+            if response.status_code >= 500:
+                raise AppError(
+                    "AVISTAZ_UNAVAILABLE",
+                    "AvistaZ 服务暂时不可用",
+                    status_code=502,
+                    retryable=True,
+                )
+            if not 200 <= response.status_code < 300:
+                raise AppError("AVISTAZ_TORRENT_FETCH_FAILED", "AvistaZ 种子获取失败")
+            lowered_type = response.content_type.casefold()
+            if "html" in lowered_type or "json" in lowered_type or not response.content.startswith(
+                b"d"
+            ):
+                raise AppError(
+                    "AVISTAZ_TORRENT_INVALID_RESPONSE",
+                    "AvistaZ 种子响应格式无效",
+                    status_code=502,
+                )
+            return response.content
+        raise AppError("AVISTAZ_AUTH_EXPIRED", "AvistaZ 会话已失效", status_code=401)
+
+    def _remember_download_url(self, torrent_id: str, value: Any) -> None:
+        raw_url = self._text(value)
+        if raw_url is None:
+            return
+        resolved = urljoin(f"{self.http.base_url}/", raw_url)
+        validated = validate_external_url(resolved, self.http.allowed_hosts)
+        if self._origin(validated) != self._origin(self.http.base_url):
+            raise AppError(
+                "AVISTAZ_DOWNLOAD_ORIGIN_NOT_ALLOWED",
+                "AvistaZ 种子下载地址与认证站点不同源",
+                status_code=502,
+            )
+        self._download_memory[torrent_id] = validated
+
+    @staticmethod
+    def _origin(value: str) -> tuple[str, str, int]:
+        parsed = urlparse(value)
+        return parsed.scheme.casefold(), (parsed.hostname or "").casefold(), parsed.port or 443
 
     @staticmethod
     def _search_params(request: TorrentSearchRequest) -> dict[str, Any]:
@@ -276,7 +406,11 @@ class AvistaZAdapter(PtSiteAdapter):
     ) -> TorrentCandidate:
         torrent_id = str(raw.torrent_id)
         release_title = str(raw.release_title).strip()
-        media_type = self._media_type(raw.media_type or raw.category, requested_type)
+        nested = raw.movie_tv
+        media_type = self._media_type(
+            raw.media_type or raw.category or (nested.media_type if nested else None),
+            requested_type,
+        )
         parsed_season, parsed_episodes = self._season_episodes(release_title)
         season = self._integer(raw.season) or parsed_season
         episodes = self._episode_list(raw.episodes) or parsed_episodes
@@ -290,15 +424,16 @@ class AvistaZAdapter(PtSiteAdapter):
             release_title=release_title,
             details_ref=f"avistaz:details:{internal_ref}",
             media_type=media_type,
-            tmdb_id=self._integer(raw.tmdb_id),
-            imdb_id=self._text(raw.imdb_id),
+            tmdb_id=self._integer(raw.tmdb_id)
+            or self._integer(nested.tmdb if nested else None),
+            imdb_id=self._text(raw.imdb_id) or self._text(nested.imdb if nested else None),
             year=self._year(release_title),
             season=season,
             episodes=episodes,
             collection_type=collection_type,
-            resolution=self._text(raw.resolution) or self._resolution(release_title),
-            source=self._text(raw.source),
-            codec=self._text(raw.codec),
+            resolution=self._named_text(raw.resolution) or self._resolution(release_title),
+            source=self._named_text(raw.source),
+            codec=self._named_text(raw.codec),
             hdr=self._string_list(raw.hdr),
             audio=self._string_list(raw.audio),
             subtitles=self._string_list(raw.subtitles),
@@ -371,6 +506,22 @@ class AvistaZAdapter(PtSiteAdapter):
             return None
         result = str(value).strip()
         return result or None
+
+    @staticmethod
+    def _named_text(value: Any) -> str | None:
+        if isinstance(value, dict):
+            for key in ("name", "title", "label", "value", "slug"):
+                result = AvistaZAdapter._text(value.get(key))
+                if result:
+                    return result
+            return None
+        if isinstance(value, list):
+            for item in value:
+                result = AvistaZAdapter._named_text(item)
+                if result:
+                    return result
+            return None
+        return AvistaZAdapter._text(value)
 
     @staticmethod
     def _string_list(value: Any) -> list[str] | None:

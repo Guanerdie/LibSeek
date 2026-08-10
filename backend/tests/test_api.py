@@ -7,10 +7,17 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.dependencies import (
+    get_admin_principal,
+    get_operator_principal,
+    get_viewer_principal,
+)
+from app.core.auth import Principal
 from app.db.session import get_session
 from app.main import app
 from app.models.entities import MediaItem, MetadataMatch, TorrentCandidateRecord, TorrentSearchRun
 from app.models.enums import (
+    AuthRole,
     IdentityConfidence,
     MediaType,
     MetadataStatus,
@@ -26,6 +33,20 @@ def api_client_factory(session_factory: async_sessionmaker[AsyncSession]):
             yield session
 
     app.dependency_overrides[get_session] = override_session
+    principal = Principal(
+        username="api-test-admin",
+        role=AuthRole.ADMIN,
+        issued_at=0,
+        expires_at=2**31,
+        csrf_digest="0" * 64,
+    )
+
+    async def override_principal() -> Principal:
+        return principal
+
+    app.dependency_overrides[get_viewer_principal] = override_principal
+    app.dependency_overrides[get_operator_principal] = override_principal
+    app.dependency_overrides[get_admin_principal] = override_principal
 
     def create() -> httpx.AsyncClient:
         return httpx.AsyncClient(

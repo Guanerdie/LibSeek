@@ -12,6 +12,7 @@ from pydantic import (
     field_validator,
 )
 
+from app.core.episodes import EpisodeMatrix, normalize_episode_codes, normalize_episode_matrix
 from app.models.enums import IdentityConfidence, MediaType, MetadataStatus
 
 EpisodeCode = Annotated[str, StringConstraints(pattern=r"^S\d{2}E\d{2,3}$")]
@@ -53,6 +54,7 @@ class MediaItemData(BaseModel):
     poster_path: str | None = None
     raw_type: str | None = None
     local_episodes: int | None = Field(default=None, ge=0)
+    local_episode_matrix: EpisodeMatrix | None = None
     total_episodes: int | None = Field(default=None, ge=0)
     aired_episodes: int | None = Field(default=None, ge=0)
     missing_episodes: list[EpisodeCode] | None = None
@@ -60,6 +62,16 @@ class MediaItemData(BaseModel):
     metadata_status: MetadataStatus
     discovered_at: datetime
     updated_at: datetime
+
+    @field_validator("local_episode_matrix", mode="before")
+    @classmethod
+    def validate_local_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
+        return normalize_episode_matrix(value)
+
+    @field_validator("missing_episodes", mode="before")
+    @classmethod
+    def validate_missing_episodes(cls, value: object) -> list[str] | None:
+        return normalize_episode_codes(value)
 
 
 class MediaDiscoveryResult(BaseModel):
@@ -71,9 +83,20 @@ class LibraryDetails(BaseModel):
     tmdb_id: int
     media_type: MediaType
     local_episodes: int | None = Field(default=None, ge=0)
+    local_episode_matrix: EpisodeMatrix | None = None
     total_episodes: int | None = Field(default=None, ge=0)
     aired_episodes: int | None = Field(default=None, ge=0)
     missing_episodes: list[EpisodeCode] | None = None
+
+    @field_validator("local_episode_matrix", mode="before")
+    @classmethod
+    def validate_local_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
+        return normalize_episode_matrix(value)
+
+    @field_validator("missing_episodes", mode="before")
+    @classmethod
+    def validate_missing_episodes(cls, value: object) -> list[str] | None:
+        return normalize_episode_codes(value)
 
 
 class MetadataRecord(BaseModel):
@@ -95,6 +118,14 @@ class MetadataRecord(BaseModel):
     status: str | None = None
     confidence: float = Field(default=0, ge=0, le=1)
     external_ids: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("episode_matrix", mode="before")
+    @classmethod
+    def validate_episode_matrix(cls, value: object) -> EpisodeMatrix:
+        normalized = normalize_episode_matrix(value)
+        if normalized is None:
+            raise ValueError("episode matrix cannot be null")
+        return normalized
 
 
 class TorrentCandidate(BaseModel):

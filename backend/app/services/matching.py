@@ -97,8 +97,9 @@ def score_torrent_candidate(
             reasons.append("SEASON_EXACT")
             required_episodes = required[candidate.season]
             if candidate.episodes is None and candidate.collection_type == "season":
-                score += 0.09
-                reasons.append("EPISODE_COVERAGE_EXACT")
+                score += 0.04
+                reasons.append("SEASON_PACK_COVERS_TARGET_SEASON")
+                warnings.append("EPISODE_COVERAGE_UNKNOWN")
             elif candidate.episodes:
                 offered = set(candidate.episodes)
                 overlap = offered & required_episodes
@@ -190,4 +191,3 @@ def _list_preferred(values: list[str] | None, preferred: tuple[str, ...]) -> boo
     if not values or not preferred:
         return False
     return any(_preferred(value, preferred) for value in values)
-

@@ -47,8 +47,39 @@ class ApprovalStatus(StrEnum):
     CONSUMED = "CONSUMED"
 
 
+class DownloadLaunchMode(StrEnum):
+    ADD_PAUSED = "ADD_PAUSED"
+    START_IMMEDIATELY = "START_IMMEDIATELY"
+
+
+class ExecutionIntentStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    CONSUMED = "CONSUMED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
+class DownloadExecutionStatus(StrEnum):
+    PENDING = "PENDING"
+    VALIDATING = "VALIDATING"
+    SUBMITTING = "SUBMITTING"
+    SUBMITTED = "SUBMITTED"
+    ALREADY_PRESENT = "ALREADY_PRESENT"
+    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    RECONCILIATION_PENDING = "RECONCILIATION_PENDING"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class PreflightStatus(StrEnum):
     PASS = "PASS"
     WARNING = "WARNING"
     BLOCKED = "BLOCKED"
     UNKNOWN = "UNKNOWN"
+
+
+class AuthRole(StrEnum):
+    VIEWER = "viewer"
+    OPERATOR = "operator"
+    ADMIN = "admin"

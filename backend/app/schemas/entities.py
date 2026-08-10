@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
     IdentityConfidence,
@@ -58,6 +58,7 @@ class MediaItemResponse(OrmModel):
     poster_path: str | None
     raw_type: str | None
     local_episodes: int | None
+    local_episode_matrix: dict[int, list[int]] | None
     total_episodes: int | None
     aired_episodes: int | None
     missing_episodes: list[str] | None
@@ -110,8 +111,9 @@ class MetadataMatchResponse(OrmModel):
 
 
 class IdentityConfirmationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     metadata_match_id: str
-    operator: str = Field(min_length=1, max_length=120)
 
 
 class IdentityReviewResponse(OrmModel):

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.dependencies import QbAdapter
+from app.api.dependencies import QbAdapter, ViewerPrincipal
 from app.schemas.qbittorrent import QbStatus, QbTorrentList
 
 router = APIRouter(prefix="/downloaders/qbittorrent", tags=["qbittorrent-read-only"])
 
 
 @router.get("/status", response_model=QbStatus)
-async def get_qbittorrent_status(adapter: QbAdapter) -> QbStatus:
+async def get_qbittorrent_status(
+    _principal: ViewerPrincipal, adapter: QbAdapter
+) -> QbStatus:
     await adapter.authenticate()
     application_version = await adapter.get_version()
     web_api_version = await adapter.get_web_api_version()
@@ -31,7 +33,9 @@ async def get_qbittorrent_status(adapter: QbAdapter) -> QbStatus:
 
 
 @router.get("/torrents", response_model=QbTorrentList)
-async def get_qbittorrent_torrents(adapter: QbAdapter) -> QbTorrentList:
+async def get_qbittorrent_torrents(
+    _principal: ViewerPrincipal, adapter: QbAdapter
+) -> QbTorrentList:
     await adapter.authenticate()
     torrents = await adapter.list_torrents()
     return QbTorrentList(items=torrents, total=len(torrents))

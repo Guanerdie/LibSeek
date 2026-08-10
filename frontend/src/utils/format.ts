@@ -21,7 +21,21 @@ export function statusLabel(status: string): string {
       FAILED: '失败',
       RETRY_WAIT: '等待重试',
       CANCELLED: '已取消',
+      METADATA_PENDING: '等待元数据',
+      PT_SEARCH_PENDING: '等待 PT 搜索',
+      PT_SEARCHING: 'PT 搜索中',
+      TORRENT_REVIEW: '等待候选确认',
+      NO_CANDIDATE: '无候选',
+      SEARCH_FAILED: '搜索失败',
+      APPROVED: '已批准',
+      REJECTED: '已拒绝',
+      EXPIRED: '已过期',
+      REVOKED: '已撤销',
+      CONSUMED: '已消费',
+      PASS: '通过',
+      WARNING: '警告',
+      BLOCKED: '已阻止',
+      UNKNOWN: '未知',
     }[status] ?? status
   )
 }
-

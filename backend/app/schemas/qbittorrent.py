@@ -7,12 +7,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 MAX_INT64 = 9_223_372_036_854_775_807
 MAX_TIMESTAMP = 253_402_300_799
 InfoHash = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$")]
+V1InfoHash = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{40}$")]
+V2InfoHash = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
 
 
 class QbTorrent(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     hash: InfoHash
+    infohash_v1: V1InfoHash | None = None
+    infohash_v2: V2InfoHash | None = None
     name: str = Field(min_length=1, max_length=1000)
     size: int = Field(ge=0, le=MAX_INT64)
     progress: float = Field(ge=0, le=1, allow_inf_nan=False)
@@ -27,10 +31,22 @@ class QbTorrent(BaseModel):
     tags: str = Field(default="", max_length=2000)
     save_path: str = Field(default="", max_length=4096)
 
-    @field_validator("hash")
+    @field_validator("infohash_v1", "infohash_v2", mode="before")
     @classmethod
-    def normalize_hash(cls, value: str) -> str:
-        return value.lower()
+    def normalize_optional_hash(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @field_validator("hash", "infohash_v1", "infohash_v2")
+    @classmethod
+    def normalize_hash(cls, value: str | None) -> str | None:
+        return value.lower() if value is not None else None
+
+    @property
+    def identity_hashes(self) -> frozenset[str]:
+        hashes = {value for value in (self.hash, self.infohash_v1, self.infohash_v2) if value}
+        if self.infohash_v2 is not None:
+            hashes.add(self.infohash_v2[:40])
+        return frozenset(hashes)
 
 
 class QbTorrentFile(BaseModel):

@@ -15,6 +15,7 @@ export const useApprovalStore = defineStore('approvals', () => {
   const candidate = ref<TorrentCandidateResult | null>(null)
   const media = ref<MediaItem | null>(null)
   const plan = ref<DownloadPlan | null>(null)
+  const planError = ref<string | null>(null)
   const loading = ref(false)
   const working = ref(false)
   const error = ref<string | null>(null)
@@ -26,6 +27,25 @@ export const useApprovalStore = defineStore('approvals', () => {
     candidate.value = null
     media.value = null
     plan.value = null
+    planError.value = null
+  }
+
+  async function loadPlan(approvalId: string, current: number): Promise<void> {
+    if (current === generation) planError.value = null
+    try {
+      const result = await approvalApi.plan(approvalId)
+      if (current === generation) {
+        plan.value = result
+        planError.value = null
+      }
+    } catch (caught) {
+      if (current === generation) {
+        plan.value = null
+        planError.value = caught instanceof Error
+          ? `审批状态已保存，但下载计划读取失败：${caught.message}`
+          : '审批状态已保存，但下载计划暂时无法读取'
+      }
+    }
   }
 
   async function loadList(): Promise<void> {
@@ -55,17 +75,11 @@ export const useApprovalStore = defineStore('approvals', () => {
     notice.value = null
     try {
       const result = await approvalApi.get(approvalId)
-      let downloadPlan: DownloadPlan | null = null
-      if (result.status === 'APPROVED' || result.status === 'REVOKED' || result.status === 'CONSUMED') {
-        try {
-          downloadPlan = await approvalApi.plan(approvalId)
-        } catch {
-          downloadPlan = null
-        }
-      }
       if (current === generation) {
         approval.value = result
-        plan.value = downloadPlan
+      }
+      if (result.status === 'APPROVED' || result.status === 'REVOKED' || result.status === 'CONSUMED') {
+        await loadPlan(approvalId, current)
       }
     } catch (caught) {
       if (current === generation) {
@@ -96,16 +110,12 @@ export const useApprovalStore = defineStore('approvals', () => {
       const selected = candidates.find((item) => item.id === candidateId)
       if (!selected) throw new Error('PT 候选不存在或已变更')
       const selectedApproval = existing[0] ?? null
-      const existingPlan =
-        selectedApproval?.status === 'APPROVED'
-          ? await approvalApi.plan(selectedApproval.id)
-          : null
       if (current === generation) {
         media.value = mediaResult
         candidate.value = selected
         approval.value = selectedApproval
-        plan.value = existingPlan
       }
+      if (selectedApproval?.status === 'APPROVED') await loadPlan(selectedApproval.id, current)
     } catch (caught) {
       if (current === generation) {
         clearDetail()
@@ -121,13 +131,13 @@ export const useApprovalStore = defineStore('approvals', () => {
     working.value = true
     error.value = null
     notice.value = null
+    planError.value = null
     try {
       const result = await action()
-      const resultPlan = result.status === 'APPROVED' ? await approvalApi.plan(result.id) : null
       if (current !== generation) return
       approval.value = result
-      plan.value = resultPlan
       notice.value = message
+      if (result.status === 'APPROVED') await loadPlan(result.id, current)
     } catch (caught) {
       if (current === generation) {
         plan.value = null
@@ -138,25 +148,24 @@ export const useApprovalStore = defineStore('approvals', () => {
     }
   }
 
-  const create = (candidateId: string, operator: string, ttl: number) =>
-    perform(() => approvalApi.create(candidateId, operator, ttl), '固定候选审批请求已创建')
-  const preflight = (approvalId: string, operator: string) =>
-    perform(() => approvalApi.preflight(approvalId, operator), '只读下载预检已完成')
-  const approve = (approvalId: string, operator: string) =>
+  const create = (candidateId: string, ttl: number) =>
+    perform(() => approvalApi.create(candidateId, ttl), '固定候选审批请求已创建')
+  const preflight = (approvalId: string) =>
+    perform(() => approvalApi.preflight(approvalId), '只读下载预检已完成')
+  const approve = (approvalId: string) =>
     perform(
       () =>
         approvalApi.approve(approvalId, {
-          operator,
           acknowledges_hnr: true,
           acknowledges_seeding: true,
           acknowledges_plan_only: true,
         }),
       '审批已通过，仅生成下载计划',
     )
-  const reject = (approvalId: string, operator: string, reason: string) =>
-    perform(() => approvalApi.reject(approvalId, operator, reason), '审批已拒绝')
-  const revoke = (approvalId: string, operator: string, reason: string) =>
-    perform(() => approvalApi.revoke(approvalId, operator, reason), '审批已撤销')
+  const reject = (approvalId: string, reason: string) =>
+    perform(() => approvalApi.reject(approvalId, reason), '审批已拒绝')
+  const revoke = (approvalId: string, reason: string) =>
+    perform(() => approvalApi.revoke(approvalId, reason), '审批已撤销')
 
   return {
     approvals,
@@ -164,6 +173,7 @@ export const useApprovalStore = defineStore('approvals', () => {
     candidate,
     media,
     plan,
+    planError,
     loading,
     working,
     error,

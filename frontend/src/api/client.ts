@@ -1,16 +1,20 @@
 import type {
   AdapterManifest,
   ApprovalRequest,
+  CsrfResponse,
   DiscoveryRun,
   DownloadPlan,
   IdentityReview,
+  LoginResponse,
   MediaItem,
   MetadataMatch,
   Page,
+  Principal,
   SystemStatus,
   QbStatus,
   QbTorrent,
   TorrentCandidateResult,
+  TorrentSearchPreferences,
   TorrentSearchRun,
 } from '../types'
 
@@ -18,6 +22,11 @@ interface ErrorPayload {
   error_code?: string
   message?: string
 }
+
+type UnauthorizedHandler = (error: ApiError) => void
+
+let csrfToken: string | null = null
+let unauthorizedHandler: UnauthorizedHandler | null = null
 
 export class ApiError extends Error {
   constructor(
@@ -30,15 +39,34 @@ export class ApiError extends Error {
   }
 }
 
+export function setApiCsrfToken(token: string | null): void {
+  csrfToken = token
+}
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const mutatesState = !['GET', 'HEAD', 'OPTIONS'].includes(method)
+  if (mutatesState && !csrfToken) {
+    throw new ApiError('CSRF_TOKEN_REQUIRED', '状态变更请求缺少 CSRF 令牌', 0)
+  }
+
+  const headers = new Headers(init?.headers)
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json')
+  if (mutatesState && csrfToken) headers.set('X-CSRF-Token', csrfToken)
+
   let response: Response
   try {
     response = await fetch(path, {
       ...init,
-      headers: { Accept: 'application/json', ...init?.headers },
+      headers,
       credentials: 'same-origin',
     })
-  } catch {
+  } catch (caught) {
+    if (caught instanceof Error && caught.name === 'AbortError') throw caught
     throw new ApiError('NETWORK_ERROR', '无法连接后端服务', 0)
   }
   if (!response.ok) {
@@ -48,12 +76,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Deliberately ignore untrusted non-JSON error bodies.
     }
-    throw new ApiError(
+    const error = new ApiError(
       payload.error_code ?? 'API_ERROR',
       payload.message ?? '请求失败',
       response.status,
     )
+    if (response.status === 401 && error.errorCode !== 'AUTH_LOGIN_FAILED') {
+      unauthorizedHandler?.(error)
+    }
+    throw error
   }
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
@@ -67,6 +100,18 @@ function queryString(values: Record<string, string | number | undefined>): strin
 
 export const systemApi = {
   status: () => request<SystemStatus>('/api/system/status'),
+}
+
+export const authApi = {
+  csrf: () => request<CsrfResponse>('/api/auth/csrf'),
+  login: (username: string, password: string) =>
+    request<LoginResponse>('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    }),
+  me: () => request<Principal>('/api/auth/me'),
+  logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
 }
 
 export const mediaApi = {
@@ -94,11 +139,11 @@ export const mediaApi = {
     ),
   metadataCandidates: (id: string) =>
     request<MetadataMatch[]>(`/api/media/${encodeURIComponent(id)}/metadata-candidates`),
-  confirmIdentity: (id: string, metadataMatchId: string, operator: string) =>
+  confirmIdentity: (id: string, metadataMatchId: string) =>
     request<IdentityReview>(`/api/media/${encodeURIComponent(id)}/identity-confirmations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ metadata_match_id: metadataMatchId, operator }),
+      body: JSON.stringify({ metadata_match_id: metadataMatchId }),
     }),
 }
 
@@ -118,13 +163,7 @@ export const adapterApi = {
 export const torrentApi = {
   create: (
     mediaId: string,
-    preferences: {
-      preferred_resolutions: string[]
-      preferred_sources: string[]
-      preferred_audio: string[]
-      preferred_subtitles: string[]
-      max_size_bytes?: number
-    },
+    preferences: TorrentSearchPreferences,
   ) =>
     request<TorrentSearchRun & { job_id: string; deduplicated: boolean }>(
       `/api/media/${encodeURIComponent(mediaId)}/torrent-searches`,
@@ -136,22 +175,23 @@ export const torrentApi = {
     ),
   list: (mediaId: string) =>
     request<TorrentSearchRun[]>(`/api/media/${encodeURIComponent(mediaId)}/torrent-searches`),
-  get: (searchId: string) =>
-    request<TorrentSearchRun>(`/api/torrent-searches/${encodeURIComponent(searchId)}`),
-  candidates: (searchId: string) =>
+  get: (searchId: string, signal?: AbortSignal) =>
+    request<TorrentSearchRun>(`/api/torrent-searches/${encodeURIComponent(searchId)}`, { signal }),
+  candidates: (searchId: string, signal?: AbortSignal) =>
     request<TorrentCandidateResult[]>(
       `/api/torrent-searches/${encodeURIComponent(searchId)}/candidates`,
+      { signal },
     ),
 }
 
 export const approvalApi = {
-  create: (candidateId: string, operator: string, expiresInMinutes: number) =>
+  create: (candidateId: string, expiresInMinutes: number) =>
     request<ApprovalRequest>(
       `/api/candidates/${encodeURIComponent(candidateId)}/approval-requests`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator, expires_in_minutes: expiresInMinutes }),
+        body: JSON.stringify({ expires_in_minutes: expiresInMinutes }),
       },
     ),
   list: (candidateId?: string) =>
@@ -160,19 +200,18 @@ export const approvalApi = {
     ),
   get: (approvalId: string) =>
     request<ApprovalRequest>(`/api/approval-requests/${encodeURIComponent(approvalId)}`),
-  preflight: (approvalId: string, operator: string) =>
+  preflight: (approvalId: string) =>
     request<ApprovalRequest>(
       `/api/approval-requests/${encodeURIComponent(approvalId)}/preflight`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator }),
+        body: JSON.stringify({}),
       },
     ),
   approve: (
     approvalId: string,
     payload: {
-      operator: string
       acknowledges_hnr: boolean
       acknowledges_seeding: boolean
       acknowledges_plan_only: boolean
@@ -186,22 +225,22 @@ export const approvalApi = {
         body: JSON.stringify(payload),
       },
     ),
-  reject: (approvalId: string, operator: string, reason?: string) =>
+  reject: (approvalId: string, reason?: string) =>
     request<ApprovalRequest>(
       `/api/approval-requests/${encodeURIComponent(approvalId)}/reject`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator, reason: reason || null }),
+        body: JSON.stringify({ reason: reason || null }),
       },
     ),
-  revoke: (approvalId: string, operator: string, reason?: string) =>
+  revoke: (approvalId: string, reason?: string) =>
     request<ApprovalRequest>(
       `/api/approval-requests/${encodeURIComponent(approvalId)}/revoke`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operator, reason: reason || null }),
+        body: JSON.stringify({ reason: reason || null }),
       },
     ),
   plan: (approvalId: string) =>

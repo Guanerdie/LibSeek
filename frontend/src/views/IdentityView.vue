@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
+import { useAuthStore } from '../stores/auth'
 import { useIdentityStore } from '../stores/identity'
 
 const route = useRoute()
+const auth = useAuthStore()
 const store = useIdentityStore()
-const operator = ref('')
 const mediaId = computed(() => String(route.params.id))
+const canOperate = computed(() => auth.hasRole('operator'))
 
 onMounted(() => store.load(mediaId.value))
 
@@ -18,8 +20,8 @@ function posterUrl(path: string | null): string | null {
 }
 
 function confirm(matchId: string): void {
-  if (!operator.value.trim()) return
-  void store.confirm(mediaId.value, matchId, operator.value.trim())
+  if (!canOperate.value) return
+  void store.confirm(mediaId.value, matchId)
 }
 </script>
 
@@ -32,7 +34,8 @@ function confirm(matchId: string): void {
     >
       <div class="header-actions">
         <a class="button secondary" href="/media">返回列表</a>
-        <button class="button primary" :disabled="store.working" @click="store.resolve(mediaId)">
+        <button class="button secondary" :disabled="store.loading || store.working" @click="store.load(mediaId)">刷新候选</button>
+        <button class="button primary" :disabled="store.working || !canOperate" @click="store.resolve(mediaId)">
           {{ store.working ? '处理中…' : '重新解析' }}
         </button>
       </div>
@@ -51,9 +54,9 @@ function confirm(matchId: string): void {
         <div><span>状态</span><strong>{{ store.media.workflow_status }}</strong></div>
       </section>
 
-      <div class="operator-bar">
-        <label>操作者<input v-model="operator" maxlength="120" placeholder="记录本次确认人" /></label>
-        <small>确认记录会写入审计时间线</small>
+      <div class="permission-bar">
+        <strong>当前账号：{{ auth.principal?.username }} · {{ auth.roleLabel }}</strong>
+        <small>{{ canOperate ? '身份确认将使用当前登录账号写入审计时间线' : '当前角色仅可查看，身份解析与确认需要操作者权限' }}</small>
       </div>
 
       <PageState
@@ -82,7 +85,7 @@ function confirm(matchId: string): void {
             <div v-if="match.conflicts.length" class="warning-list"><span v-for="conflict in match.conflicts" :key="conflict">{{ conflict }}</span></div>
             <button
               class="button primary confirm-button"
-              :disabled="store.working || !operator.trim() || store.media.workflow_status === 'IDENTITY_CONFIRMED'"
+              :disabled="store.working || !canOperate || store.media.workflow_status === 'IDENTITY_CONFIRMED'"
               @click="confirm(match.id)"
             >
               确认此身份

@@ -4,7 +4,17 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.routes import adapters, approvals, discovery, downloaders, health, media, workflow
+from app.api.routes import (
+    adapters,
+    approvals,
+    auth,
+    discovery,
+    downloaders,
+    executions,
+    health,
+    media,
+    workflow,
+)
 from app.core.config import get_settings
 from app.core.security import sanitize_details
 from app.errors import AppError
@@ -44,9 +54,11 @@ async def handle_validation_error(_: Request, exc: RequestValidationError) -> JS
 
 
 app.include_router(health.router, prefix=settings.api_prefix)
+app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(discovery.router, prefix=settings.api_prefix)
 app.include_router(media.router, prefix=settings.api_prefix)
 app.include_router(adapters.router, prefix=settings.api_prefix)
 app.include_router(workflow.router, prefix=settings.api_prefix)
 app.include_router(approvals.router, prefix=settings.api_prefix)
 app.include_router(downloaders.router, prefix=settings.api_prefix)
+app.include_router(executions.router, prefix=settings.api_prefix)

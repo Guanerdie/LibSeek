@@ -20,13 +20,16 @@ def login_ok() -> httpx.Response:
     )
 
 
-def adapter(transport: httpx.AsyncBaseTransport) -> QbittorrentReadOnlyAdapter:
+def adapter(
+    transport: httpx.AsyncBaseTransport, *, max_response_bytes: int = 10 * 1024 * 1024
+) -> QbittorrentReadOnlyAdapter:
     return QbittorrentReadOnlyAdapter(
         base_url=BASE,
         username="runtime-reader",
         password="runtime-password",
         allowed_hosts=("qb.example.test",),
         transport=transport,
+        max_response_bytes=max_response_bytes,
     )
 
 
@@ -254,6 +257,27 @@ async def test_html_login_page_is_not_success() -> None:
     finally:
         await client.aclose()
     assert caught.value.error_code == "QB_RESPONSE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_response_body_size_is_limited_while_streaming() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            content=b"Ok." + (b"x" * 32),
+            headers={"Set-Cookie": "SID=must-not-survive; HttpOnly; Path=/"},
+        )
+    )
+    client = adapter(transport, max_response_bytes=8)
+    try:
+        with pytest.raises(AppError) as caught:
+            await client.authenticate()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_RESPONSE_TOO_LARGE"
+    assert client._authenticated is False
+    assert list(client._client.cookies.items()) == []
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,21 @@ export type JobStatus =
   | 'RETRY_WAIT'
   | 'CANCELLED'
 
+export type AuthRole = 'viewer' | 'operator' | 'admin'
+
+export interface Principal {
+  username: string
+  role: AuthRole
+}
+
+export interface LoginResponse extends Principal {
+  csrf_token: string
+}
+
+export interface CsrfResponse {
+  csrf_token: string
+}
+
 export interface Page<T> {
   items: T[]
   page: number
@@ -158,6 +173,14 @@ export interface TorrentSearchRun {
   started_at: string | null
   finished_at: string | null
   created_at: string
+}
+
+export interface TorrentSearchPreferences {
+  preferred_resolutions: string[]
+  preferred_sources: string[]
+  preferred_audio: string[]
+  preferred_subtitles: string[]
+  max_size_bytes?: number
 }
 
 export interface TorrentCandidate {

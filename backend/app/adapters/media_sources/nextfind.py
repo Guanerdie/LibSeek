@@ -6,12 +6,21 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from app.adapters.base import MediaSourceAdapter
+from app.core.episodes import EpisodeMatrix, normalize_episode_matrix
 from app.core.security import validate_external_url
 from app.errors import AppError
 from app.models.enums import IdentityConfidence, MediaType, MetadataStatus
@@ -37,9 +46,24 @@ class NextFindRawItem(BaseModel):
     year: str | int | None = None
     poster: str | None = None
     local_episodes: int | None = Field(default=None, ge=0)
+    local_episode_matrix: EpisodeMatrix | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "local_episode_matrix",
+            "existing_episode_matrix",
+            "existing_episodes",
+            "localEpisodeMatrix",
+            "existingEpisodes",
+        ),
+    )
     total_episodes: int | None = Field(default=None, ge=0)
     aired_episodes: int | None = Field(default=None, ge=0)
     missing_episodes: list[str] | None = None
+
+    @field_validator("local_episode_matrix", mode="before")
+    @classmethod
+    def normalize_local_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
+        return normalize_episode_matrix(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -65,9 +89,24 @@ class NextFindLibraryPayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     local_episodes: int | None = Field(default=None, ge=0)
+    local_episode_matrix: EpisodeMatrix | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "local_episode_matrix",
+            "existing_episode_matrix",
+            "existing_episodes",
+            "localEpisodeMatrix",
+            "existingEpisodes",
+        ),
+    )
     total_episodes: int | None = Field(default=None, ge=0)
     aired_episodes: int | None = Field(default=None, ge=0)
     missing_episodes: list[str] | None = None
+
+    @field_validator("local_episode_matrix", mode="before")
+    @classmethod
+    def normalize_local_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
+        return normalize_episode_matrix(value)
 
 
 class NextFindAdapter(MediaSourceAdapter):
@@ -134,6 +173,17 @@ class NextFindAdapter(MediaSourceAdapter):
         except AppError as exc:
             return ProbeResult(healthy=False, error_code=exc.error_code, message=exc.message)
 
+    @staticmethod
+    def _origin(url: str) -> tuple[str, str, int]:
+        parsed = urlparse(url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise AppError(
+                "INVALID_EXTERNAL_URL", "NextFind 地址格式无效", status_code=400
+            ) from exc
+        return parsed.scheme.lower(), (parsed.hostname or "").lower(), port or 443
+
     @asynccontextmanager
     async def _open_response(
         self,
@@ -179,8 +229,17 @@ class NextFindAdapter(MediaSourceAdapter):
                 response = None
                 if not location:
                     raise AppError("UPSTREAM_INVALID_REDIRECT", "NextFind 返回了无效跳转")
-                current_url = urljoin(current_url, location)
-                validate_external_url(current_url, self.allowed_hosts)
+                redirect_url = urljoin(current_url, location)
+                validate_external_url(redirect_url, self.allowed_hosts)
+                if current_body is not None and self._origin(redirect_url) != self._origin(
+                    current_url
+                ):
+                    raise AppError(
+                        "UPSTREAM_CROSS_ORIGIN_REDIRECT",
+                        "NextFind 认证请求拒绝跨源跳转",
+                        status_code=502,
+                    )
+                current_url = redirect_url
                 current_params = None
                 if redirect_status in {301, 302, 303}:
                     current_method, current_body = "GET", None
@@ -461,6 +520,7 @@ class NextFindAdapter(MediaSourceAdapter):
             poster_path=raw.poster,
             raw_type=raw.type,
             local_episodes=raw.local_episodes,
+            local_episode_matrix=raw.local_episode_matrix,
             total_episodes=raw.total_episodes,
             aired_episodes=raw.aired_episodes,
             missing_episodes=raw.missing_episodes,
@@ -488,13 +548,14 @@ class NextFindAdapter(MediaSourceAdapter):
             if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
                 payload = payload["data"]
             details = NextFindLibraryPayload.model_validate(payload)
+            return LibraryDetails(
+                tmdb_id=tmdb_id,
+                media_type=media_type,
+                local_episodes=details.local_episodes,
+                local_episode_matrix=details.local_episode_matrix,
+                total_episodes=details.total_episodes,
+                aired_episodes=details.aired_episodes,
+                missing_episodes=details.missing_episodes,
+            )
         except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
             raise AppError("UPSTREAM_VALIDATION_ERROR", "NextFind 媒体详情格式无效") from exc
-        return LibraryDetails(
-            tmdb_id=tmdb_id,
-            media_type=media_type,
-            local_episodes=details.local_episodes,
-            total_episodes=details.total_episodes,
-            aired_episodes=details.aired_episodes,
-            missing_episodes=details.missing_episodes,
-        )

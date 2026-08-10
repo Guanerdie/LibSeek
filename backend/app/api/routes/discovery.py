@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query
 
-from app.api.dependencies import DbSession
+from app.api.dependencies import DbSession, OperatorPrincipal, ViewerPrincipal
 from app.core.config import get_settings
 from app.errors import AppError
 from app.models.entities import DiscoveryRun
@@ -18,7 +18,9 @@ router = APIRouter(prefix="/discovery-runs", tags=["discovery"])
 
 
 @router.post("", response_model=DiscoveryRunCreated, status_code=202)
-async def start_discovery(session: DbSession) -> DiscoveryRunCreated:
+async def start_discovery(
+    session: DbSession, _principal: OperatorPrincipal
+) -> DiscoveryRunCreated:
     settings = get_settings()
     if not settings.nextfind_configured:
         raise AppError(
@@ -37,6 +39,7 @@ async def start_discovery(session: DbSession) -> DiscoveryRunCreated:
 @router.get("", response_model=Page[DiscoveryRunResponse])
 async def get_discovery_runs(
     session: DbSession,
+    _principal: ViewerPrincipal,
     page: int = Query(default=1, ge=1, le=100000),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> Page[DiscoveryRunResponse]:
@@ -45,7 +48,9 @@ async def get_discovery_runs(
 
 
 @router.get("/{run_id}", response_model=DiscoveryRunDetail)
-async def get_discovery_run(run_id: str, session: DbSession) -> DiscoveryRunDetail:
+async def get_discovery_run(
+    run_id: str, session: DbSession, _principal: ViewerPrincipal
+) -> DiscoveryRunDetail:
     run = await session.get(DiscoveryRun, run_id)
     if run is None:
         raise AppError("DISCOVERY_RUN_NOT_FOUND", "发现任务不存在", status_code=404)

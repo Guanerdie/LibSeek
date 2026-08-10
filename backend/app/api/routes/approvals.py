@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.api.dependencies import DbSession, QbAdapter
+from app.api.dependencies import (
+    AdminPrincipal,
+    DbSession,
+    OperatorPrincipal,
+    QbAdapter,
+    ViewerPrincipal,
+)
 from app.core.config import get_settings
 from app.errors import AppError
 from app.models.entities import ApprovalRequest
@@ -81,8 +87,15 @@ async def create_candidate_approval(
     candidate_id: str,
     request: ApprovalCreateRequest,
     session: DbSession,
+    principal: OperatorPrincipal,
 ) -> ApprovalResponse:
-    approval = await create_approval_request(session, candidate_id, request, get_settings())
+    approval = await create_approval_request(
+        session,
+        candidate_id,
+        request,
+        get_settings(),
+        actor=principal.username,
+    )
     await session.commit()
     return await _response(session, approval)
 
@@ -90,6 +103,7 @@ async def create_candidate_approval(
 @router.get("/approval-requests", response_model=list[ApprovalResponse])
 async def get_approval_requests(
     session: DbSession,
+    _principal: ViewerPrincipal,
     candidate_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=200),
 ) -> list[ApprovalResponse]:
@@ -98,7 +112,9 @@ async def get_approval_requests(
 
 
 @router.get("/approval-requests/{approval_id}", response_model=ApprovalResponse)
-async def get_approval_request(approval_id: str, session: DbSession) -> ApprovalResponse:
+async def get_approval_request(
+    approval_id: str, session: DbSession, _principal: ViewerPrincipal
+) -> ApprovalResponse:
     approval = await get_approval_or_404(session, approval_id)
     return await _response(session, approval)
 
@@ -108,10 +124,17 @@ async def approve_approval_request(
     approval_id: str,
     request: ApprovalApproveRequest,
     session: DbSession,
+    principal: AdminPrincipal,
 ) -> ApprovalResponse:
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
-        await approve_request(session, approval, request, get_settings())
+        await approve_request(
+            session,
+            approval,
+            request,
+            get_settings(),
+            actor=principal.username,
+        )
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)
         raise
@@ -124,10 +147,11 @@ async def reject_approval_request(
     approval_id: str,
     request: ApprovalRejectRequest,
     session: DbSession,
+    principal: OperatorPrincipal,
 ) -> ApprovalResponse:
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
-        await reject_request(session, approval, request)
+        await reject_request(session, approval, request, actor=principal.username)
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)
         raise
@@ -140,10 +164,11 @@ async def revoke_approval_request(
     approval_id: str,
     request: ApprovalRevokeRequest,
     session: DbSession,
+    principal: AdminPrincipal,
 ) -> ApprovalResponse:
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
-        await revoke_request(session, approval, request)
+        await revoke_request(session, approval, request, actor=principal.username)
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)
         raise
@@ -156,13 +181,14 @@ async def preflight_approval_request(
     approval_id: str,
     request: ApprovalDecisionRequest,
     session: DbSession,
+    principal: OperatorPrincipal,
     adapter: QbAdapter,
 ) -> ApprovalResponse:
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
         snapshot = require_pending_approval(session, approval)
         result = await evaluate_preflight(adapter, snapshot, get_settings())
-        await save_preflight_result(session, approval, result, actor=request.operator)
+        await save_preflight_result(session, approval, result, actor=principal.username)
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)
         raise
@@ -175,7 +201,7 @@ async def preflight_approval_request(
     response_model=DownloadPlanResponse,
 )
 async def get_approval_download_plan(
-    approval_id: str, session: DbSession
+    approval_id: str, session: DbSession, _principal: ViewerPrincipal
 ) -> DownloadPlanResponse:
     await get_approval_or_404(session, approval_id)
     plan = await get_download_plan(session, approval_id)

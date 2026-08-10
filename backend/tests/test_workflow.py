@@ -33,7 +33,12 @@ from app.workers.processor import JobProcessor
 from tests.test_discovery_worker import FakeMediaSource
 
 
-def record(tmdb_id: int, *, media_type: MediaType = MediaType.MOVIE) -> MetadataRecord:
+def record(
+    tmdb_id: int,
+    *,
+    media_type: MediaType = MediaType.MOVIE,
+    episode_matrix: dict[int, list[int]] | None = None,
+) -> MetadataRecord:
     return MetadataRecord(
         tmdb_id=tmdb_id,
         imdb_id=f"tt{tmdb_id:07d}",
@@ -43,6 +48,7 @@ def record(tmdb_id: int, *, media_type: MediaType = MediaType.MOVIE) -> Metadata
         english_title="Test Movie" if media_type == MediaType.MOVIE else "Test Show",
         original_title="Original",
         year=2026,
+        episode_matrix=episode_matrix or {},
         confidence=1,
     )
 
@@ -145,6 +151,81 @@ async def test_type_conflict_enters_manual_review(
 
 
 @pytest.mark.asyncio
+async def test_exact_tv_metadata_derives_missing_from_aired_minus_local_matrix(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    item = media(tmdb_id=15, media_type=MediaType.TV)
+    item.local_episodes = 3
+    item.local_episode_matrix = {"1": [1, 3], "2": [1]}
+    item.missing_episodes = ["S09E09"]
+    async with session_factory() as session:
+        session.add(item)
+        await session.commit()
+        await enqueue_metadata_resolution(session, item, max_attempts=3)
+        await session.commit()
+    provider = RecordingProvider(
+        [
+            record(
+                15,
+                media_type=MediaType.TV,
+                episode_matrix={1: [1, 2, 3, 4], 2: [1, 2]},
+            )
+        ]
+    )
+    processor = JobProcessor(
+        session_factory,
+        "worker-tv-matrix",
+        FakeMediaSource,
+        lambda: provider,
+    )
+
+    assert await processor.run_once() is True
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.missing_episodes == ["S01E02", "S01E04", "S02E02"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upstream_missing", "expected"),
+    ((["S01E03"], ["S01E03"]), (None, None)),
+)
+async def test_tv_metadata_never_guesses_missing_from_episode_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+    upstream_missing: list[str] | None,
+    expected: list[str] | None,
+) -> None:
+    item = media(tmdb_id=16, media_type=MediaType.TV)
+    item.local_episodes = 3
+    item.aired_episodes = 6
+    item.local_episode_matrix = None
+    item.missing_episodes = upstream_missing
+    async with session_factory() as session:
+        session.add(item)
+        await session.commit()
+        await enqueue_metadata_resolution(session, item, max_attempts=3)
+        await session.commit()
+    provider = RecordingProvider(
+        [record(16, media_type=MediaType.TV, episode_matrix={1: [1, 2, 3, 4, 5, 6]})]
+    )
+    processor = JobProcessor(
+        session_factory,
+        "worker-tv-counts",
+        FakeMediaSource,
+        lambda: provider,
+    )
+
+    assert await processor.run_once() is True
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.missing_episodes == expected
+
+
+@pytest.mark.asyncio
 async def test_missing_tmdb_id_returns_candidates_without_auto_writing_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -194,7 +275,8 @@ async def test_manual_confirmation_is_audited_and_duplicate_is_rejected(
         review = await confirm_identity(
             session,
             item,
-            IdentityConfirmationRequest(metadata_match_id=match.id, operator="operator-a"),
+            IdentityConfirmationRequest(metadata_match_id=match.id),
+            actor="operator-a",
         )
         await session.commit()
         assert review.confirmed_by == "operator-a"
@@ -202,9 +284,47 @@ async def test_manual_confirmation_is_audited_and_duplicate_is_rejected(
             await confirm_identity(
                 session,
                 item,
-                IdentityConfirmationRequest(metadata_match_id=match.id, operator="operator-a"),
+                IdentityConfirmationRequest(metadata_match_id=match.id),
+                actor="operator-a",
             )
         assert caught.value.error_code == "IDENTITY_CONFIRMATION_DUPLICATE"
+
+
+@pytest.mark.asyncio
+async def test_manual_tv_identity_confirmation_derives_missing_from_selected_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    item = media(tmdb_id=None, media_type=MediaType.TV)
+    item.local_episode_matrix = {"1": [1, 3]}
+    candidate = record(
+        31,
+        media_type=MediaType.TV,
+        episode_matrix={1: [1, 2, 3, 4]},
+    )
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        match = MetadataMatch(
+            media_id=item.id,
+            tmdb_id=31,
+            rank=1,
+            score=0.9,
+            match_reasons=["TITLE_EXACT"],
+            conflicts=[],
+            candidate_snapshot=candidate.model_dump(mode="json"),
+        )
+        session.add(match)
+        await session.commit()
+
+        await confirm_identity(
+            session,
+            item,
+            IdentityConfirmationRequest(metadata_match_id=match.id),
+            actor="operator-a",
+        )
+        await session.commit()
+
+        assert item.missing_episodes == ["S01E02", "S01E04"]
 
 
 @pytest.mark.asyncio

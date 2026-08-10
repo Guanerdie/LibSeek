@@ -253,8 +253,9 @@ async def test_candidate_snapshot_is_immutable_and_duplicate_request_is_rejected
         approval = await create_approval_request(
             session,
             record.id,
-            ApprovalCreateRequest(operator="operator-a"),
+            ApprovalCreateRequest(),
             settings,
+            actor="operator-a",
         )
         await session.commit()
         original_title = verify_snapshot(approval).release_title
@@ -273,8 +274,9 @@ async def test_candidate_snapshot_is_immutable_and_duplicate_request_is_rejected
             await create_approval_request(
                 session,
                 record.id,
-                ApprovalCreateRequest(operator="operator-b"),
+                ApprovalCreateRequest(),
                 settings,
+                actor="operator-b",
             )
         assert duplicate.value.error_code == "APPROVAL_REQUEST_DUPLICATE"
 
@@ -288,8 +290,9 @@ async def test_approval_binding_and_orm_immutable_fields_are_enforced(
         approval = await create_approval_request(
             session,
             record.id,
-            ApprovalCreateRequest(operator="operator-a"),
+            ApprovalCreateRequest(),
             safe_settings(),
+            actor="operator-a",
         )
         await session.commit()
         approval.expires_at += timedelta(minutes=1)
@@ -312,8 +315,9 @@ async def test_expired_and_consumed_approvals_cannot_be_reused(
         approval = await create_approval_request(
             session,
             record.id,
-            ApprovalCreateRequest(operator="operator-a"),
+            ApprovalCreateRequest(),
             settings,
+            actor="operator-a",
         )
         await session.flush()
         with monkeypatch.context() as expiry_clock:
@@ -327,12 +331,12 @@ async def test_expired_and_consumed_approvals_cannot_be_reused(
                     session,
                     approval,
                     ApprovalApproveRequest(
-                        operator="operator-a",
                         acknowledges_hnr=True,
                         acknowledges_seeding=True,
                         acknowledges_plan_only=True,
                     ),
                     settings,
+                    actor="operator-a",
                 )
         assert expired.value.error_code == "APPROVAL_EXPIRED"
         assert approval.status == ApprovalStatus.EXPIRED
@@ -342,8 +346,9 @@ async def test_expired_and_consumed_approvals_cannot_be_reused(
         approval = await create_approval_request(
             session,
             second_record.id,
-            ApprovalCreateRequest(operator="operator-b"),
+            ApprovalCreateRequest(),
             settings,
+            actor="operator-b",
         )
         pass_result = preflight_result(settings)
         approval.preflight_result = pass_result.model_dump(mode="json")
@@ -352,12 +357,12 @@ async def test_expired_and_consumed_approvals_cannot_be_reused(
             session,
             approval,
             ApprovalApproveRequest(
-                operator="operator-b",
                 acknowledges_hnr=True,
                 acknowledges_seeding=True,
                 acknowledges_plan_only=True,
             ),
             settings,
+            actor="operator-b",
         )
         await session.flush()
         assert isinstance(plan, DownloadPlan)
@@ -390,8 +395,9 @@ async def test_unknown_or_blocked_preflight_cannot_generate_plan(
         approval = await create_approval_request(
             session,
             record.id,
-            ApprovalCreateRequest(operator="operator"),
+            ApprovalCreateRequest(),
             settings,
+            actor="operator",
         )
         for status in (PreflightStatus.UNKNOWN, PreflightStatus.BLOCKED):
             result = preflight_result(settings, status)
@@ -402,12 +408,12 @@ async def test_unknown_or_blocked_preflight_cannot_generate_plan(
                     session,
                     approval,
                     ApprovalApproveRequest(
-                        operator="operator",
                         acknowledges_hnr=True,
                         acknowledges_seeding=True,
                         acknowledges_plan_only=True,
                     ),
                     settings,
+                    actor="operator",
                 )
             assert caught.value.error_code == "PREFLIGHT_NOT_PASSABLE"
         assert await session.scalar(select(DownloadPlan)) is None
@@ -437,8 +443,9 @@ async def test_preflight_requires_consistent_complete_checks_and_stable_policy(
         approval = await create_approval_request(
             session,
             record.id,
-            ApprovalCreateRequest(operator="operator"),
+            ApprovalCreateRequest(),
             settings,
+            actor="operator",
         )
         incomplete = PreflightResult(
             overall_status=PreflightStatus.PASS,
@@ -457,12 +464,12 @@ async def test_preflight_requires_consistent_complete_checks_and_stable_policy(
                 session,
                 approval,
                 ApprovalApproveRequest(
-                    operator="operator",
                     acknowledges_hnr=True,
                     acknowledges_seeding=True,
                     acknowledges_plan_only=True,
                 ),
                 settings,
+                actor="operator",
             )
         assert incomplete_error.value.error_code == "PREFLIGHT_CHECKS_INCOMPLETE"
 
@@ -475,12 +482,12 @@ async def test_preflight_requires_consistent_complete_checks_and_stable_policy(
                 session,
                 approval,
                 ApprovalApproveRequest(
-                    operator="operator",
                     acknowledges_hnr=True,
                     acknowledges_seeding=True,
                     acknowledges_plan_only=True,
                 ),
                 changed_settings,
+                actor="operator",
             )
         assert changed.value.error_code == "PREFLIGHT_CONFIG_CHANGED"
         assert await session.scalar(select(DownloadPlan)) is None
@@ -496,8 +503,9 @@ async def test_download_plan_hash_and_closed_content_detect_tampering(
         approval = await create_approval_request(
             session,
             record.id,
-            ApprovalCreateRequest(operator="operator"),
+            ApprovalCreateRequest(),
             settings,
+            actor="operator",
         )
         passed = preflight_result(settings)
         approval.preflight_result = passed.model_dump(mode="json")
@@ -506,12 +514,12 @@ async def test_download_plan_hash_and_closed_content_detect_tampering(
             session,
             approval,
             ApprovalApproveRequest(
-                operator="operator",
                 acknowledges_hnr=True,
                 acknowledges_seeding=True,
                 acknowledges_plan_only=True,
             ),
             settings,
+            actor="operator",
         )
         original_ref = plan.torrent_ref
         plan.torrent_ref = "avistaz:details:changed"

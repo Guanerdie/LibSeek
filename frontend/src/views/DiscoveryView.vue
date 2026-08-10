@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
+import { useAuthStore } from '../stores/auth'
 import { useDiscoveryStore } from '../stores/discovery'
 import { formatShanghai } from '../utils/format'
 
+const auth = useAuthStore()
 const store = useDiscoveryStore()
+const canOperate = computed(() => auth.hasRole('operator'))
 onMounted(() => store.load())
 </script>
 
@@ -18,10 +21,18 @@ onMounted(() => store.load())
       title="发现任务"
       description="每次任务只读取外部数据；相同活跃任务会自动合并。"
     >
-      <button class="button primary" :disabled="store.creating" @click="store.create">
-        {{ store.creating ? '正在创建…' : '新建只读发现' }}
-      </button>
+      <div class="header-actions">
+        <button class="button secondary" :disabled="store.loading || store.creating" @click="store.refresh">刷新进度</button>
+        <button class="button primary" :disabled="store.creating || !canOperate" @click="store.create">
+          {{ store.creating ? '正在创建…' : '新建只读发现' }}
+        </button>
+      </div>
     </PageHeader>
+
+    <div class="permission-bar compact-permission">
+      <strong>当前账号：{{ auth.principal?.username }} · {{ auth.roleLabel }}</strong>
+      <small>{{ canOperate ? '可新建发现任务' : '当前角色仅可查看；新建任务需要操作者权限' }}</small>
+    </div>
 
     <PageState
       :loading="store.loading"
@@ -29,6 +40,7 @@ onMounted(() => store.load())
       :empty="!store.loading && !store.error && store.runs.length === 0"
       empty-text="尚无发现任务"
     />
+    <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
     <div v-if="store.runs.length" class="split-layout">
       <div class="task-list panel">
         <button v-for="run in store.runs" :key="run.id" :class="['task-row', { active: store.selected?.id === run.id }]" @click="store.selectRun(run.id)">
@@ -62,4 +74,3 @@ onMounted(() => store.load())
     </div>
   </section>
 </template>
-

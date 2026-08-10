@@ -9,8 +9,10 @@ import ApprovalView from '../src/views/ApprovalView.vue'
 import DiscoveryView from '../src/views/DiscoveryView.vue'
 import IdentityView from '../src/views/IdentityView.vue'
 import MediaView from '../src/views/MediaView.vue'
+import QbittorrentView from '../src/views/QbittorrentView.vue'
 import SystemView from '../src/views/SystemView.vue'
 import TorrentCandidatesView from '../src/views/TorrentCandidatesView.vue'
+import { useAuthStore } from '../src/stores/auth'
 import { useMediaStore } from '../src/stores/media'
 
 const mocks = vi.hoisted(() => ({
@@ -36,6 +38,8 @@ const mocks = vi.hoisted(() => ({
   approvalReject: vi.fn(),
   approvalRevoke: vi.fn(),
   approvalPlan: vi.fn(),
+  qbStatus: vi.fn(),
+  qbTorrents: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -43,6 +47,9 @@ vi.mock('vue-router', () => ({
 }))
 
 vi.mock('../src/api/client', () => ({
+  ApiError: class MockApiError extends Error {},
+  setApiCsrfToken: vi.fn(),
+  authApi: {},
   systemApi: { status: mocks.systemStatus },
   mediaApi: {
     list: mocks.mediaList,
@@ -72,6 +79,10 @@ vi.mock('../src/api/client', () => ({
     reject: mocks.approvalReject,
     revoke: mocks.approvalRevoke,
     plan: mocks.approvalPlan,
+  },
+  qbApi: {
+    status: mocks.qbStatus,
+    torrents: mocks.qbTorrents,
   },
 }))
 
@@ -169,6 +180,9 @@ const approval = {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  const auth = useAuthStore()
+  auth.principal = { username: 'admin-user', role: 'admin' }
+  auth.initialized = true
 })
 
 describe('MediaView', () => {
@@ -233,11 +247,19 @@ describe('DiscoveryView', () => {
     })
     const wrapper = mount(DiscoveryView)
     await flushPromises()
+    expect(wrapper.text()).toContain('刷新进度')
     await wrapper.get('.task-row').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('已完成')
     expect(wrapper.text()).toContain('DISCOVERY_RUN_SUCCEEDED')
     expect(wrapper.text()).toContain('发现3')
+
+    mocks.discoveryList.mockResolvedValueOnce({ items: [run], page: 1, page_size: 20, total: 1 })
+    mocks.discoveryGet.mockResolvedValueOnce({ ...run, audit_events: [] })
+    await wrapper.get('.header-actions .secondary').trigger('click')
+    await flushPromises()
+    expect(mocks.discoveryList).toHaveBeenCalledTimes(2)
+    expect(mocks.discoveryGet).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -327,15 +349,20 @@ describe('IdentityView', () => {
     mocks.confirmIdentity.mockResolvedValue({ status: 'CONFIRMED' })
     const wrapper = mount(IdentityView)
     await flushPromises()
+    expect(wrapper.text()).toContain('刷新候选')
     expect(wrapper.text()).toContain('NextFind 标题')
     expect(wrapper.text()).toContain('Test Series')
     expect(wrapper.text()).toContain('TMDB_ID_EXACT')
     expect(wrapper.text()).toContain('MEDIA_TYPE_CONFLICT')
 
-    await wrapper.get('.operator-bar input').setValue('operator-a')
+    await wrapper.get('.header-actions .secondary:nth-child(2)').trigger('click')
+    await flushPromises()
+    expect(mocks.mediaGet).toHaveBeenCalledTimes(2)
+    expect(mocks.metadataCandidates).toHaveBeenCalledTimes(2)
+
     await wrapper.get('.confirm-button').trigger('click')
     await flushPromises()
-    expect(mocks.confirmIdentity).toHaveBeenCalledWith('media-1', 'match-1', 'operator-a')
+    expect(mocks.confirmIdentity).toHaveBeenCalledWith('media-1', 'match-1')
   })
 })
 
@@ -402,12 +429,113 @@ describe('TorrentCandidatesView', () => {
     ])
     const wrapper = mount(TorrentCandidatesView)
     await flushPromises()
+    expect(wrapper.text()).toContain('刷新结果')
     expect(wrapper.text()).toContain('当前阶段仅支持只读搜索')
     expect(wrapper.text()).toContain('Test Series 2026 S01E03')
     expect(wrapper.text()).toContain('EPISODE_COVERAGE_EXACT')
     expect(wrapper.text()).toContain('HNR_UNKNOWN')
     expect(wrapper.text()).not.toContain('下载种子')
     expect(wrapper.find('a[href*="download"]').exists()).toBe(false)
+
+    await wrapper.get('.header-actions .secondary:nth-child(2)').trigger('click')
+    await flushPromises()
+    expect(mocks.torrentList).toHaveBeenCalledTimes(2)
+    expect(mocks.torrentGet).toHaveBeenCalledTimes(2)
+    expect(mocks.torrentCandidates).toHaveBeenCalledTimes(2)
+  })
+
+  it('validates and submits editable read-only search preferences', async () => {
+    const searchRun = {
+      id: 'search-2',
+      media_id: 'media-1',
+      site_id: 'avistaz',
+      status: 'TORRENT_REVIEW',
+      strategy_log: [],
+      sanitized_request: {},
+      candidate_count: 0,
+      error_code: null,
+      error_message: null,
+      started_at: '2026-08-10T00:00:00Z',
+      finished_at: '2026-08-10T00:01:00Z',
+      created_at: '2026-08-10T00:00:00Z',
+    }
+    mocks.mediaGet.mockResolvedValue(mediaItem)
+    mocks.torrentList.mockResolvedValue([searchRun])
+    mocks.torrentGet.mockResolvedValue(searchRun)
+    mocks.torrentCandidates.mockResolvedValue([])
+    mocks.torrentCreate.mockResolvedValue({ ...searchRun, job_id: 'job-1', deduplicated: false })
+
+    const wrapper = mount(TorrentCandidatesView)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="max-size-gib"]').setValue('-1')
+    expect(wrapper.text()).toContain('最大体积必须大于 0')
+    expect(wrapper.get('.search-preferences button[type="submit"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('input[type="checkbox"][value="2160p"]').setValue(false)
+    await wrapper.get('input[type="checkbox"][value="BluRay"]').setValue(false)
+    await wrapper.get('[data-testid="preferred-audio"]').setValue('Japanese, English')
+    await wrapper.get('[data-testid="preferred-subtitles"]').setValue('Chinese')
+    await wrapper.get('[data-testid="max-size-gib"]').setValue('5')
+    await wrapper.get('.search-preferences').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.torrentCreate).toHaveBeenCalledWith('media-1', {
+      preferred_resolutions: ['1080p'],
+      preferred_sources: ['WEB-DL'],
+      preferred_audio: ['Japanese', 'English'],
+      preferred_subtitles: ['Chinese'],
+      max_size_bytes: 5_368_709_120,
+    })
+    expect(wrapper.text()).toContain('任务异步执行')
+  })
+})
+
+describe('QbittorrentView', () => {
+  it('shows downloader status and tasks through read-only APIs', async () => {
+    mocks.qbStatus.mockResolvedValue({
+      connected: true,
+      application_version: 'v5.0.4',
+      web_api_version: '2.11.4',
+      torrent_count: 1,
+      category_count: 2,
+      active_seeding_count: 1,
+    })
+    mocks.qbTorrents.mockResolvedValue({
+      total: 1,
+      items: [
+        {
+          hash: 'a'.repeat(40),
+          name: 'Test Series S01E03',
+          size: 5_368_709_120,
+          progress: 0.75,
+          ratio: 1.25,
+          state: 'downloading',
+          added_on: 1_786_291_200,
+          completion_on: 0,
+          seeding_time: 0,
+          uploaded: 1_073_741_824,
+          upspeed: 1_048_576,
+          category: 'media',
+          tags: 'avistaz',
+          save_path: '/downloads/media',
+        },
+      ],
+    })
+
+    const wrapper = mount(QbittorrentView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('此页面只调用状态与任务查询接口')
+    expect(wrapper.text()).toContain('v5.0.4')
+    expect(wrapper.text()).toContain('Test Series S01E03')
+    expect(wrapper.text()).toContain('75.0%')
+    expect(wrapper.text()).toContain('/downloads/media')
+
+    await wrapper.get('.page-header button').trigger('click')
+    await flushPromises()
+    expect(mocks.qbStatus).toHaveBeenCalledTimes(2)
+    expect(mocks.qbTorrents).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -427,12 +555,48 @@ describe('Approval views', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('候选 H&R 规则未知')
     expect(wrapper.text()).toContain('当前阶段只生成下载计划')
-    await wrapper.get('input[placeholder="审计记录中的操作者"]').setValue('reviewer')
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     for (const checkbox of checkboxes) await checkbox.setValue(true)
     const approveButton = wrapper
       .findAll('button')
       .find((button) => button.text().includes('批准并生成计划'))
     expect(approveButton?.attributes('disabled')).toBeDefined()
+  })
+
+  it('reacts to role changes for operator and admin approval controls', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({
+      ...approval,
+      preflight_result: {
+        ...approval.preflight_result,
+        overall_status: 'PASS',
+        checks: [
+          {
+            code: 'READY',
+            status: 'PASS',
+            message: '预检通过',
+            details: {},
+          },
+        ],
+      },
+    })
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+    const auth = useAuthStore()
+    const findButton = (text: string) => wrapper.findAll('button').find((item) => item.text().includes(text))
+
+    for (const checkbox of wrapper.findAll('input[type="checkbox"]')) await checkbox.setValue(true)
+    expect(findButton('批准并生成计划')?.attributes('disabled')).toBeUndefined()
+    expect(findButton('拒绝')?.attributes('disabled')).toBeUndefined()
+
+    auth.principal = { username: 'operator-user', role: 'operator' }
+    await nextTick()
+    expect(findButton('批准并生成计划')?.attributes('disabled')).toBeDefined()
+    expect(findButton('运行 qB 只读预检')?.attributes('disabled')).toBeUndefined()
+    expect(findButton('拒绝')?.attributes('disabled')).toBeUndefined()
+
+    auth.principal = { username: 'viewer-user', role: 'viewer' }
+    await nextTick()
+    expect(findButton('运行 qB 只读预检')?.attributes('disabled')).toBeDefined()
+    expect(findButton('拒绝')?.attributes('disabled')).toBeDefined()
   })
 })
