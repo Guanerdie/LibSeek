@@ -33,6 +33,11 @@ from app.workers.processor import JobProcessor
 from tests.test_discovery_worker import FakeMediaSource
 
 
+class EnabledAvistaZMockAdapter(AvistaZMockAdapter):
+    def manifest(self):
+        return super().manifest().model_copy(update={"enabled": True})
+
+
 def record(
     tmdb_id: int,
     *,
@@ -362,7 +367,9 @@ async def test_torrent_search_persists_only_sanitized_scored_candidates(
             session,
             item,
             TorrentSearchCreateRequest(
-                preferred_resolutions=["1080p"], preferred_subtitles=["Chinese"]
+                site_id="avistaz",
+                preferred_resolutions=["1080p"],
+                preferred_subtitles=["Chinese"],
             ),
             max_attempts=3,
         )
@@ -384,7 +391,7 @@ async def test_torrent_search_persists_only_sanitized_scored_candidates(
         seeders=5,
         hit_and_run=False,
     )
-    pt = AvistaZMockAdapter([fixture], manifest_id="avistaz")
+    pt = EnabledAvistaZMockAdapter([fixture], manifest_id="avistaz")
     processor = JobProcessor(
         session_factory,
         "worker-pt",

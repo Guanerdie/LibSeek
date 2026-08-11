@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from enum import StrEnum
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AliasChoices,
@@ -10,6 +11,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
 from app.core.episodes import EpisodeMatrix, normalize_episode_codes, normalize_episode_matrix
@@ -25,6 +27,37 @@ SiteId = Annotated[
         pattern=r"^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$",
     ),
 ]
+
+
+class PtSearchMode(StrEnum):
+    TMDB_ID = "TMDB_ID"
+    IMDB_ID = "IMDB_ID"
+    TEXT = "TEXT"
+
+
+class PtSiteCatalogEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    site_id: SiteId
+    display_name: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=300)
+    available_for_search: bool
+    unavailable_reason_code: str | None
+    unavailable_reason_message: str | None
+    mode: Literal["LIVE_READ_ONLY_SEARCH", "DISABLED_BY_DEFAULT"]
+    search_modes: tuple[PtSearchMode, ...]
+    media_types: tuple[MediaType, ...]
+    manual_only: bool
+    promotion_metadata: bool
+    hit_and_run_metadata: bool
+    torrent_fetch_enabled: bool
+
+
+class PtSiteCatalogResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    default_site_id: SiteId | None
+    sites: tuple[PtSiteCatalogEntry, ...]
 
 
 class AdapterManifest(BaseModel):
@@ -141,9 +174,21 @@ class TorrentCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     site_id: SiteId
-    torrent_id: str
+    torrent_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$",
+    )
     release_title: str = Field(validation_alias=AliasChoices("release_title", "title"))
-    details_ref: str
+    details_ref: str = Field(
+        min_length=5,
+        max_length=180,
+        pattern=(
+            r"^[a-z0-9][a-z0-9-]{0,23}:"
+            r"[a-z0-9][a-z0-9_-]{0,49}:"
+            r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$"
+        ),
+    )
     media_type: MediaType
     tmdb_id: int | None = None
     imdb_id: str | None = None
@@ -175,15 +220,11 @@ class TorrentCandidate(BaseModel):
     def title(self) -> str:
         return self.release_title
 
-    @field_validator("details_ref")
-    @classmethod
-    def details_ref_must_be_internal(cls, value: str) -> str:
-        lowered = value.casefold()
-        if lowered.startswith(("http://", "https://")) or any(
-            marker in lowered for marker in ("token=", "pid=", "passkey=", "download")
-        ):
-            raise ValueError("details_ref must be an opaque internal reference")
-        return value
+    @model_validator(mode="after")
+    def details_ref_must_match_site(self) -> TorrentCandidate:
+        if not self.details_ref.startswith(f"{self.site_id}:"):
+            raise ValueError("details_ref must match site_id")
+        return self
 
 
 class TorrentSearchRequest(BaseModel):

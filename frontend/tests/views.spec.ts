@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   discoveryGet: vi.fn(),
   discoveryCreate: vi.fn(),
   adapterList: vi.fn(),
+  ptSiteCatalog: vi.fn(),
   torrentList: vi.fn(),
   torrentGet: vi.fn(),
   torrentCandidates: vi.fn(),
@@ -70,6 +71,7 @@ vi.mock('../src/api/client', () => ({
     create: mocks.discoveryCreate,
   },
   adapterApi: { list: mocks.adapterList },
+  ptSiteApi: { catalog: mocks.ptSiteCatalog },
   torrentApi: {
     list: mocks.torrentList,
     get: mocks.torrentGet,
@@ -121,6 +123,51 @@ const mediaItem = {
   workflow_status: 'IDENTITY_REVIEW' as const,
   discovered_at: '2026-08-10T00:00:00Z',
   updated_at: '2026-08-10T00:00:00Z',
+}
+
+const ptSiteCatalog = {
+  default_site_id: 'avistaz',
+  sites: [
+    {
+      site_id: 'avistaz',
+      display_name: 'AvistaZ',
+      description: 'AvistaZ 只读候选搜索',
+      available_for_search: true,
+      mode: 'LIVE_READ_ONLY_SEARCH',
+      search_modes: ['TMDB_ID', 'IMDB_ID', 'TEXT'],
+      media_types: ['movie', 'tv'],
+      manual_only: false,
+      promotion_metadata: true,
+      hit_and_run_metadata: true,
+      torrent_fetch_enabled: false,
+      unavailable_reason_code: null,
+      unavailable_reason_message: null,
+    },
+    {
+      site_id: 'fixture-nexus',
+      display_name: 'Fixture Nexus',
+      description: '脱敏 fixture 验证站点',
+      available_for_search: false,
+      mode: 'DISABLED_BY_DEFAULT',
+      search_modes: ['TEXT'],
+      media_types: ['movie', 'tv'],
+      manual_only: true,
+      promotion_metadata: false,
+      hit_and_run_metadata: false,
+      torrent_fetch_enabled: false,
+      unavailable_reason_code: 'NEXUSPHP_SITE_DISABLED',
+      unavailable_reason_message: '该站点 Profile 尚未启用',
+    },
+  ],
+}
+
+const syntheticTwoSite = {
+  ...ptSiteCatalog.sites[0],
+  site_id: 'synthetic-two',
+  display_name: 'Synthetic Two',
+  description: '完全合成的第二 PT 站点',
+  search_modes: ['TEXT'],
+  manual_only: true,
 }
 
 const run = {
@@ -247,6 +294,7 @@ const execution = {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  mocks.ptSiteCatalog.mockResolvedValue(ptSiteCatalog)
   const auth = useAuthStore()
   auth.principal = { username: 'admin-user', role: 'admin' }
   auth.initialized = true
@@ -438,7 +486,7 @@ describe('TorrentCandidatesView', () => {
     const searchRun = {
       id: 'search-1',
       media_id: 'media-1',
-      site_id: 'avistaz',
+      site_id: 'synthetic-two',
       status: 'TORRENT_REVIEW',
       strategy_log: [{ strategy: 'TMDB_ID', candidate_count: 1 }],
       sanitized_request: {},
@@ -449,6 +497,10 @@ describe('TorrentCandidatesView', () => {
       finished_at: '2026-08-10T00:01:00Z',
       created_at: '2026-08-10T00:00:00Z',
     }
+    mocks.ptSiteCatalog.mockResolvedValueOnce({
+      ...ptSiteCatalog,
+      sites: [...ptSiteCatalog.sites, syntheticTwoSite],
+    })
     mocks.mediaGet.mockResolvedValue(mediaItem)
     mocks.torrentList.mockResolvedValue([searchRun])
     mocks.torrentGet.mockResolvedValue(searchRun)
@@ -461,10 +513,10 @@ describe('TorrentCandidatesView', () => {
         warnings: ['HNR_UNKNOWN'],
         created_at: '2026-08-10T00:01:00Z',
         candidate: {
-          site_id: 'avistaz',
+          site_id: 'synthetic-two',
           torrent_id: 'torrent-1',
           release_title: 'Test Series 2026 S01E03 1080p WEB-DL',
-          details_ref: 'avistaz:details:safe',
+          details_ref: 'synthetic-two:details:safe',
           media_type: 'tv',
           tmdb_id: 42,
           imdb_id: 'tt0042',
@@ -496,13 +548,51 @@ describe('TorrentCandidatesView', () => {
     ])
     const wrapper = mount(TorrentCandidatesView)
     await flushPromises()
-    expect(wrapper.text()).toContain('刷新结果')
-    expect(wrapper.text()).toContain('当前阶段仅支持只读搜索')
-    expect(wrapper.text()).toContain('Test Series 2026 S01E03')
-    expect(wrapper.text()).toContain('EPISODE_COVERAGE_EXACT')
-    expect(wrapper.text()).toContain('HNR_UNKNOWN')
+    expect(wrapper.get('.header-actions').text()).toContain('刷新结果')
+    expect(wrapper.get('.phase-banner').text()).toContain('当前阶段仅支持只读搜索')
+    expect(wrapper.get('.pt-site-capabilities').text()).toContain('允许策略编排')
+    const mediaSummary = wrapper.get('.result-toolbar > div')
+    expect(mediaSummary.get('strong').text()).toBe('测试剧集')
+    expect(mediaSummary.get('small').text()).toBe('TMDB 42 · Synthetic Two (synthetic-two)')
+
+    const runOption = wrapper.get('.result-toolbar select option[value="search-1"]')
+    expect(runOption.text()).toMatch(
+      /^Synthetic Two \(synthetic-two\) · .+ · TORRENT_REVIEW · 1 项$/,
+    )
+
+    const siteSelector = wrapper.get('select[aria-label="PT 站点"]')
+    expect(siteSelector.get('option[value="avistaz"]').text()).toContain('AvistaZ (avistaz)')
+    expect(siteSelector.get('option[value="synthetic-two"]').text()).toBe(
+      'Synthetic Two (synthetic-two) · 可搜索',
+    )
+    expect(siteSelector.get('option[value="fixture-nexus"]').text()).toBe(
+      'Fixture Nexus (fixture-nexus) · 已禁用',
+    )
+
+    const desktopCandidate = wrapper.get('.torrent-candidate-desktop-list tbody tr')
+    expect(desktopCandidate.get('.site-id-badge').text()).toBe(
+      'Synthetic Two (synthetic-two)',
+    )
+    expect(desktopCandidate.get('.release-cell strong').text()).toBe(
+      'Test Series 2026 S01E03 1080p WEB-DL',
+    )
+    expect(desktopCandidate.get('.reason-list').text()).toContain('EPISODE_COVERAGE_EXACT')
+    expect(desktopCandidate.get('.warning-list').text()).toContain('HNR_UNKNOWN')
+
+    const mobileCandidates = wrapper.findAll('.torrent-candidate-mobile-item')
+    expect(mobileCandidates).toHaveLength(1)
+    expect(mobileCandidates[0].get('.site-id-badge').text()).toBe(
+      'Synthetic Two (synthetic-two)',
+    )
+    expect(mobileCandidates[0].get('h2').text()).toBe(
+      'Test Series 2026 S01E03 1080p WEB-DL',
+    )
     expect(wrapper.text()).not.toContain('下载种子')
     expect(wrapper.find('a[href*="download"]').exists()).toBe(false)
+
+    await wrapper.get('select[aria-label="PT 站点"]').setValue('fixture-nexus')
+    expect(wrapper.get('.pt-site-unavailable').text()).toBe('该站点 Profile 尚未启用')
+    expect(wrapper.get('.search-preferences button[type="submit"]').attributes('disabled')).toBeDefined()
 
     await wrapper.get('.header-actions .secondary:nth-child(2)').trigger('click')
     await flushPromises()
@@ -513,7 +603,7 @@ describe('TorrentCandidatesView', () => {
 
   it('validates and submits editable read-only search preferences', async () => {
     const searchRun = {
-      id: 'search-2',
+      id: 'search-old',
       media_id: 'media-1',
       site_id: 'avistaz',
       status: 'TORRENT_REVIEW',
@@ -526,21 +616,35 @@ describe('TorrentCandidatesView', () => {
       finished_at: '2026-08-10T00:01:00Z',
       created_at: '2026-08-10T00:00:00Z',
     }
+    const createdRun = { ...searchRun, id: 'search-new', site_id: 'synthetic-two' }
+    mocks.ptSiteCatalog.mockResolvedValueOnce({
+      ...ptSiteCatalog,
+      sites: [...ptSiteCatalog.sites, syntheticTwoSite],
+    })
     mocks.mediaGet.mockResolvedValue(mediaItem)
     mocks.torrentList.mockResolvedValue([searchRun])
-    mocks.torrentGet.mockResolvedValue(searchRun)
-    mocks.torrentCandidates.mockResolvedValue([])
-    mocks.torrentCreate.mockResolvedValue({ ...searchRun, job_id: 'job-1', deduplicated: false })
+    mocks.torrentGet
+      .mockResolvedValueOnce(searchRun)
+      .mockResolvedValueOnce(createdRun)
+    mocks.torrentCandidates
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+    mocks.torrentCreate.mockResolvedValue({
+      ...createdRun,
+      job_id: 'job-1',
+      deduplicated: false,
+    })
 
     const wrapper = mount(TorrentCandidatesView)
     await flushPromises()
 
     await wrapper.get('[data-testid="max-size-gib"]').setValue('-1')
-    expect(wrapper.text()).toContain('最大体积必须大于 0')
+    expect(wrapper.get('.preference-error').text()).toContain('最大体积必须大于 0')
     expect(wrapper.get('.search-preferences button[type="submit"]').attributes('disabled')).toBeDefined()
 
     await wrapper.get('input[type="checkbox"][value="2160p"]').setValue(false)
     await wrapper.get('input[type="checkbox"][value="BluRay"]').setValue(false)
+    await wrapper.get('select[aria-label="PT 站点"]').setValue('synthetic-two')
     await wrapper.get('[data-testid="preferred-audio"]').setValue('Japanese, English')
     await wrapper.get('[data-testid="preferred-subtitles"]').setValue('Chinese')
     await wrapper.get('[data-testid="max-size-gib"]').setValue('5')
@@ -548,13 +652,24 @@ describe('TorrentCandidatesView', () => {
     await flushPromises()
 
     expect(mocks.torrentCreate).toHaveBeenCalledWith('media-1', {
+      site_id: 'synthetic-two',
       preferred_resolutions: ['1080p'],
       preferred_sources: ['WEB-DL'],
       preferred_audio: ['Japanese', 'English'],
       preferred_subtitles: ['Chinese'],
       max_size_bytes: 5_368_709_120,
     })
-    expect(wrapper.text()).toContain('任务异步执行')
+    expect(wrapper.get('.torrent-candidates-page > .notice-state').text()).toBe(
+      'Synthetic Two 只读搜索已创建；任务异步执行，可刷新查看最新结果',
+    )
+    const mediaSummary = wrapper.get('.result-toolbar > div')
+    expect(mediaSummary.get('strong').text()).toBe('测试剧集')
+    expect(mediaSummary.get('small').text()).toBe('TMDB 42 · Synthetic Two (synthetic-two)')
+    const runSelector = wrapper.get('.result-toolbar select')
+    expect((runSelector.element as HTMLSelectElement).value).toBe('search-new')
+    expect(runSelector.get('option[value="search-new"]').text()).toMatch(
+      /^Synthetic Two \(synthetic-two\) · .+ · TORRENT_REVIEW · 0 项$/,
+    )
   })
 })
 

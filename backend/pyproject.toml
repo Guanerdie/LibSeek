@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unin-media-orchestrator"
-version = "0.7.0"
+version = "0.8.0"
 description = "Secure media discovery, approval, download execution, monitoring, and plan-only import orchestration"
 requires-python = ">=3.12"
 dependencies = [

@@ -12,6 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.downloaders.qbittorrent import QbAddResult
+from app.adapters.pt_sites.catalog import PtSiteCatalog, PtSiteDeclaration
+from app.adapters.pt_sites.execution_registry import (
+    PtExecutionAdapter,
+    PtExecutionRegistry,
+)
 from app.core.config import Settings
 from app.errors import AppError
 from app.models.entities import (
@@ -40,7 +45,12 @@ from app.models.enums import (
     PreflightStatus,
     WorkflowStatus,
 )
-from app.schemas.adapters import TorrentCandidate, TorrentSearchRequest
+from app.schemas.adapters import (
+    AdapterManifest,
+    PtSearchMode,
+    TorrentCandidate,
+    TorrentSearchRequest,
+)
 from app.schemas.approvals import (
     ApprovalCandidateSnapshot,
     MediaDestinationPlan,
@@ -108,12 +118,12 @@ def executor_settings(**overrides: object) -> Settings:
     return Settings(**values)  # type: ignore[arg-type]
 
 
-def approved_candidate(info_hash: str) -> TorrentCandidate:
+def approved_candidate(info_hash: str, *, site_id: str = "avistaz") -> TorrentCandidate:
     return TorrentCandidate(
-        site_id="avistaz",
+        site_id=site_id,
         torrent_id=TORRENT_ID,
         release_title=RELEASE_TITLE,
-        details_ref="avistaz:details:approved-fixed-ref",
+        details_ref=f"{site_id}:details:approved-fixed-ref",
         media_type=MediaType.MOVIE,
         tmdb_id=424242,
         year=2026,
@@ -159,14 +169,43 @@ class FakeAvistaZ:
         payload: bytes,
         *,
         search_error: AppError | None = None,
+        manifest_id: str = "avistaz",
+        manifest_enabled: bool = True,
+        fetch_enabled: bool = True,
+        adapter_type: str = "pt_site",
+        search_capabilities: dict[str, bool] | None = None,
     ) -> None:
         self.candidates = candidates
         self.payload = payload
         self.search_error = search_error
+        self.manifest_id = manifest_id
+        self.manifest_enabled = manifest_enabled
+        self.fetch_enabled = fetch_enabled
+        self.adapter_type = adapter_type
+        self.search_capabilities = search_capabilities or {
+            "tmdb_search": True,
+            "imdb_search": True,
+            "text_search": True,
+        }
         self.search_calls: list[TorrentSearchRequest] = []
         self.fetch_calls: list[str] = []
         self.closed = False
         self.before_request: Callable[[], Awaitable[None]] | None = None
+
+    def manifest(self) -> AdapterManifest:
+        return AdapterManifest(
+            id=self.manifest_id,
+            name="AvistaZ fixture",
+            adapter_type=self.adapter_type,
+            version="test",
+            enabled=self.manifest_enabled,
+            mode="FIXTURE_EXECUTION",
+            description="Offline execution fixture",
+            capabilities={
+                "fetch_torrent_enabled": self.fetch_enabled,
+                **self.search_capabilities,
+            },
+        )
 
     def set_before_request_guard(
         self, guard: Callable[[], Awaitable[None]] | None
@@ -189,6 +228,38 @@ class FakeAvistaZ:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def execution_registry(
+    factory: Callable[[], PtExecutionAdapter],
+    *,
+    site_id: str = "avistaz",
+    fetchable: bool = True,
+    search_modes: tuple[PtSearchMode, ...] = (
+        PtSearchMode.TMDB_ID,
+        PtSearchMode.TEXT,
+    ),
+    media_types: tuple[MediaType, ...] = (MediaType.MOVIE, MediaType.TV),
+) -> PtExecutionRegistry:
+    catalog = PtSiteCatalog(
+        (
+            PtSiteDeclaration(
+                site_id=site_id,
+                display_name="Execution fixture",
+                description="Offline execution registry fixture",
+                search_modes=search_modes,
+                media_types=media_types,
+                search_enabled=True,
+                runtime_ready=True,
+                manual_only=False,
+                torrent_fetch_enabled=fetchable,
+            ),
+        ),
+        default_site_id=site_id,
+    )
+    registry = PtExecutionRegistry(catalog)
+    registry.register(site_id, factory)
+    return registry
 
 
 class FakeQb:
@@ -312,6 +383,8 @@ async def seed_pending_execution(
     info_hash: str,
     *,
     automatic: bool = False,
+    site_id: str = "avistaz",
+    media_type: MediaType = MediaType.MOVIE,
 ) -> str:
     now = datetime.now(UTC)
     expires_at = now + timedelta(hours=1)
@@ -331,7 +404,7 @@ async def seed_pending_execution(
         media = MediaItem(
             source="nextfind",
             source_item_id=f"executor-media-{info_hash[:8]}",
-            media_type=MediaType.MOVIE,
+            media_type=media_type,
             tmdb_id=424242,
             title="Execution Movie",
             year=2026,
@@ -345,7 +418,7 @@ async def seed_pending_execution(
         await session.flush()
         search_run = TorrentSearchRun(
             media_id=media.id,
-            site_id="avistaz",
+            site_id=site_id,
             status=WorkflowStatus.TORRENT_REVIEW,
             candidate_count=1,
         )
@@ -353,7 +426,7 @@ async def seed_pending_execution(
         await session.flush()
         candidate = TorrentCandidateRecord(
             search_run_id=search_run.id,
-            site_id="avistaz",
+            site_id=site_id,
             torrent_id=TORRENT_ID,
             candidate_snapshot={},
             match_score=0.99,
@@ -369,9 +442,9 @@ async def seed_pending_execution(
             tmdb_id=media.tmdb_id,
             year=media.year,
             torrent_candidate_id=candidate.id,
-            site_id="avistaz",
+            site_id=site_id,
             torrent_id=TORRENT_ID,
-            torrent_ref="avistaz:details:approved-fixed-ref",
+            torrent_ref=f"{site_id}:details:approved-fixed-ref",
             release_title=RELEASE_TITLE,
             size_bytes=1024,
             info_hash=info_hash,
@@ -422,8 +495,8 @@ async def seed_pending_execution(
             approval_snapshot_hash=approval.snapshot_hash,
             preflight_policy_fingerprint=preflight.policy_fingerprint,
             plan_hash="",
-            site_id="avistaz",
-            torrent_ref="avistaz:details:approved-fixed-ref",
+            site_id=site_id,
+            torrent_ref=f"{site_id}:details:approved-fixed-ref",
             expected_info_hash=info_hash,
             release_title=RELEASE_TITLE,
             save_path_ref="movies-root",
@@ -505,7 +578,7 @@ async def test_executor_requires_all_three_write_gates_before_claim_or_factory(
     executor = DownloadExecutor(
         session_factory,
         "executor-test",
-        forbidden_factory,
+        execution_registry(forbidden_factory),
         forbidden_factory,
         settings,
     )
@@ -515,6 +588,325 @@ async def test_executor_requires_all_three_write_gates_before_claim_or_factory(
     assert caught.value.error_code == "DOWNLOAD_EXECUTOR_DISABLED"
     assert caught.value.details == {"missing_flags": ["ENABLE_QB_WRITE"]}
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_execution_registry_blocks_non_fetchable_site_before_factory() -> None:
+    factory_calls = 0
+
+    def forbidden_factory() -> NoReturn:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("search-only site factory must not run")
+
+    registry = execution_registry(
+        forbidden_factory,
+        site_id="fixture-search-only",
+        fetchable=False,
+        search_modes=(PtSearchMode.TEXT,),
+    )
+
+    with pytest.raises(AppError) as caught:
+        await registry.create("fixture-search-only")
+
+    assert caught.value.error_code == "PT_SITE_TORRENT_FETCH_UNSUPPORTED"
+    assert factory_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_blocks_search_only_site_before_pt_or_qb_factory(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, info_hash = torrent_fixture()
+    settings = executor_settings()
+    site_id = "fixture-search-only"
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        site_id=site_id,
+    )
+    pt_factory_calls = 0
+    qb_factory_calls = 0
+
+    def forbidden_pt_factory() -> NoReturn:
+        nonlocal pt_factory_calls
+        pt_factory_calls += 1
+        raise AssertionError("search-only site must not create a PT execution adapter")
+
+    def forbidden_qb_factory() -> NoReturn:
+        nonlocal qb_factory_calls
+        qb_factory_calls += 1
+        raise AssertionError("search-only site must not create a qB adapter")
+
+    registry = execution_registry(
+        forbidden_pt_factory,
+        site_id=site_id,
+        fetchable=False,
+        search_modes=(PtSearchMode.TEXT,),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-search-only",
+        registry,
+        forbidden_qb_factory,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    assert pt_factory_calls == 0
+    assert qb_factory_calls == 0
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.error_code == "PT_SITE_TORRENT_FETCH_UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "manifest_id",
+        "fetch_enabled",
+        "manifest_enabled",
+        "adapter_type",
+        "expected_error",
+    ),
+    [
+        (
+            "other-site",
+            True,
+            True,
+            "pt_site",
+            "PT_SITE_EXECUTION_ADAPTER_ID_MISMATCH",
+        ),
+        (
+            "avistaz",
+            False,
+            True,
+            "pt_site",
+            "PT_SITE_EXECUTION_ADAPTER_CAPABILITY_MISMATCH",
+        ),
+        (
+            "avistaz",
+            True,
+            False,
+            "pt_site",
+            "PT_SITE_EXECUTION_ADAPTER_CAPABILITY_MISMATCH",
+        ),
+        (
+            "avistaz",
+            True,
+            True,
+            "metadata",
+            "PT_SITE_EXECUTION_ADAPTER_CAPABILITY_MISMATCH",
+        ),
+    ],
+)
+async def test_execution_registry_rejects_manifest_mismatch_and_closes_adapter(
+    manifest_id: str,
+    fetch_enabled: bool,
+    manifest_enabled: bool,
+    adapter_type: str,
+    expected_error: str,
+) -> None:
+    payload, info_hash = torrent_fixture()
+    adapter = FakeAvistaZ(
+        [approved_candidate(info_hash)],
+        payload,
+        manifest_id=manifest_id,
+        fetch_enabled=fetch_enabled,
+        manifest_enabled=manifest_enabled,
+        adapter_type=adapter_type,
+    )
+    registry = execution_registry(lambda: adapter)
+
+    with pytest.raises(AppError) as caught:
+        await registry.create("avistaz")
+
+    assert caught.value.error_code == expected_error
+    assert adapter.closed is True
+    assert adapter.search_calls == []
+    assert adapter.fetch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_execution_registry_rejects_declared_search_capability_mismatch() -> None:
+    payload, info_hash = torrent_fixture()
+    adapter = FakeAvistaZ(
+        [approved_candidate(info_hash)],
+        payload,
+        search_capabilities={
+            "tmdb_search": True,
+            "imdb_search": True,
+            "text_search": False,
+        },
+    )
+    registry = execution_registry(lambda: adapter)
+
+    with pytest.raises(AppError) as caught:
+        await registry.create("avistaz")
+
+    assert caught.value.error_code == "PT_SITE_EXECUTION_ADAPTER_CAPABILITY_MISMATCH"
+    assert adapter.closed is True
+    assert adapter.search_calls == []
+    assert adapter.fetch_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("search_modes", "media_types", "media_type", "expected_error"),
+    [
+        (
+            (PtSearchMode.IMDB_ID,),
+            (MediaType.MOVIE, MediaType.TV),
+            MediaType.MOVIE,
+            "PT_SITE_EXECUTION_SEARCH_UNSUPPORTED",
+        ),
+        (
+            (PtSearchMode.TEXT,),
+            (MediaType.MOVIE,),
+            MediaType.TV,
+            "PT_SITE_MEDIA_TYPE_UNSUPPORTED",
+        ),
+    ],
+)
+async def test_executor_blocks_unsupported_binding_before_pt_or_qb_factory(
+    session_factory: async_sessionmaker[AsyncSession],
+    search_modes: tuple[PtSearchMode, ...],
+    media_types: tuple[MediaType, ...],
+    media_type: MediaType,
+    expected_error: str,
+) -> None:
+    _, info_hash = torrent_fixture()
+    settings = executor_settings()
+    site_id = "fixture-executable"
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        site_id=site_id,
+        media_type=media_type,
+    )
+    pt_factory_calls = 0
+    qb_factory_calls = 0
+
+    def forbidden_pt_factory() -> NoReturn:
+        nonlocal pt_factory_calls
+        pt_factory_calls += 1
+        raise AssertionError("unsupported binding must not create a PT adapter")
+
+    def forbidden_qb_factory() -> NoReturn:
+        nonlocal qb_factory_calls
+        qb_factory_calls += 1
+        raise AssertionError("unsupported binding must not create a qB adapter")
+
+    registry = execution_registry(
+        forbidden_pt_factory,
+        site_id=site_id,
+        search_modes=search_modes,
+        media_types=media_types,
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-unsupported-binding",
+        registry,
+        forbidden_qb_factory,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    assert pt_factory_calls == 0
+    assert qb_factory_calls == 0
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.error_code == expected_error
+
+
+@pytest.mark.asyncio
+async def test_executor_unknown_plan_site_never_falls_back_or_creates_qb(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    site_id = "fixture-executable"
+    execution_id = await seed_pending_execution(
+        session_factory, settings, info_hash, site_id=site_id
+    )
+    factory_calls = 0
+
+    def forbidden_factory() -> FakeAvistaZ:
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakeAvistaZ([approved_candidate(info_hash)], payload)
+
+    def forbidden_qb_factory() -> NoReturn:
+        raise AssertionError("qB factory must not run")
+
+    registry = execution_registry(forbidden_factory)
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        registry,
+        forbidden_qb_factory,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    assert factory_calls == 0
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.error_code == "PT_SITE_NOT_REGISTERED"
+
+
+@pytest.mark.asyncio
+async def test_executor_routes_fixture_site_without_avistaz_fallback(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    site_id = "fixture-executable"
+    execution_id = await seed_pending_execution(
+        session_factory, settings, info_hash, site_id=site_id
+    )
+    pt_site = FakeAvistaZ(
+        [approved_candidate(info_hash, site_id=site_id)],
+        payload,
+        manifest_id=site_id,
+    )
+    observed = qb_observation(info_hash)
+    qb = FakeQb(
+        [[], [observed]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+    )
+    registry = execution_registry(
+        lambda: pt_site,
+        site_id=site_id,
+        search_modes=(PtSearchMode.TEXT,),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        registry,
+        lambda: qb,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    assert len(pt_site.search_calls) == 1
+    assert pt_site.search_calls[0].tmdb is None
+    assert pt_site.search_calls[0].imdb is None
+    assert pt_site.search_calls[0].search == RELEASE_TITLE
+    assert pt_site.fetch_calls == [TORRENT_ID]
+    assert qb.added_payloads == [payload]
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.SUBMITTED
 
 
 @pytest.mark.asyncio
@@ -531,7 +923,11 @@ async def test_executor_submits_only_exact_researched_torrent_and_creates_job(
         add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
     )
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -539,6 +935,8 @@ async def test_executor_submits_only_exact_researched_torrent_and_creates_job(
     assert len(avistaz.search_calls) == 1
     assert avistaz.search_calls[0].tmdb == 424242
     assert avistaz.fetch_calls == [TORRENT_ID]
+    assert avistaz.before_request is not None
+    assert qb.before_request is not None
     assert qb.calls == [
         "authenticate",
         "list_torrents",
@@ -578,7 +976,11 @@ async def test_existing_torrent_is_idempotent_and_never_calls_add(
     observed = qb_observation(info_hash)
     qb = FakeQb([[observed], [observed]])
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -609,12 +1011,18 @@ async def test_same_title_with_different_torrent_id_never_fetches_or_reaches_qb(
         raise AssertionError("fuzzy title match must not reach qB")
 
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, qb_factory, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        qb_factory,
+        settings,
     )
 
     assert await executor.run_once() is True
 
-    assert len(avistaz.search_calls) == 1
+    assert len(avistaz.search_calls) == 2
+    assert avistaz.search_calls[0].tmdb == 424242
+    assert avistaz.search_calls[1].search == RELEASE_TITLE
     assert avistaz.fetch_calls == []
     assert qb_factory_calls == 0
     async with session_factory() as session:
@@ -643,7 +1051,11 @@ async def test_unknown_add_outcome_is_terminal_and_never_automatically_retried(
         ),
     )
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -688,7 +1100,11 @@ async def test_automatic_policy_change_before_qb_post_cancels_without_write(
         before_add_request=lambda: disable_automatic_execution(session_factory),
     )
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -741,7 +1157,11 @@ async def test_write_guard_blocks_policy_change_after_global_request_guard(
         before_write_guard=lambda: disable_automatic_execution(session_factory),
     )
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -793,7 +1213,11 @@ async def test_automatic_policy_change_after_qb_add_requires_manual_reconciliati
         before_list_request=change_policy_before_post_add_observation,
     )
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -853,7 +1277,11 @@ async def test_policy_change_between_final_fence_and_finalize_is_outcome_unknown
         change_policy_then_finalize,
     )
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -906,7 +1334,11 @@ async def test_automatic_execution_rejects_candidate_without_tmdb_binding(
         raise AssertionError("qB must not be created for an unbound TMDB candidate")
 
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, qb_factory, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        qb_factory,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -946,7 +1378,11 @@ async def test_retryable_validation_failure_is_sanitized_and_does_not_touch_qb(
         raise AssertionError("qB must not be created before reservation")
 
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, qb_factory, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        qb_factory,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -985,7 +1421,11 @@ async def test_expired_lease_is_rejected_before_any_external_adapter_action(
     avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
     qb = FakeQb([[]])
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
     claim = await executor._claim_next_execution()
     assert claim is not None
@@ -1024,7 +1464,11 @@ async def test_invalidated_queued_approval_is_cancelled_before_any_external_acti
     avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
     qb = FakeQb([[]])
     executor = DownloadExecutor(
-        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
     )
 
     assert await executor.run_once() is True
@@ -1063,7 +1507,7 @@ async def test_crash_after_reservation_becomes_reconciliation_and_never_readds(
     executor = DownloadExecutor(
         session_factory,
         "executor-test",
-        lambda: avistaz,
+        execution_registry(lambda: avistaz),
         lambda: crashing_qb,
         settings,
     )
@@ -1105,7 +1549,7 @@ async def test_monitor_uses_only_read_methods_and_keeps_hnr_unknown(
     executor = DownloadExecutor(
         session_factory,
         "executor-test",
-        lambda: avistaz,
+        execution_registry(lambda: avistaz),
         lambda: executor_qb,
         settings,
     )

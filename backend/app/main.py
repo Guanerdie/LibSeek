@@ -16,6 +16,7 @@ from app.api.routes import (
     jobs,
     media,
     media_imports,
+    pt_sites,
     workflow,
 )
 from app.core.config import get_settings
@@ -26,7 +27,7 @@ from app.schemas.common import ErrorResponse
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    version="0.7.0",
+    version="0.8.0",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
@@ -68,3 +69,4 @@ app.include_router(downloaders.router, prefix=settings.api_prefix)
 app.include_router(executions.router, prefix=settings.api_prefix)
 app.include_router(jobs.router, prefix=settings.api_prefix)
 app.include_router(media_imports.router, prefix=settings.api_prefix)
+app.include_router(pt_sites.router, prefix=settings.api_prefix)

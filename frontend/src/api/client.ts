@@ -28,11 +28,12 @@ import type {
   MetadataMatch,
   Page,
   Principal,
+  PtSiteCatalog,
   SystemStatus,
   QbStatus,
   QbTorrent,
   TorrentCandidateResult,
-  TorrentSearchPreferences,
+  TorrentSearchCreateRequest,
   TorrentSearchRun,
   CreateAutomationPolicyRevision,
 } from '../types'
@@ -179,17 +180,21 @@ export const adapterApi = {
   list: () => request<AdapterManifest[]>('/api/adapters'),
 }
 
+export const ptSiteApi = {
+  catalog: () => request<PtSiteCatalog>('/api/pt-sites/catalog'),
+}
+
 export const torrentApi = {
   create: (
     mediaId: string,
-    preferences: TorrentSearchPreferences,
+    payload: TorrentSearchCreateRequest,
   ) =>
     request<TorrentSearchRun & { job_id: string; deduplicated: boolean }>(
       `/api/media/${encodeURIComponent(mediaId)}/torrent-searches`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(preferences),
+        body: JSON.stringify(payload),
       },
     ),
   list: (mediaId: string) =>

@@ -119,7 +119,7 @@ def example_candidate() -> TorrentCandidate:
         site_id="avistaz",
         torrent_id="mock-1",
         release_title="Example 2026 1080p",
-        details_ref="mock:mock-1",
+        details_ref="avistaz:details:mock-1",
         media_type=MediaType.MOVIE,
         tmdb_id=1,
         resolution="1080p",

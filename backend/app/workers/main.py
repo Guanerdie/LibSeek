@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from app.adapters.media_sources import NextFindAdapter
 from app.adapters.metadata import TmdbProvider
 from app.adapters.pt_sites import AvistaZAdapter
+from app.adapters.pt_sites.catalog import build_pt_site_catalog
 from app.adapters.pt_sites.registry import default_pt_site_registry
 from app.core.config import get_settings
 from app.core.security import validate_external_url
@@ -100,9 +101,10 @@ def build_avistaz_adapter() -> AvistaZAdapter:
 async def run() -> None:
     settings = get_settings()
     worker_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}"
+    pt_site_catalog = build_pt_site_catalog(settings)
     pt_sites = default_pt_site_registry(
         build_avistaz_adapter,
-        enabled=settings.enable_avistaz_live_search,
+        catalog=pt_site_catalog,
     )
     processor = JobProcessor(
         SessionFactory,

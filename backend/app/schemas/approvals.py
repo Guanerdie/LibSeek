@@ -212,6 +212,6 @@ _INTERNAL_TORRENT_REF = re.compile(
 
 
 def validate_internal_torrent_ref(value: str) -> str:
-    if not _INTERNAL_TORRENT_REF.fullmatch(value):
+    if len(value) > 180 or not _INTERNAL_TORRENT_REF.fullmatch(value):
         raise ValueError("torrent_ref must be a strict internal reference")
     return value

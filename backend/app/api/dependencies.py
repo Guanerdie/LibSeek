@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import ReadOnlyDownloaderAdapter
 from app.adapters.downloaders import QbittorrentReadOnlyAdapter
+from app.adapters.pt_sites.catalog import PtSiteCatalog, build_pt_site_catalog
 from app.core.auth import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -23,6 +24,13 @@ from app.models.enums import AuthRole
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+def get_pt_site_catalog(settings: SettingsDep) -> PtSiteCatalog:
+    return build_pt_site_catalog(settings)
+
+
+PtCatalog = Annotated[PtSiteCatalog, Depends(get_pt_site_catalog)]
 
 
 def require_auth_material(settings: Settings) -> tuple[str, str, str, AuthRole]:

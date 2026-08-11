@@ -4,57 +4,45 @@ import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from pydantic import TypeAdapter, ValidationError
-
 from app.adapters.base import PtSiteAdapter
+from app.adapters.pt_sites.catalog import (
+    PtSiteCatalog,
+    PtSiteDeclaration,
+    avistaz_site_declaration,
+)
 from app.adapters.pt_sites.profiles import NexusPhpSiteProfile
 from app.errors import AppError
-from app.schemas.adapters import SiteId
+from app.schemas.adapters import PtSearchMode
 
 PtSiteFactory = Callable[[], PtSiteAdapter]
-_SITE_ID_ADAPTER = TypeAdapter(SiteId)
 
 
 @dataclass(frozen=True)
 class PtSiteRegistration:
     site_id: str
-    enabled: bool
     factory: PtSiteFactory = field(repr=False, compare=False)
-    disabled_error_code: str = "PT_SITE_DISABLED"
-    disabled_message: str = "该 PT 站点适配器默认关闭"
 
 
 class PtSiteRegistry:
-    """In-process registry; it stores factories, never credential values."""
+    """Worker factories bound to one immutable, secret-free site catalog."""
 
-    def __init__(self) -> None:
+    def __init__(self, catalog: PtSiteCatalog | None = None) -> None:
+        self.catalog = catalog or PtSiteCatalog()
         self._registrations: dict[str, PtSiteRegistration] = {}
 
     @staticmethod
     def validate_site_id(site_id: str) -> str:
-        try:
-            return _SITE_ID_ADAPTER.validate_python(site_id)
-        except ValidationError as exc:
-            raise AppError("PT_SITE_ID_INVALID", "PT 站点标识格式无效", status_code=400) from exc
+        return PtSiteCatalog.validate_site_id(site_id)
 
-    def register(
-        self,
-        site_id: str,
-        factory: PtSiteFactory,
-        *,
-        enabled: bool,
-        disabled_error_code: str = "PT_SITE_DISABLED",
-        disabled_message: str = "该 PT 站点适配器默认关闭",
-    ) -> None:
+    def register(self, site_id: str, factory: PtSiteFactory) -> None:
         validated = self.validate_site_id(site_id)
+        if self.catalog.get(validated) is None:
+            raise ValueError(f"PT site has no catalog declaration: {validated}")
         if validated in self._registrations:
             raise ValueError(f"PT site is already registered: {validated}")
         self._registrations[validated] = PtSiteRegistration(
             site_id=validated,
-            enabled=enabled,
             factory=factory,
-            disabled_error_code=disabled_error_code,
-            disabled_message=disabled_message,
         )
 
     def register_nexusphp_profile(
@@ -62,40 +50,48 @@ class PtSiteRegistry:
         profile: NexusPhpSiteProfile,
         factory: PtSiteFactory,
     ) -> None:
-        self.register(
-            profile.site_id,
-            factory,
-            enabled=profile.enabled,
-            disabled_error_code="NEXUSPHP_SITE_DISABLED",
-            disabled_message="该 NexusPHP 站点 Profile 尚未启用",
-        )
+        declaration = self.catalog.get(profile.site_id)
+        if declaration is None or declaration.site_id != profile.site_id:
+            raise ValueError(f"NexusPHP profile has no catalog declaration: {profile.site_id}")
+        self.register(profile.site_id, factory)
 
     @property
     def registered_site_ids(self) -> tuple[str, ...]:
         return tuple(self._registrations)
 
     def require_enabled(self, site_id: str) -> PtSiteRegistration:
-        validated = self.validate_site_id(site_id)
-        registration = self._registrations.get(validated)
+        declaration = self.catalog.require_searchable(site_id)
+        registration = self._registrations.get(declaration.site_id)
         if registration is None:
             raise AppError(
-                "PT_SITE_NOT_REGISTERED",
-                "PT 站点未注册；不会回退到其他站点",
-                status_code=409,
-            )
-        if not registration.enabled:
-            raise AppError(
-                registration.disabled_error_code,
-                registration.disabled_message,
+                "PT_SITE_FACTORY_NOT_REGISTERED",
+                "PT 站点 Worker 工厂未注册；不会回退到其他站点",
                 status_code=409,
             )
         return registration
 
+    def assert_complete(self) -> None:
+        expected = {
+            site_id
+            for site_id in self.catalog.registered_site_ids
+            if (declaration := self.catalog.get(site_id)) is not None
+            and declaration.available_for_search
+        }
+        actual = set(self._registrations)
+        missing = expected - actual
+        unexpected = actual - set(self.catalog.registered_site_ids)
+        if missing or unexpected:
+            raise ValueError(
+                "PT site catalog and Worker factories differ: "
+                f"missing={sorted(missing)!r}, unexpected={sorted(unexpected)!r}"
+            )
+
     async def create(self, site_id: str) -> PtSiteAdapter:
         registration = self.require_enabled(site_id)
+        declaration = self.catalog.require_searchable(site_id)
         adapter = registration.factory()
         try:
-            adapter_id = adapter.manifest().id
+            manifest = adapter.manifest()
         except Exception as exc:
             await self._safe_close(adapter)
             raise AppError(
@@ -103,14 +99,46 @@ class PtSiteRegistry:
                 "PT 站点适配器能力声明无效",
                 status_code=409,
             ) from exc
-        if adapter_id != registration.site_id:
+        if (
+            manifest.id != registration.site_id
+            or manifest.adapter_type != "pt_site"
+        ):
             await self._safe_close(adapter)
             raise AppError(
                 "PT_SITE_ADAPTER_ID_MISMATCH",
                 "PT 站点适配器身份与注册项不一致",
                 status_code=409,
             )
+        if manifest.enabled is not True:
+            await self._safe_close(adapter)
+            raise AppError(
+                "PT_SITE_ADAPTER_DISABLED",
+                "PT 站点适配器自声明为不可用",
+                status_code=409,
+            )
+        if not self._manifest_supports(declaration, manifest.capabilities):
+            await self._safe_close(adapter)
+            raise AppError(
+                "PT_SITE_ADAPTER_CAPABILITY_MISMATCH",
+                "PT 站点适配器能力与目录声明不一致",
+                status_code=409,
+            )
         return adapter
+
+    @staticmethod
+    def _manifest_supports(
+        declaration: PtSiteDeclaration,
+        capabilities: dict[str, bool],
+    ) -> bool:
+        capability_names = {
+            PtSearchMode.TMDB_ID: "tmdb_search",
+            PtSearchMode.IMDB_ID: "imdb_search",
+            PtSearchMode.TEXT: "text_search",
+        }
+        return all(
+            capabilities.get(capability_names[mode]) is True
+            for mode in declaration.search_modes
+        )
 
     @staticmethod
     async def _safe_close(adapter: object) -> None:
@@ -131,18 +159,22 @@ class PtSiteRegistry:
 def default_pt_site_registry(
     avistaz_factory: PtSiteFactory,
     *,
+    catalog: PtSiteCatalog | None = None,
     enabled: bool = True,
-    disabled_error_code: str = "AVISTAZ_LIVE_DISABLED",
-    disabled_message: str = "AvistaZ 真实只读搜索默认关闭",
+    runtime_ready: bool = True,
 ) -> PtSiteRegistry:
-    """Build the default registry. No generic NexusPHP site is implied here."""
+    """Build the production registry. No generic NexusPHP site is implied."""
 
-    registry = PtSiteRegistry()
-    registry.register(
-        "avistaz",
-        avistaz_factory,
-        enabled=enabled,
-        disabled_error_code=disabled_error_code,
-        disabled_message=disabled_message,
+    effective_catalog = catalog or PtSiteCatalog(
+        (
+            avistaz_site_declaration(
+                search_enabled=enabled,
+                runtime_ready=runtime_ready,
+            ),
+        ),
+        default_site_id="avistaz",
     )
+    registry = PtSiteRegistry(effective_catalog)
+    registry.register("avistaz", avistaz_factory)
+    registry.assert_complete()
     return registry

@@ -31,6 +31,7 @@ from app.schemas.approvals import (
     ApprovalCreateRequest,
     PreflightCheck,
     PreflightResult,
+    validate_internal_torrent_ref,
 )
 from app.schemas.qbittorrent import QbCategory, QbTorrent, QbTorrentFile
 from app.services.approvals import (
@@ -49,6 +50,15 @@ from app.services.preflight import (
 )
 
 INFO_HASH = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_internal_torrent_ref_respects_download_plan_column_limit() -> None:
+    maximum_ref = f"{'s' * 24}:{'d' * 50}:{'r' * 104}"
+    assert len(maximum_ref) == 180
+    assert validate_internal_torrent_ref(maximum_ref) == maximum_ref
+
+    with pytest.raises(ValueError, match="strict internal reference"):
+        validate_internal_torrent_ref(f"{'s' * 24}:{'d' * 50}:{'r' * 105}")
 
 
 class FakeReadOnlyQb(ReadOnlyDownloaderAdapter):

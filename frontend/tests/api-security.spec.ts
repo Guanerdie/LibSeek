@@ -8,8 +8,10 @@ import {
   downloadJobApi,
   executionApi,
   mediaApi,
+  ptSiteApi,
   setApiCsrfToken,
   setUnauthorizedHandler,
+  torrentApi,
 } from '../src/api/client'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -145,6 +147,41 @@ describe('API request security', () => {
       expect(init?.method).toBeUndefined()
       expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
     }
+  })
+
+  it('reads the PT catalog and sends an explicit credential-free site search payload', async () => {
+    const fetchMock = vi.mocked(fetch)
+    setApiCsrfToken('csrf-session')
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ default_site_id: 'avistaz', sites: [] }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'search-1' }, 202))
+
+    await ptSiteApi.catalog()
+    await torrentApi.create('media/unsafe', {
+      site_id: 'fixture-nexus',
+      preferred_resolutions: ['1080p'],
+      preferred_sources: ['WEB-DL'],
+      preferred_audio: ['Japanese'],
+      preferred_subtitles: ['Chinese'],
+      max_size_bytes: 5_368_709_120,
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/pt-sites/catalog')
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined()
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).has('X-CSRF-Token')).toBe(false)
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/media/media%2Funsafe/torrent-searches')
+    const mutation = fetchMock.mock.calls[1]?.[1]
+    expect(mutation?.method).toBe('POST')
+    expect(new Headers(mutation?.headers).get('X-CSRF-Token')).toBe('csrf-session')
+    expect(JSON.parse(String(mutation?.body))).toEqual({
+      site_id: 'fixture-nexus',
+      preferred_resolutions: ['1080p'],
+      preferred_sources: ['WEB-DL'],
+      preferred_audio: ['Japanese'],
+      preferred_subtitles: ['Chinese'],
+      max_size_bytes: 5_368_709_120,
+    })
+    expect(String(mutation?.body)).not.toMatch(/cookie|passkey|token|password|operator|https?:/i)
   })
 
   it('keeps automation audit reads read-only and protects flat revision publication', async () => {

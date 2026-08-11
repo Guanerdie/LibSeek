@@ -1,20 +1,23 @@
 # 架构与状态流
 
-版本 `0.7.0` 在 FastAPI 控制面、普通发现 Worker、可选自动预检 Worker、可选下载执行器、可选只读监控器、PostgreSQL 和 Vue 管理端之间加入默认关闭的媒体入库规划控制面。阶段 4 的 intent/execute/reconcile 仍是默认关闭的数据库控制面；阶段 5 的真实 AvistaZ 取种与 qB add 仍位于独立执行器中；阶段 6 只在四阶段策略、总闸、资格硬条件、短 TTL readiness 和原有能力闸门同时允许时推进新条目；阶段 7A 只保存不可执行的媒体入库计划、只读预检记录和人工决定。媒体文件始终不在系统操作范围内。
+版本 `0.8.0` 在 FastAPI 控制面、普通发现 Worker 和可选下载执行器之间加入共享、无 Secret 的 `PtSiteCatalog`，并以相互独立的搜索与执行注册表按 `site_id` 路由 PT 能力。阶段 4 的 intent/execute/reconcile 仍是默认关闭的数据库控制面；阶段 5 的生产取种仍只有 AvistaZ，qB add 仍位于独立执行器中；阶段 6 只在四阶段策略、总闸、资格硬条件、短 TTL readiness 和原有能力闸门同时允许时推进新条目；阶段 7A 只保存不可执行的媒体入库计划、只读预检记录和人工决定。媒体文件始终不在系统操作范围内。
 
 ```mermaid
 flowchart LR
   UI[Vue 管理端] -->|签名 Cookie + CSRF| Auth[本地认证与 RBAC]
   Auth -->|授权后的查询与操作| API[FastAPI]
+  API -->|读取无 Secret 站点目录| Catalog[PtSiteCatalog]
+  Catalog -->|GET /api/pt-sites/catalog| UI
   API -->|队列与查询| DB[(PostgreSQL 16)]
   API -->|策略修订与决策查询| Policy[自动化策略与审计]
   Policy -->|不可变修订与脱敏证据| DB
   Worker[普通 Worker] -->|FOR UPDATE SKIP LOCKED| DB
   Worker -->|HTTPS 只读发现| NF[NextFind]
   Worker -->|开关启用后只读 GET| TMDB[TMDB API]
-  Worker -->|认证与只读搜索| AZ[AvistaZ Jackett API]
+  Worker -->|按 site_id 选择工厂| SearchRegistry[PtSiteRegistry]
+  SearchRegistry -->|认证与只读搜索| AZ[AvistaZ Jackett API]
   TMDB -->|最多 5 个候选| DB
-  AZ -->|脱敏候选| DB
+  SearchRegistry -->|脱敏候选| DB
   DB -->|候选与审计| UI
   API -->|SID 登录与只读 GET| QB[qBittorrent Web API]
   API -->|固定快照、预检与计划| DB
@@ -23,7 +26,8 @@ flowchart LR
   AutoPreflight -->|SID 登录与只读 GET| QB
   AutoPreflight -->|策略指纹 readiness| DB
   Executor[download-execution profile] -->|租约 claim / fencing| DB
-  Executor -->|精确重搜并取种| AZ
+  Executor -->|按计划 site_id 选择工厂| ExecutionRegistry[PtExecutionRegistry]
+  ExecutionRegistry -->|精确重搜并取种| AZ
   Executor -->|受控 add 后只读核验| QB
   Executor -->|执行配置 readiness| DB
   Monitor[download-monitor profile] -->|只读任务观察| QB
@@ -106,9 +110,15 @@ IDENTITY_CONFIRMED
   -> TORRENT_REVIEW | NO_CANDIDATE | SEARCH_FAILED
 ```
 
-搜索策略固定按 TMDB ID、IMDb ID、英文名加年份、原名加年份、中文名或别名降级。首个返回候选的策略停止。候选由纯函数评分，外部 ID、类型、季集覆盖、年份和用户偏好的权重高于活跃度、促销与大小。默认评分只用于排序和解释；种子选择阶段设为 `AUTO_IF_ELIGIBLE` 且总闸开启时，最高分候选还必须满足差值、AvistaZ/媒体/年份绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、info hash、大小、最少做种数和电视剧缺集覆盖等全部硬条件，才会自动创建审批申请。IMDb-only 搜索结果仍保留给人工审阅。
+API、普通 Worker 和下载执行器使用同一份不可变 `PtSiteCatalog`。目录项只包含 `site_id`、显示信息、可用性及原因、支持的搜索模式和媒体类型，以及人工限制、促销、H&R、取种能力标记；不持有也不返回 origin、Cookie、passkey、用户名、密码或 Token。`GET /api/pt-sites/catalog` 只允许读取，前端使用它渲染站点选择和能力状态。目录的 `default_site_id` 只是客户端默认选择提示，绝不作为服务端隐式回退。
 
-搜索数据模型、job type 和 Worker 已按 `site_id` 隔离。`PtSiteRegistry` 保存工厂而非凭据；未知、未启用、payload/run 绑定不一致或候选站点不一致时失败关闭，不会回退到 AvistaZ。默认生产注册表仍只包含 `avistaz`，公开搜索创建路由当前也只放行 `avistaz`。
+创建 PT 搜索必须显式提交 `site_id`。API 在创建搜索 run、job 或审计记录前，先验证站点已声明、搜索已启用、运行时已就绪并支持当前媒体类型；省略、未知、禁用或未就绪时失败关闭。搜索 run、脱敏请求、job type/payload、候选、审批快照和后续计划都保留同一个站点绑定。
+
+普通 Worker 根据目录声明的 `search_modes` 构造搜索顺序：仅在站点支持时依次尝试 TMDB ID、IMDb ID 和文本变体，首个返回候选的策略停止。候选由纯函数评分，外部 ID、类型、季集覆盖、年份和用户偏好的权重高于活跃度、促销与大小。默认评分只用于排序和解释；种子选择阶段设为 `AUTO_IF_ELIGIBLE` 且总闸开启时，最高分候选还必须满足差值、AvistaZ/媒体/年份绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、info hash、大小、最少做种数和电视剧缺集覆盖等全部硬条件，才会自动创建审批申请。IMDb-only 搜索结果仍保留给人工审阅。
+
+`PtSiteRegistry` 只保存搜索适配器工厂，并要求工厂身份与目录声明的搜索能力完全匹配；`PtExecutionRegistry` 则单独保存具备取种能力的执行适配器工厂。两者都按精确 `site_id` 解析，不共享默认工厂，不因未知、禁用、payload/run/plan 绑定不一致、候选站点不一致或能力不足而回退到 AvistaZ。生产 `PtSiteCatalog`、搜索工厂和执行工厂目前都只接入 `avistaz`。AvistaZ 的目录项为 `manual_only=false`，这只表示其具备受阶段 6 保守策略约束的自动化代码路径；默认策略、总闸和实时能力开关仍然关闭。
+
+测试中的 `synthetic-two` 是完全内存内的第二站点声明与工厂，只用于离线贯通目录 API、显式 `site_id`、run/job、Worker、候选和待人工审批快照，并证明不会调用 AvistaZ 回退工厂。它被声明为 search-only，测试在执行适配器工厂之前阻断；另一条真实 `DownloadExecutor.run_once()` 的 search-only 合成测试还证明 PT 与 qB 工厂均不会创建。`synthetic-two` 不是生产站点，也没有 URL、凭据或真实下载能力。
 
 NexusPHP 扩展只实现了无 Secret 的声明式 `NexusPhpSiteProfile`、HTML parser、严格同源会话和本地 fixture 测试契约。Profile 描述 HTTPS origin、同源路径、分类/查询映射和 CSS selector，默认 `enabled=false`；Cookie/passkey 只能在适配器进程内存中提供。该骨架不表示任何真实国内站点可用，也不会绕过登录页、验证码或浏览器挑战。完整边界见 `docs/pt-site-profiles.md`。
 
@@ -149,7 +159,7 @@ stateDiagram-v2
 
 ## 下载执行控制面
 
-阶段 4 增加纯数据库控制面，默认由 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 关闭。公开 API 创建执行意图和提交执行请求只允许 `admin`，所有写请求继续要求会话 CSRF；查询允许 `viewer`。阶段 6 的内部自动路径不借用登录用户，会以 `system:automation:r<revision_no>` 创建固定 `ADD_PAUSED` intent/execution，并强制绑定同事务的允许决策和策略修订。控制面本身没有 AvistaZ 取种、qBittorrent 请求或文件操作代码路径。
+阶段 4 增加纯数据库控制面，默认由 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 关闭。公开 API 创建执行意图和提交执行请求只允许 `admin`，所有写请求继续要求会话 CSRF；查询允许 `viewer`。阶段 6 的内部自动路径不借用登录用户，会以 `system:automation:r<revision_no>` 创建固定 `ADD_PAUSED` intent/execution，并强制绑定同事务的允许决策和策略修订。控制面本身没有 PT 取种、qBittorrent 请求或文件操作代码路径。
 
 ```text
 POST /api/approval-requests/{id}/execution-intents
@@ -174,12 +184,13 @@ ENABLE_AVISTAZ_TORRENT_FETCH=true
 ENABLE_QB_WRITE=true
 ```
 
-它还要求 AvistaZ 实时搜索和运行时凭据、qB 运行时凭据与目标策略已配置，并持续发布与当前执行配置匹配的短 TTL readiness。处理顺序固定如下：
+它还要求生产目录中 AvistaZ 的实时搜索和取种能力可用、AvistaZ/qB 运行时凭据及 qB 目标策略已配置，并持续发布与当前执行配置匹配的短 TTL readiness。处理顺序固定如下：
 
 ```text
 PENDING | 到期的 RETRY_WAIT
   -> VALIDATING（数据库时间、FOR UPDATE SKIP LOCKED、租约 token 与心跳）
-  -> AvistaZ 精确重搜已批准 torrent ID
+  -> 从不可变计划读取 site_id，经 PtExecutionRegistry 复验目录取种能力并选择工厂
+  -> 按站点 search_modes 以 TMDB ID、再以发布名文本重搜已批准 torrent ID
   -> 获取并校验 bencode、v1/v2 hash、大小与文件数
   -> 同一事务持久化实际摘要，Approval -> EXECUTING，Execution -> SUBMITTING
   -> 按全部 hash alias 查询 qB；真正 POST 前再次执行数据库 write guard
@@ -189,7 +200,7 @@ PENDING | 到期的 RETRY_WAIT
   -> 创建唯一 DownloadJob
 ```
 
-执行器在每个外部请求前复验审批、状态、worker、lease token 和基于数据库时间的租约有效期。对于 `origin=AUTOMATION`，还会复验总闸、控制面/三开关、当前策略修订、执行阶段模式、H&R 和 `ADD_PAUSED`；在外部写入前失效会取消执行，写入可能已经发生后失效则进入人工对账。写入前的可重试校验错误才会进入指数退避的 `RETRY_WAIT`；`SUBMITTING` 后租约失效进入 `RECONCILIATION_REQUIRED`。qB POST 可能已经发生但无法验证时进入 `OUTCOME_UNKNOWN`。这三种对账状态的 `next_retry_at` 为空，执行器绝不自动再次 add。
+如果计划站点未声明取种能力、未注册执行工厂，或审批快照无法构造该站点支持的重搜请求，执行器会在创建 PT/qB 适配器和任何外部请求前失败关闭。TMDB 搜索无精确候选时，只在目录声明支持 `TEXT` 时同站降级到发布名搜索；不会切换站点。人工和自动执行都会给 PT 与 qB 适配器安装逐请求 guard，在每个外部请求前复验审批、状态、worker、lease token 和基于数据库时间的租约有效期。对于 `origin=AUTOMATION`，还会复验总闸、控制面/三开关、当前策略修订、执行阶段模式、H&R 和 `ADD_PAUSED`；在外部写入前失效会取消执行，写入可能已经发生后失效则进入人工对账。写入前的可重试校验错误才会进入指数退避的 `RETRY_WAIT`；`SUBMITTING` 后租约失效进入 `RECONCILIATION_REQUIRED`。qB POST 可能已经发生但无法验证时进入 `OUTCOME_UNKNOWN`。这三种对账状态的 `next_retry_at` 为空，执行器绝不自动再次 add。
 
 ## 下载监控与总结
 

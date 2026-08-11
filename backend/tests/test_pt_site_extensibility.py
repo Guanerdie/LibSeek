@@ -13,6 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.pt_sites import AvistaZMockAdapter
+from app.adapters.pt_sites.catalog import (
+    PtSiteCatalog,
+    PtSiteDeclaration,
+    avistaz_site_declaration,
+    nexusphp_site_declaration,
+)
 from app.adapters.pt_sites.nexusphp import NexusPhpAdapter, NexusPhpHtmlParser
 from app.adapters.pt_sites.profiles import NexusPhpSelectors, NexusPhpSiteProfile
 from app.adapters.pt_sites.registry import PtSiteRegistry, default_pt_site_registry
@@ -25,12 +31,17 @@ from app.models.enums import (
     MetadataStatus,
     WorkflowStatus,
 )
-from app.schemas.adapters import MetadataRecord, TorrentSearchRequest
+from app.schemas.adapters import MetadataRecord, PtSearchMode, TorrentSearchRequest
 from app.schemas.entities import TorrentSearchCreateRequest
 from app.services.workflow import enqueue_torrent_search, refresh_media_search_workflow_status
 from app.workers.processor import JobProcessor
 
 FIXTURES = Path(__file__).parent / "fixtures" / "nexusphp"
+
+
+class EnabledAvistaZMockAdapter(AvistaZMockAdapter):
+    def manifest(self):
+        return super().manifest().model_copy(update={"enabled": True})
 
 
 def profile(*, enabled: bool = False) -> NexusPhpSiteProfile:
@@ -138,8 +149,10 @@ async def seed_confirmed_media(
     return media
 
 
-def test_search_request_defaults_to_avistaz_and_rejects_ambiguous_site_ids() -> None:
-    assert TorrentSearchCreateRequest().site_id == "avistaz"
+def test_search_request_requires_explicit_site_and_rejects_ambiguous_site_ids() -> None:
+    with pytest.raises(ValidationError):
+        TorrentSearchCreateRequest()
+    assert TorrentSearchCreateRequest(site_id="avistaz").site_id == "avistaz"
     for invalid in ("AvistaZ", "site.example", " site", "site_1", "a" * 25):
         with pytest.raises(ValidationError):
             TorrentSearchCreateRequest(site_id=invalid)
@@ -241,8 +254,17 @@ async def test_nexusphp_rejects_private_dns_resolution_before_credentials_are_se
 
 @pytest.mark.asyncio
 async def test_default_registry_contains_only_avistaz_and_profiles_remain_disabled() -> None:
+    disabled_profile = profile()
+    catalog = PtSiteCatalog(
+        (
+            avistaz_site_declaration(search_enabled=True, runtime_ready=True),
+            nexusphp_site_declaration(disabled_profile, runtime_ready=False),
+        ),
+        default_site_id="avistaz",
+    )
     registry = default_pt_site_registry(
-        lambda: AvistaZMockAdapter(manifest_id="avistaz")
+        lambda: EnabledAvistaZMockAdapter(manifest_id="avistaz"),
+        catalog=catalog,
     )
     assert registry.registered_site_ids == ("avistaz",)
     assert isinstance(await registry.create("avistaz"), AvistaZMockAdapter)
@@ -251,9 +273,9 @@ async def test_default_registry_contains_only_avistaz_and_profiles_remain_disabl
     assert unknown.value.error_code == "PT_SITE_NOT_REGISTERED"
 
     registry.register_nexusphp_profile(
-        profile(),
+        disabled_profile,
         lambda: NexusPhpAdapter(
-            profile(), allowed_hosts=("tracker.example.invalid",)
+            disabled_profile, allowed_hosts=("tracker.example.invalid",)
         ),
     )
     with pytest.raises(AppError) as disabled:
@@ -263,7 +285,7 @@ async def test_default_registry_contains_only_avistaz_and_profiles_remain_disabl
 
 @pytest.mark.asyncio
 async def test_registry_closes_adapter_and_rejects_factory_identity_mismatch() -> None:
-    class WrongIdentityAdapter(AvistaZMockAdapter):
+    class WrongIdentityAdapter(EnabledAvistaZMockAdapter):
         def __init__(self) -> None:
             super().__init__(manifest_id="wrong-site")
             self.closed = False
@@ -272,8 +294,21 @@ async def test_registry_closes_adapter_and_rejects_factory_identity_mismatch() -
             self.closed = True
 
     adapter = WrongIdentityAdapter()
-    registry = PtSiteRegistry()
-    registry.register("fixture-nexus", lambda: adapter, enabled=True)
+    catalog = PtSiteCatalog(
+        (
+            PtSiteDeclaration(
+                site_id="fixture-nexus",
+                display_name="Fixture NexusPHP",
+                description="Synthetic identity mismatch test",
+                search_modes=(PtSearchMode.TEXT,),
+                media_types=(MediaType.MOVIE,),
+                search_enabled=True,
+                runtime_ready=True,
+            ),
+        )
+    )
+    registry = PtSiteRegistry(catalog)
+    registry.register("fixture-nexus", lambda: adapter)
 
     with pytest.raises(AppError) as caught:
         await registry.create("fixture-nexus")
@@ -300,6 +335,53 @@ def test_nexusphp_fixture_parser_produces_only_sanitized_candidates() -> None:
     serialized = candidate.model_dump_json().casefold()
     for forbidden in ("https://", "download.php", "passkey", "cookie", "authorization"):
         assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    ("torrent_id_length", "expected_error"),
+    [(128, None), (129, "NEXUSPHP_FIELD_INVALID")],
+)
+def test_nexusphp_torrent_id_length_matches_candidate_contract(
+    torrent_id_length: int,
+    expected_error: str | None,
+) -> None:
+    torrent_id = "a" * torrent_id_length
+    html = fixture("search_results.html").replace(
+        b"id=12345", f"id={torrent_id}".encode()
+    )
+    parser = NexusPhpHtmlParser(profile())
+
+    if expected_error is None:
+        candidates = parser.parse(html, MediaType.MOVIE)
+        assert candidates[0].torrent_id == torrent_id
+        return
+
+    with pytest.raises(AppError) as caught:
+        parser.parse(html, MediaType.MOVIE)
+    assert caught.value.error_code == expected_error
+
+
+@pytest.mark.parametrize(
+    ("torrent_id", "accepted"),
+    [("a~b", True), ("_leading-punctuation", False)],
+)
+def test_nexusphp_torrent_id_characters_match_candidate_contract(
+    torrent_id: str,
+    accepted: bool,
+) -> None:
+    html = fixture("search_results.html").replace(
+        b"id=12345", f"id={torrent_id}".encode()
+    )
+    parser = NexusPhpHtmlParser(profile())
+
+    if accepted:
+        candidates = parser.parse(html, MediaType.MOVIE)
+        assert candidates[0].torrent_id == torrent_id
+        return
+
+    with pytest.raises(AppError) as caught:
+        parser.parse(html, MediaType.MOVIE)
+    assert caught.value.error_code == "NEXUSPHP_FIELD_INVALID"
 
 
 @pytest.mark.parametrize(
@@ -682,7 +764,7 @@ async def test_worker_safely_processes_legacy_avistaz_job_without_payload_site_i
         run, job, _ = await enqueue_torrent_search(
             session,
             media,
-            TorrentSearchCreateRequest(),
+            TorrentSearchCreateRequest(site_id="avistaz"),
             max_attempts=3,
         )
         job.job_type = f"TORRENT_SEARCH:{media.id}"
@@ -694,7 +776,7 @@ async def test_worker_safely_processes_legacy_avistaz_job_without_payload_site_i
         "worker-legacy-avistaz",
         AvistaZMockAdapter,
         None,
-        lambda: AvistaZMockAdapter(manifest_id="avistaz"),
+        lambda: EnabledAvistaZMockAdapter(manifest_id="avistaz"),
     )
     assert await processor.run_once() is True
     async with session_factory() as session:

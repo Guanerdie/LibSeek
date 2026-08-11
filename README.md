@@ -1,6 +1,6 @@
 # UNIN 影视缺失资源检索与下载编排系统
 
-UNIN 当前版本为 `0.7.0`。系统已实现从 NextFind 发现未入库影视、TMDB 身份与季集补全、PT 候选搜索和人工/保守自动化决策，到受控 AvistaZ 取种、qBittorrent 提交、只读进度监控、下载总结和媒体入库规划控制面的完整代码链路。FastAPI、职责隔离的 Worker、PostgreSQL 和 Vue 管理端共同保存脱敏的状态与审计记录。
+UNIN 当前版本为 `0.8.0`。系统已实现从 NextFind 发现未入库影视、TMDB 身份与季集补全、按显式站点选择的 PT 候选搜索和人工/保守自动化决策，到受控 AvistaZ 取种、qBittorrent 提交、只读进度监控、下载总结和媒体入库规划控制面的完整代码链路。FastAPI、职责隔离的 Worker、PostgreSQL 和 Vue 管理端共同保存脱敏的状态与审计记录。
 
 真实外部能力和阶段 7A 媒体入库规划控制面仍然默认关闭，且当前只完成 Mock、fixture、静态检查和离线迁移验收；尚未使用真实 TMDB、AvistaZ、qBittorrent、NexusPHP 站点或媒体文件完成端到端冒烟测试。只有用户明确批准具体动作、目标和影响，并在本机安全录入运行时 Secret 后，才允许启用相应外部开关。阶段 7A 固定为 `PLAN_ONLY_NO_FILE_OPERATION`：系统不扫描、移动、复制、重命名、硬链接、覆盖或删除媒体文件，也不执行媒体库写回。
 
@@ -10,19 +10,19 @@ UNIN 当前版本为 `0.7.0`。系统已实现从 NextFind 发现未入库影视
 - 本地单账号认证与分级授权：签名会话 Cookie、登录前 bootstrap CSRF、所有状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级；认证材料缺失时受保护 API fail closed。
 - NextFind 只读发现：从 `https://nextfind.example/#/discover` 对应服务获取未入库条目，使用独立 Cookie、HTTPS 主机白名单、重定向复验、NDJSON 坏行隔离、分页循环检测和响应大小限制。
 - TMDB 只读补全：优先使用 NextFind 提供的 TMDB ID，否则按标题、年份和类型返回最多 5 个候选；保存中英文名、IMDb 等外部 ID、已播季集矩阵和冲突。默认由人工确认；只有身份阶段设为 `AUTO_IF_ELIGIBLE`、总闸已开启且候选通过分数、差值、类型、标题/年份或 TMDB ID 精确绑定等全部硬条件时才会自动确认。
-- PT 搜索与审阅：AvistaZ 支持 TMDB/IMDb/标题降级搜索、限速和稳定错误；候选展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告。默认只排序供人工选择；自动选种还要求 AvistaZ 站点绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、有效 info hash/大小、做种数和电视剧季集覆盖全部满足策略。IMDb-only 候选转人工确认。
-- 多 PT 扩展底座：搜索任务、Worker 和候选均绑定 `site_id`，注册表未知或禁用站点时失败关闭，不回退到其他站点。声明式 `NexusPhpSiteProfile`、同源 HTTP 会话和脱敏 HTML fixture 契约已实现，但默认注册表仍只有 `avistaz`，公开创建搜索的 API 当前也只允许 `avistaz`；没有任何真实 NexusPHP 站点经过验证。
+- PT 搜索与审阅：AvistaZ 支持 TMDB/IMDb/标题降级搜索、限速和稳定错误；候选展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告。目录中的 AvistaZ 声明为 `manual_only=false`，仅表示代码具备受保守策略约束的自动化路径，不代表自动化或实时搜索已开启。默认仍只排序供人工选择；自动选种还要求 AvistaZ 站点绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、有效 info hash/大小、做种数和电视剧季集覆盖全部满足策略。IMDb-only 候选转人工确认。
+- 多 PT 扩展底座：API、普通 Worker 和下载执行器共享不含 Secret 的 `PtSiteCatalog`；`GET /api/pt-sites/catalog` 只公开站点名称、可用性、搜索模式、媒体类型和能力标记。创建搜索必须显式提交 `site_id`，目录中的 `default_site_id` 只是界面提示，不是服务端回退。搜索任务、Worker、候选、审批、计划和执行均绑定同一站点；`PtSiteRegistry` 与 `PtExecutionRegistry` 分别选择搜索工厂和可选取种工厂，未知、禁用、未就绪、能力或绑定不一致时失败关闭。生产目录和两类生产工厂仍只接入 `avistaz`；`synthetic-two` 仅用于完全离线测试，没有任何真实 NexusPHP/国内 PT 站点经过验证。
 - 不可变审批和下载计划：候选快照、预检策略与计划均以规范 JSON SHA-256 绑定，并由 ORM、约束和 PostgreSQL trigger 保护。人工批准可接受新鲜的 `PASS`/`WARNING` 并要求三项逐次确认；自动批准只接受完整、新鲜的 `PASS`，H&R 为 `UNKNOWN` 时禁止自动选种、批准和执行。
 - 阶段 6 保守自动化：身份确认、种子选择、审批、执行四阶段均支持 `DISABLED`、`MANUAL`、`AUTO_IF_ELIGIBLE`；默认全为 `MANUAL`，总闸 `ENABLE_AUTOMATION_ENGINE=false`。策略只作用于 `effective_from` 之后产生的新条目，失败或不满足资格时保留人工处理；自动身份、审批和执行 actor 使用独立的 `system:automation:r<revision>` 身份。
 - 自动化审计：策略版本以 compare-and-swap 发布并形成不可变 SHA-256 前向哈希链；每次自动化判断保存阶段、动作、结果、理由、脱敏证据及绑定哈希。决策读取时复验哈希与实体绑定，公共 API 不返回内部去重键。
 - 独立自动预检 Worker：普通 Worker 明确不 claim `AUTOMATION_PREFLIGHT:*`；可选 `automation-preflight` profile 只持有 qBittorrent 三项运行时 Secret，以只读适配器执行预检，在每个外部请求前复验任务租约、策略、审批快照和队列决策绑定。网络请求期间不持有审批行锁，只有最终保存预检和推进审批时短暂加锁。
 - 跨进程能力证明：自动预检和下载执行器分别发布绑定配置指纹的短 TTL readiness。预检指纹绑定预检策略与 qB 目标实例；执行器指纹绑定 AvistaZ/qB 目标和下载策略。只有匹配当前配置的心跳仍新鲜时才会排队预检或自动创建执行；readiness 只证明对应进程与配置就绪，不代表外部连接成功或用户已经授权真实动作。
 - 阶段 4 执行控制面：一次性 nonce 只返回一次、数据库只存摘要；`Idempotency-Key`、审批、intent 和计划绑定共同防重。控制面默认关闭，创建执行记录本身不会访问外部服务。
-- 阶段 5 独立执行器：租约和 fencing 保护下重新搜索已批准的 AvistaZ torrent ID，校验 `.torrent` 的 v1/v2 hash、大小和文件数，在任何 qB add 前持久化实际摘要；按全部 hash alias 查重，提交后再只读核验并创建唯一 `DownloadJob`。
+- 阶段 5 独立执行器：租约和 fencing 保护下按不可变计划的 `site_id` 通过 `PtExecutionRegistry` 选择取种工厂，并只使用该站点声明的搜索模式重搜已批准 torrent ID；生产环境当前仍只有 AvistaZ 取种工厂。随后校验 `.torrent` 的 v1/v2 hash、大小和文件数，在任何 qB add 前持久化实际摘要；按全部 hash alias 查重，提交后再只读核验并创建唯一 `DownloadJob`。
 - 未知提交结果不会自动重试：写入可能发生时进入 `OUTCOME_UNKNOWN`，已预留但无法验证时进入 `RECONCILIATION_REQUIRED`；人工对账请求只记录为 `RECONCILIATION_PENDING`，不会冒充成功或再次 add。
 - 独立只读监控器：读取 qB 状态并更新任务进度、速度、上传量、Ratio 和完成时间；它不推断 H&R，未知值保持 `UNKNOWN`，已有人工或外部写入的 `AT_RISK`/`SATISFIED` 不会被覆盖。
 - 阶段 7A 媒体入库规划控制面：只允许为进度 100% 且处于 `SEEDING`、`COMPLETED` 或 `PAUSED` 的已核验下载任务创建 `HARDLINK`/`COPY` 提案。客户端清单和目标映射始终是不受信提案；不可变计划、追加式只读预检和人工决定以 SHA-256 绑定，固定保留源文件并禁止覆盖目标。当前没有真实媒体路径挂载、文件检查 Worker 或文件执行器。
-- Vue 管理端包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、执行列表/详情、人工对账、下载任务列表/总结，以及媒体入库规划列表、创建和详情页；各页面始终显示“仅规划，不操作媒体文件”，`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
+- Vue 管理端读取无 Secret PT 目录，创建搜索时要求选择站点，并在历史运行、候选表格和移动端候选卡中显示站点；还包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、执行列表/详情、人工对账、下载任务列表/总结，以及媒体入库规划列表、创建和详情页。各页面始终显示“仅规划，不操作媒体文件”，`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
 - Docker Compose 默认启动 API、普通 Worker、前端和 PostgreSQL；`automation-preflight`、`download-execution` 与 `download-monitor` profile 分别启用独立自动预检 Worker、下载执行器和只读监控器。API 与前端端口只绑定 `127.0.0.1`。
 
 架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)，PT Profile 接入约束见 [docs/pt-site-profiles.md](docs/pt-site-profiles.md)。
@@ -84,6 +84,7 @@ docker compose ps
 
 ## 工作流 API
 
+- `GET /api/pt-sites/catalog`
 - `POST /api/media/{id}/resolve`
 - `GET /api/media/{id}/metadata-candidates`
 - `POST /api/media/{id}/identity-confirmations`
@@ -91,6 +92,8 @@ docker compose ps
 - `GET /api/media/{id}/torrent-searches`
 - `GET /api/torrent-searches/{id}`
 - `GET /api/torrent-searches/{id}/candidates`
+
+PT 目录接口允许 `viewer` 读取且只有 `GET`，响应不含 URL、Cookie、passkey、用户名、密码或 Token。`POST /api/media/{id}/torrent-searches` 的请求体必须包含目录声明的、当前可搜索且支持该媒体类型的 `site_id`；省略时返回 schema 校验错误，未知、禁用或运行时未就绪的站点会在创建 run/job/audit 记录前失败关闭。生产目录的 `default_site_id=avistaz` 不会替客户端补写该字段。
 
 原有健康检查、系统状态、发现任务、影视列表和适配器 API 保持兼容。所有分页有边界，错误包含中文 `message` 与机器可读 `error_code`。
 

@@ -1,6 +1,6 @@
 # 测试与验收
 
-所有自动化测试使用 respx、`httpx.MockTransport`、ASGI transport、内存数据库替身或合成文件 inspection 快照。默认配置不允许 TMDB、AvistaZ、qBittorrent 或媒体文件真实访问；测试不得把任何真实连接或文件执行能力视为已授权。
+所有自动化测试使用 respx、`httpx.MockTransport`、ASGI transport、内存数据库替身、合成 PT 适配器或合成文件 inspection 快照。默认配置不允许 TMDB、任何真实 PT 站点、qBittorrent 或媒体文件真实访问；测试不得把 `synthetic-two`、HTML fixture、Mock transport 或能力声明视为真实连接已经验证或授权。
 
 ## 后端（PowerShell）
 
@@ -25,6 +25,7 @@ uv run alembic upgrade head --sql
 
 - TMDB ID 精确详情、无 ID 多候选、电影/电视剧冲突、429、超时、双语字段与已播 episode matrix。
 - AvistaZ 认证成功/失败、过期 Token 单次重认证、429 退避、TMDB/IMDb 搜索、无结果与季集解析。
+- 无 Secret `PtSiteCatalog` 的闭集响应、可用性原因和能力字段，`GET /api/pt-sites/catalog` 只读，以及创建搜索的 `site_id` schema 必填。
 - 默认关闭的 NexusPHP 扩展骨架使用本地脱敏 HTML fixture 验证字段契约、登录/验证码/挑战页
   稳定错误、同源重定向与运行时 Secret 不落入候选；测试不连接任何真实 NexusPHP 站点。
 - 身份人工确认、重复提交防护、搜索状态流、候选评分理由与全部指定风险警告。
@@ -54,7 +55,7 @@ npm.cmd run build
 npm.cmd run lint
 ```
 
-覆盖原有列表状态以及身份候选、人工确认、PT 候选、评分理由、警告、固定候选审批、三项批准确认、预检状态和下载计划；还覆盖四阶段自动化策略、总闸只读显示、管理员发布、条件化确认、策略哈希链、决策筛选/分页/脱敏详情，以及两步执行确认、默认 `ADD_PAUSED`、nonce 请求前销毁、执行列表/详情、人工对账、下载任务列表和包含媒体/审批/执行/进度/H&R/警告/三源时间线的总结页。阶段 7A 另覆盖媒体入库规划列表/筛选、创建清单与映射、详情证据、三项固定及条件式 H&R 确认、viewer 只读权限、下载总结入口、桌面/窄屏布局和始终可见的“仅规划，不操作媒体文件”。相关 store 在请求开始或失败时清空陈旧状态，并使用请求 generation 丢弃迟到响应。源码不得使用 `localStorage`、`sessionStorage` 或 Pinia 持久化保存策略、凭据、nonce、SID、qB 或媒体入库规划数据。
+覆盖 PT 目录加载/失败、站点选择必填、不可用站点禁用、历史运行和候选站点标识，以及桌面候选表格与移动候选卡；运行、媒体、候选和创建响应的 `site_id` 绑定不一致必须拒绝。其余覆盖包括身份候选、人工确认、评分理由、警告、固定候选审批、三项批准确认、预检状态和下载计划，四阶段自动化策略、总闸只读显示、管理员发布、条件化确认、策略哈希链、决策筛选/分页/脱敏详情，以及两步执行确认、默认 `ADD_PAUSED`、nonce 请求前销毁、执行列表/详情、人工对账、下载任务列表和包含媒体/审批/执行/进度/H&R/警告/三源时间线的总结页。阶段 7A 另覆盖媒体入库规划列表/筛选、创建清单与映射、详情证据、三项固定及条件式 H&R 确认、viewer 只读权限、下载总结入口、桌面/窄屏布局和始终可见的“仅规划，不操作媒体文件”。相关 store 在请求开始或失败时清空陈旧状态，并使用请求 generation 丢弃迟到响应。源码不得使用 `localStorage`、`sessionStorage` 或 Pinia 持久化保存策略、凭据、nonce、SID、qB 或媒体入库规划数据。
 
 ## Compose（PowerShell）
 
@@ -152,7 +153,7 @@ rg -n '@router\.(post|put|patch|delete).*?(execute|scan|move|copy|hardlink|delet
 rg -n 'proxy_hide_header\s+Set-Cookie' frontend\nginx.conf
 ```
 
-预期：第一、第二、第四和第五条无匹配；第三条可命中默认关闭的内部 qB 写适配器、安全校验或测试断言，但不得出现在业务路由中，也不得返回真实下载字段。最终还应读取 `/api/openapi.json`，确认认证端点存在、执行 intent/execute/reconcile 端点具有 admin RBAC 与 CSRF，`/api/downloaders/qbittorrent/*` 仍只有 `GET`，且 `/api/media-import-requests` 只有 create/list/get/approve/reject/revoke。
+预期：第一、第二、第四和第五条无匹配；第三条可命中默认关闭的内部 qB 写适配器、安全校验或测试断言，但不得出现在业务路由中，也不得返回真实下载字段。最终还应读取 `/api/openapi.json`，确认认证端点存在、`/api/pt-sites/catalog` 只有 `GET`、创建 PT 搜索请求的 `site_id` 位于 required 列表，执行 intent/execute/reconcile 端点具有 admin RBAC 与 CSRF，`/api/downloaders/qbittorrent/*` 仍只有 `GET`，且 `/api/media-import-requests` 只有 create/list/get/approve/reject/revoke。
 
 阶段 4 控制面定向验收：
 
@@ -163,22 +164,26 @@ uv run pytest tests\test_execution_control_plane.py -q
 
 该测试使用 SQLite 与 ASGI Mock，不配置真实 Secret、不访问网络。它覆盖 nonce 仅保存 SHA-256、intent 过期、qB 目标漂移、幂等重放/冲突、审批/intent/幂等键唯一约束、撤销后的提交闸门、实际 info hash 先持久化、未知结果禁止重试及纯数据库对账。
 
-阶段 5 执行、监控、任务总结和 PT 扩展定向验收：
+阶段 5 执行、监控、任务总结和多 PT 路由定向验收：
 
 ```powershell
 Set-Location D:\project\unin\backend
-uv run pytest tests\test_download_executor.py tests\test_pt_site_extensibility.py -q
+uv run pytest tests\test_pt_site_catalog.py tests\test_download_executor.py tests\test_pt_site_extensibility.py -q
 ```
 
 覆盖项包括：
 
 - 三开关任一缺失时执行器拒绝运行，监控器必须同时启用自身开关和 qB 只读开关；
-- 数据库时间 claim、租约续期/fencing、失效审批在任何 AvistaZ/qB 请求前取消，以及提交预留后的过期租约进入人工对账；
-- AvistaZ 精确 torrent ID 重搜、`.torrent` bencode/大小/文件数/v1-v2 hash 校验、候选标题/hash/大小漂移拒绝；
+- 数据库时间 claim、租约续期/fencing，以及人工和自动执行在每个 PT/qB 请求前重新检查 guard；失效审批在外部请求前取消，提交预留后的过期租约进入人工对账；
+- 执行器严格使用计划 `site_id` 和对应 `PtExecutionRegistry` 工厂，按目录 `search_modes` 进行 TMDB 到同站文本降级；未知或 search-only 站点不会回退，且在 PT/qB 工厂或外部请求前阻断；
+- 生产 AvistaZ 精确 torrent ID 重搜、`.torrent` bencode/大小/文件数/v1-v2 hash 校验、候选标题/hash/大小漂移拒绝；
 - qB 全 hash alias 查重、真正 POST 前 write guard、add 后 hash/分类/保存路径/大小核验、成功消费审批并唯一创建 `DownloadJob`；
 - 写前可重试错误的有界 `RETRY_WAIT`，写入可能发生后的 `OUTCOME_UNKNOWN`，提交预留后无法验证的 `RECONCILIATION_REQUIRED`，以及这些状态禁止自动再次 add；
 - 监控器只读更新任务状态和统计、不调用 mutation、不推断 H&R；summary 固定嵌套，timeline 合并三类事件并二次脱敏；
-- 多站点 `site_id` 绑定、未知/禁用站点失败关闭、NexusPHP Profile 严格同源、登录/验证码/挑战稳定错误、运行时 Secret 不进入候选或 request gate，以及全部 HTML fixture 离线解析。
+- 共享 `PtSiteCatalog` 不含 Secret，目录 API 只有 `GET`，创建搜索必须显式提供 `site_id`；未知、禁用和未就绪的站点在 run/job/audit 写入前失败关闭，目录默认项不作为回退；
+- `PtSiteRegistry` 与 `PtExecutionRegistry` 的目录声明、工厂身份和能力必须一致；候选的 `torrent_id`/`details_ref` 是短安全内部标识，且 `details_ref` 必须绑定候选站点；
+- 完全合成的 `synthetic-two` 离线贯通目录 API -> 搜索 run/job -> Worker -> 候选 -> 待人工审批快照，验证 AvistaZ 工厂零调用、无下载计划和执行记录，并在 search-only 取种能力闸门处停止；
+- NexusPHP Profile 严格同源、登录/验证码/挑战稳定错误、运行时 Secret 不进入候选或 request gate，以及全部 HTML fixture 离线解析。该覆盖不表示任何国内 PT 站点已经接线。
 
 阶段 6 保守自动化定向验收：
 
@@ -223,13 +228,14 @@ npm.cmd test -- media-import-store.spec.ts media-import-views.spec.ts
 
 覆盖项包括：默认关闭与空白目标白名单失败关闭、角色权限、下载完成/执行终态/原审批绑定、路径穿越与绝对/UNC/盘符路径、大小写和 Unicode 碰撞、文件/目录前缀碰撞、文件数量与累计路径文本上限；还覆盖客户端提案与内部受信 inspection 的逐项绑定、缺失/符号链接/未完成源文件、已有目标、硬链接跨文件系统、复制空间不足、追加式多次预检、预检过期和配置漂移、H&R 额外确认、ORM/PostgreSQL 不可变保护及 downgrade 有记录时失败关闭。OpenAPI 必须没有文件执行端点。
 
-这些测试只构造相对路径文本和受信 inspection 数据模型，不读取文件系统。阶段 7A 的 Compose 只有 API 接收三个非 Secret 配置变量，默认总闸为 `false`、目标引用为空，并且没有新增媒体目录 volume、inspection Worker 或 executor。版本验收还应确认 `backend/pyproject.toml`、FastAPI OpenAPI metadata、`frontend/package.json`、README 与架构文档一致为 `0.7.0`；锁文件只在对应包管理器确认需要重算时更新，不做机械替换。
+这些测试只构造相对路径文本和受信 inspection 数据模型，不读取文件系统。阶段 7A 的 Compose 只有 API 接收三个非 Secret 配置变量，默认总闸为 `false`、目标引用为空，并且没有新增媒体目录 volume、inspection Worker 或 executor。版本验收还应确认 `backend/pyproject.toml`、FastAPI OpenAPI metadata、`frontend/package.json`、README 与架构文档一致为 `0.8.0`；锁文件只在对应包管理器确认需要重算时更新，不做机械替换。
 
 ## 验收边界
 
 - 自动化验收不得把真实连接开关设为 `true`。
 - 未取得用户确认，不运行真实冒烟测试；凭据只通过本地 Secret 或安全输入配置，禁止粘贴到聊天。
 - 不启动真实 API/PostgreSQL 也能完成单元、Mock、静态、构建、Alembic 离线 SQL 与 Compose 解析验收。
-- Mock 中的 AvistaZ download 和 qB add 都由内存 transport/fake adapter 模拟。未取得独立真实执行授权时，验收完成即停止：不访问真实 download URL、不获取真实 `.torrent`、不调用真实 qB 写接口、不开始真实下载。
+- `synthetic-two` 和 NexusPHP fixture 只证明站点无关的路由、安全边界及解析契约；生产目录和两类生产工厂仍只有 AvistaZ。当前没有真实国内 PT 站点接线或验证。
+- Mock 中的 AvistaZ download 和 qB add 都由内存 transport/fake adapter 模拟。真实 TMDB、AvistaZ、任一后续 PT 站点及 qBittorrent 均未在本轮验收中连接。未取得独立真实执行授权时，验收完成即停止：不访问真实 download URL、不获取真实 `.torrent`、不调用真实 qB 写接口、不开始真实下载。
 - 即使真实执行器另行获准验证，也不执行暂停、恢复、删除、重校验、H&R 推断或媒体文件移动、复制、重命名、硬链接和删除。
 - 阶段 7A 的合成 inspection 通过不等于真实文件已检查。需要真实数据时，先由用户在本地选定一个下载任务并确认相对路径/大小/目标引用提案；这仍不授权读取真实根路径。当前缺少受信 inspection 生产者和文件执行器，因此验收在计划/数据库/API/UI 边界停止。

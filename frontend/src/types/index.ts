@@ -160,6 +160,27 @@ export interface IdentityReview {
   created_at: string
 }
 
+export interface PtSiteCatalogItem {
+  site_id: string
+  display_name: string
+  description: string
+  available_for_search: boolean
+  mode: string
+  search_modes: string[]
+  media_types: Array<'movie' | 'tv'>
+  manual_only: boolean
+  promotion_metadata: boolean
+  hit_and_run_metadata: boolean
+  torrent_fetch_enabled: boolean
+  unavailable_reason_code: string | null
+  unavailable_reason_message: string | null
+}
+
+export interface PtSiteCatalog {
+  default_site_id: string | null
+  sites: PtSiteCatalogItem[]
+}
+
 export interface TorrentSearchRun {
   id: string
   media_id: string
@@ -181,6 +202,10 @@ export interface TorrentSearchPreferences {
   preferred_audio: string[]
   preferred_subtitles: string[]
   max_size_bytes?: number
+}
+
+export interface TorrentSearchCreateRequest extends TorrentSearchPreferences {
+  site_id: string
 }
 
 export interface TorrentCandidate {

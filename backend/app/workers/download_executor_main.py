@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 from app.adapters.downloaders import QbittorrentAdapter
 from app.adapters.pt_sites import AvistaZAdapter
+from app.adapters.pt_sites.catalog import build_pt_site_catalog
+from app.adapters.pt_sites.execution_registry import PtExecutionRegistry
 from app.core.config import Settings, get_settings
 from app.core.security import validate_external_url
 from app.db.session import SessionFactory
@@ -83,6 +85,12 @@ def build_qb_executor(settings: Settings) -> QbittorrentAdapter:
     )
 
 
+def build_pt_execution_registry(settings: Settings) -> PtExecutionRegistry:
+    registry = PtExecutionRegistry(build_pt_site_catalog(settings))
+    registry.register("avistaz", lambda: build_avistaz_executor(settings))
+    return registry
+
+
 async def run() -> None:
     settings = get_settings()
     require_download_executor_enabled(settings)
@@ -92,7 +100,7 @@ async def run() -> None:
     executor = DownloadExecutor(
         SessionFactory,
         worker_id,
-        lambda: build_avistaz_executor(settings),
+        build_pt_execution_registry(settings),
         lambda: build_qb_executor(settings),
         settings,
     )

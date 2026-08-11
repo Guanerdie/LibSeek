@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.dependencies import DbSession, OperatorPrincipal, ViewerPrincipal
+from app.api.dependencies import DbSession, OperatorPrincipal, PtCatalog, ViewerPrincipal
 from app.core.config import get_settings
 from app.errors import AppError
 from app.models.entities import MediaItem, TorrentSearchRun
@@ -133,23 +133,14 @@ async def create_torrent_search(
     media_id: str,
     request: TorrentSearchCreateRequest,
     session: DbSession,
+    catalog: PtCatalog,
     _principal: OperatorPrincipal,
 ) -> TorrentSearchAccepted:
+    catalog.require_searchable(request.site_id)
     await require_stage_not_disabled(session, AutomationStage.TORRENT_SELECTION)
     settings = get_settings()
-    if request.site_id != "avistaz":
-        raise AppError(
-            "PT_SITE_NOT_REGISTERED",
-            "PT 站点未注册；不会回退到 AvistaZ 或其他站点",
-            status_code=409,
-        )
-    if not settings.enable_avistaz_live_search:
-        raise AppError(
-            "AVISTAZ_LIVE_DISABLED", "AvistaZ 真实只读搜索默认关闭", status_code=409
-        )
-    if not settings.avistaz_configured:
-        raise AppError("AVISTAZ_NOT_CONFIGURED", "AvistaZ 运行时凭据未配置", status_code=409)
     media = await _media_or_404(session, media_id)
+    catalog.require_searchable(request.site_id, media_type=media.media_type)
     run, job, deduplicated = await enqueue_torrent_search(
         session,
         media,

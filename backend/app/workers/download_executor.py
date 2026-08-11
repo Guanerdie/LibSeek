@@ -14,6 +14,10 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.downloaders.qbittorrent import QbAddResult
+from app.adapters.pt_sites.execution_registry import (
+    PtExecutionAdapter,
+    PtExecutionRegistry,
+)
 from app.core.config import Settings
 from app.core.security import sanitize_details
 from app.errors import AppError
@@ -34,6 +38,7 @@ from app.models.enums import (
     Origin,
 )
 from app.schemas.adapters import (
+    PtSearchMode,
     TorrentCandidate,
     TorrentSearchRequest,
 )
@@ -67,18 +72,6 @@ _TERMINAL_EXECUTION_STATES = {
     DownloadExecutionStatus.FAILED,
     DownloadExecutionStatus.CANCELLED,
 }
-
-
-class AvistaZExecutionAdapter(Protocol):
-    def set_before_request_guard(
-        self, guard: Callable[[], Awaitable[None]] | None
-    ) -> None: ...
-
-    async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]: ...
-
-    async def fetch_torrent(self, torrent_id: str) -> bytes: ...
-
-    async def aclose(self) -> None: ...
 
 
 class QbExecutionAdapter(Protocol):
@@ -136,13 +129,13 @@ class DownloadExecutor:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        avistaz_factory: Callable[[], AvistaZExecutionAdapter],
+        pt_execution_registry: PtExecutionRegistry,
         qb_factory: Callable[[], QbExecutionAdapter],
         settings: Settings,
     ) -> None:
         self.session_factory = session_factory
         self.worker_id = worker_id.strip()
-        self.avistaz_factory = avistaz_factory
+        self.pt_execution_registry = pt_execution_registry
         self.qb_factory = qb_factory
         self.settings = settings
         if not self.worker_id or len(self.worker_id) > 180:
@@ -167,7 +160,7 @@ class DownloadExecutor:
         return True
 
     async def _process_claim(self, claim: ExecutionClaim) -> None:
-        avistaz: AvistaZExecutionAdapter | None = None
+        pt_site: PtExecutionAdapter | None = None
         qb: QbExecutionAdapter | None = None
         reservation_committed = False
         external_write_may_have_occurred = False
@@ -177,30 +170,51 @@ class DownloadExecutor:
             ):
                 return
             binding = await self._load_binding(claim)
-            avistaz = self.avistaz_factory()
-            if binding.origin == Origin.AUTOMATION:
-                async def avistaz_request_guard() -> None:
-                    allowed = await self._ensure_external_action_allowed(
-                        claim,
-                        expected_status=DownloadExecutionStatus.VALIDATING,
-                    )
-                    if not allowed:
-                        raise self._lease_lost()
+            search_requests = self._search_requests(
+                binding,
+                self.pt_execution_registry.search_modes(
+                    binding.plan.site_id,
+                    media_type=binding.snapshot.media_type,
+                ),
+            )
+            pt_site = await self.pt_execution_registry.create(
+                binding.plan.site_id,
+                media_type=binding.snapshot.media_type,
+            )
 
-                self._install_request_guard(avistaz, avistaz_request_guard)
+            async def pt_request_guard() -> None:
+                allowed = await self._ensure_external_action_allowed(
+                    claim,
+                    expected_status=DownloadExecutionStatus.VALIDATING,
+                )
+                if not allowed:
+                    raise self._lease_lost()
+
+            self._install_request_guard(pt_site, pt_request_guard)
+
+            searched_candidates: list[TorrentCandidate] = []
+            candidate: TorrentCandidate | None = None
+            for search_request in search_requests:
+                if not await self._ensure_external_action_allowed(
+                    claim, expected_status=DownloadExecutionStatus.VALIDATING
+                ):
+                    return
+                results = await pt_site.search(search_request)
+                searched_candidates.extend(results)
+                exact = self._matching_candidates(binding, results)
+                if len(exact) > 1:
+                    self._require_exact_candidate(binding, results)
+                if exact:
+                    candidate = self._require_exact_candidate(binding, results)
+                    break
+            if candidate is None:
+                candidate = self._require_exact_candidate(binding, searched_candidates)
 
             if not await self._ensure_external_action_allowed(
                 claim, expected_status=DownloadExecutionStatus.VALIDATING
             ):
                 return
-            candidates = await avistaz.search(self._search_request(binding))
-            candidate = self._require_exact_candidate(binding, candidates)
-
-            if not await self._ensure_external_action_allowed(
-                claim, expected_status=DownloadExecutionStatus.VALIDATING
-            ):
-                return
-            torrent_payload = await avistaz.fetch_torrent(candidate.torrent_id)
+            torrent_payload = await pt_site.fetch_torrent(candidate.torrent_id)
             metadata = validate_torrent(
                 torrent_payload,
                 expected_info_hash=binding.plan.expected_info_hash,
@@ -221,19 +235,17 @@ class DownloadExecutor:
             reservation_committed = True
 
             qb = self.qb_factory()
-            if binding.origin == Origin.AUTOMATION:
-                async def qb_request_guard() -> None:
-                    allowed = await self._ensure_external_action_allowed(
-                        claim,
-                        expected_status=DownloadExecutionStatus.SUBMITTING,
-                        external_write_may_have_occurred=(
-                            external_write_may_have_occurred
-                        ),
-                    )
-                    if not allowed:
-                        raise self._lease_lost()
 
-                self._install_request_guard(qb, qb_request_guard)
+            async def qb_request_guard() -> None:
+                allowed = await self._ensure_external_action_allowed(
+                    claim,
+                    expected_status=DownloadExecutionStatus.SUBMITTING,
+                    external_write_may_have_occurred=external_write_may_have_occurred,
+                )
+                if not allowed:
+                    raise self._lease_lost()
+
+            self._install_request_guard(qb, qb_request_guard)
             if not await self._ensure_external_action_allowed(
                 claim, expected_status=DownloadExecutionStatus.SUBMITTING
             ):
@@ -349,9 +361,9 @@ class DownloadExecutor:
             if qb is not None:
                 with suppress(Exception):
                     await qb.aclose()
-            if avistaz is not None:
+            if pt_site is not None:
                 with suppress(Exception):
-                    await avistaz.aclose()
+                    await pt_site.aclose()
 
     async def _claim_next_execution(self) -> ExecutionClaim | None:
         async with self.session_factory() as session:
@@ -433,10 +445,10 @@ class DownloadExecutor:
                     "qBittorrent 目标配置与执行意图不一致",
                     status_code=409,
                 )
-            if plan.site_id.casefold() != "avistaz" or snapshot.site_id.casefold() != "avistaz":
+            if plan.site_id != snapshot.site_id:
                 raise AppError(
-                    "PT_SITE_EXECUTOR_UNSUPPORTED",
-                    "当前下载执行器只支持 AvistaZ 固定计划",
+                    "DOWNLOAD_PLAN_BINDING_INVALID",
+                    "下载计划与审批候选的 PT 站点绑定不一致",
                     status_code=409,
                 )
             if plan.torrent_ref != snapshot.torrent_ref:
@@ -614,8 +626,8 @@ class DownloadExecutor:
         set_request_guard = getattr(adapter, "set_before_request_guard", None)
         if not callable(set_request_guard):
             raise AppError(
-                "AUTOMATION_REQUEST_GUARD_UNAVAILABLE",
-                "外部适配器无法安装逐请求自动化围栏",
+                "DOWNLOAD_EXECUTION_REQUEST_GUARD_UNAVAILABLE",
+                "外部适配器无法安装逐请求下载执行围栏",
                 status_code=409,
             )
         set_request_guard(guard)
@@ -943,29 +955,57 @@ class DownloadExecutor:
         return value
 
     @staticmethod
-    def _search_request(binding: ExecutionBinding) -> TorrentSearchRequest:
+    def _search_requests(
+        binding: ExecutionBinding,
+        search_modes: tuple[PtSearchMode, ...],
+    ) -> tuple[TorrentSearchRequest, ...]:
         common: dict[str, object] = {
             "type": binding.snapshot.media_type,
             "limit": 100,
         }
-        if binding.snapshot.tmdb_id is not None:
-            return TorrentSearchRequest(tmdb=binding.snapshot.tmdb_id, **common)
-        return TorrentSearchRequest(search=binding.plan.release_title, **common)
+        requests: list[TorrentSearchRequest] = []
+        if (
+            PtSearchMode.TMDB_ID in search_modes
+            and binding.snapshot.tmdb_id is not None
+        ):
+            requests.append(TorrentSearchRequest(tmdb=binding.snapshot.tmdb_id, **common))
+        if PtSearchMode.TEXT in search_modes:
+            requests.append(
+                TorrentSearchRequest(search=binding.plan.release_title, **common)
+            )
+        if not requests:
+            raise AppError(
+                "PT_SITE_EXECUTION_SEARCH_UNSUPPORTED",
+                "PT 站点无法使用审批快照中的标识重新绑定固定候选",
+                status_code=409,
+            )
+        return tuple(requests)
+
+    @staticmethod
+    def _matching_candidates(
+        binding: ExecutionBinding,
+        candidates: Sequence[TorrentCandidate],
+    ) -> list[TorrentCandidate]:
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.site_id == binding.plan.site_id
+            and candidate.torrent_id == binding.snapshot.torrent_id
+        ]
 
     @staticmethod
     def _require_exact_candidate(
         binding: ExecutionBinding, candidates: Sequence[TorrentCandidate]
     ) -> TorrentCandidate:
-        exact = [
-            candidate
-            for candidate in candidates
-            if candidate.site_id.casefold() == binding.plan.site_id.casefold()
-            and candidate.torrent_id == binding.snapshot.torrent_id
-        ]
+        exact = DownloadExecutor._matching_candidates(binding, candidates)
         if len(exact) != 1:
             raise AppError(
-                "AVISTAZ_TORRENT_ID_NOT_UNIQUE",
-                "AvistaZ 重新搜索未得到唯一的已批准 torrent ID",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_TORRENT_ID_NOT_UNIQUE",
+                    generic="PT_SITE_TORRENT_ID_NOT_UNIQUE",
+                ),
+                "PT 站点重新搜索未得到唯一的已批准 torrent ID",
                 status_code=409,
             )
         candidate = exact[0]
@@ -973,8 +1013,12 @@ class DownloadExecutor:
             binding.plan.release_title
         ):
             raise AppError(
-                "AVISTAZ_CANDIDATE_BINDING_DRIFT",
-                "AvistaZ 候选标题与不可变下载计划不一致",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_CANDIDATE_BINDING_DRIFT",
+                    generic="PT_SITE_CANDIDATE_BINDING_DRIFT",
+                ),
+                "PT 站点候选标题与不可变下载计划不一致",
                 status_code=409,
             )
         tmdb_binding_mismatch = (
@@ -990,8 +1034,12 @@ class DownloadExecutor:
             )
         if tmdb_binding_mismatch:
             raise AppError(
-                "AVISTAZ_CANDIDATE_BINDING_DRIFT",
-                "AvistaZ 候选 TMDB ID 与不可变审批不一致",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_CANDIDATE_BINDING_DRIFT",
+                    generic="PT_SITE_CANDIDATE_BINDING_DRIFT",
+                ),
+                "PT 站点候选 TMDB ID 与不可变审批不一致",
                 status_code=409,
             )
         if binding.origin == Origin.AUTOMATION and (
@@ -1000,8 +1048,12 @@ class DownloadExecutor:
             or candidate.hit_and_run != binding.snapshot.hit_and_run
         ):
             raise AppError(
-                "AVISTAZ_HNR_BINDING_DRIFT",
-                "AvistaZ 候选 H&R 信息与自动审批快照不一致",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_HNR_BINDING_DRIFT",
+                    generic="PT_SITE_HNR_BINDING_DRIFT",
+                ),
+                "PT 站点候选 H&R 信息与自动审批快照不一致",
                 status_code=409,
             )
         return candidate
@@ -1014,21 +1066,33 @@ class DownloadExecutor:
     ) -> None:
         if candidate.info_hash is not None and not metadata.matches_hash(candidate.info_hash):
             raise AppError(
-                "AVISTAZ_CANDIDATE_INFO_HASH_DRIFT",
-                "AvistaZ 候选 info hash 与实际种子不一致",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_CANDIDATE_INFO_HASH_DRIFT",
+                    generic="PT_SITE_CANDIDATE_INFO_HASH_DRIFT",
+                ),
+                "PT 站点候选 info hash 与实际种子不一致",
                 status_code=409,
             )
         expected_size = binding.plan.estimated_size_bytes
         if expected_size is not None and metadata.total_size_bytes != expected_size:
             raise AppError(
-                "AVISTAZ_CANDIDATE_SIZE_DRIFT",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_CANDIDATE_SIZE_DRIFT",
+                    generic="PT_SITE_CANDIDATE_SIZE_DRIFT",
+                ),
                 "实际种子大小与不可变下载计划不一致",
                 status_code=409,
             )
         if candidate.size_bytes is not None and metadata.total_size_bytes != candidate.size_bytes:
             raise AppError(
-                "AVISTAZ_CANDIDATE_SIZE_DRIFT",
-                "AvistaZ 候选大小与实际种子不一致",
+                _pt_error_code(
+                    binding.plan.site_id,
+                    avistaz="AVISTAZ_CANDIDATE_SIZE_DRIFT",
+                    generic="PT_SITE_CANDIDATE_SIZE_DRIFT",
+                ),
+                "PT 站点候选大小与实际种子不一致",
                 status_code=409,
             )
 
@@ -1230,6 +1294,10 @@ def require_download_monitor_enabled(settings: Settings) -> None:
             "qBittorrent monitoring target is not configured",
             status_code=409,
         )
+
+
+def _pt_error_code(site_id: str, *, avistaz: str, generic: str) -> str:
+    return avistaz if site_id == "avistaz" else generic
 
 
 def _normalized_title(value: str) -> str:

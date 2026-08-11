@@ -36,6 +36,7 @@ from app.schemas.adapters import (
     DiscoveryWarning,
     MediaItemData,
     MetadataRecord,
+    PtSearchMode,
     TorrentCandidate,
     TorrentSearchRequest,
 )
@@ -443,6 +444,7 @@ class JobProcessor:
                         status_code=409,
                     )
                 site_id = payload_site_id
+                legacy_avistaz_job = False
                 legacy_job_type = f"TORRENT_SEARCH:{media_id}"
                 if site_id is None:
                     if job.job_type != legacy_job_type or search_run.site_id != "avistaz":
@@ -452,6 +454,7 @@ class JobProcessor:
                             status_code=409,
                         )
                     site_id = "avistaz"
+                    legacy_avistaz_job = True
                 expected_job_types = {f"TORRENT_SEARCH:{site_id}:{media_id}"}
                 if site_id == "avistaz":
                     expected_job_types.add(legacy_job_type)
@@ -466,7 +469,10 @@ class JobProcessor:
                         "IDENTITY_CONFIRMATION_REQUIRED", "影视身份尚未人工确认", status_code=409
                     )
                 metadata = MetadataRecord.model_validate(review.candidate_snapshot)
-                requested = TorrentSearchCreateRequest.model_validate(search_run.sanitized_request)
+                requested = self._torrent_search_request_from_snapshot(
+                    search_run.sanitized_request,
+                    allow_legacy_avistaz=legacy_avistaz_job,
+                )
                 if requested.site_id != site_id:
                     raise AppError(
                         "PT_SITE_BINDING_MISMATCH",
@@ -474,6 +480,10 @@ class JobProcessor:
                         status_code=409,
                     )
                 prior_titles = await self._prior_candidate_titles(session, media_id, site_id)
+                declaration = self.pt_site_registry.catalog.require_searchable(
+                    site_id,
+                    media_type=media.media_type,
+                )
             adapter = await self.pt_site_registry.create(site_id)
             before_request: Callable[[], Awaitable[None]] | None = None
             if isinstance(job.payload.get("automation_policy_revision_id"), str):
@@ -496,6 +506,7 @@ class JobProcessor:
                 adapter,
                 metadata,
                 requested,
+                search_modes=declaration.search_modes,
                 before_request=before_request,
             )
             if any(candidate.site_id != site_id for candidate in candidates):
@@ -560,6 +571,7 @@ class JobProcessor:
         metadata: MetadataRecord,
         requested: TorrentSearchCreateRequest,
         *,
+        search_modes: tuple[PtSearchMode, ...],
         before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[list[TorrentCandidate], list[dict[str, object]]]:
         common: dict[str, Any] = {
@@ -569,27 +581,33 @@ class JobProcessor:
             "video_quality": requested.preferred_resolutions,
             "subtitle": requested.preferred_subtitles,
         }
-        strategies: list[tuple[str, TorrentSearchRequest]] = [
-            ("TMDB_ID", TorrentSearchRequest(tmdb=metadata.tmdb_id, **common)),
-        ]
-        if metadata.imdb_id:
+        strategies: list[tuple[str, TorrentSearchRequest]] = []
+        if PtSearchMode.TMDB_ID in search_modes:
+            strategies.append(
+                ("TMDB_ID", TorrentSearchRequest(tmdb=metadata.tmdb_id, **common))
+            )
+        if PtSearchMode.IMDB_ID in search_modes and metadata.imdb_id:
             strategies.append(
                 ("IMDB_ID", TorrentSearchRequest(imdb=metadata.imdb_id, **common))
             )
-        text_values = [
-            ("ENGLISH_TITLE_YEAR", metadata.english_title),
-            ("ORIGINAL_TITLE_YEAR", metadata.original_title),
-            ("CHINESE_OR_ALIAS", metadata.chinese_title or next(iter(metadata.aliases), None)),
-        ]
-        seen_queries: set[str] = set()
-        for name, value in text_values:
-            if not value:
-                continue
-            query = f"{value} {metadata.year}" if metadata.year else value
-            if query.casefold() in seen_queries:
-                continue
-            seen_queries.add(query.casefold())
-            strategies.append((name, TorrentSearchRequest(search=query, **common)))
+        if PtSearchMode.TEXT in search_modes:
+            text_values = [
+                ("ENGLISH_TITLE_YEAR", metadata.english_title),
+                ("ORIGINAL_TITLE_YEAR", metadata.original_title),
+                (
+                    "CHINESE_OR_ALIAS",
+                    metadata.chinese_title or next(iter(metadata.aliases), None),
+                ),
+            ]
+            seen_queries: set[str] = set()
+            for name, value in text_values:
+                if not value:
+                    continue
+                query = f"{value} {metadata.year}" if metadata.year else value
+                if query.casefold() in seen_queries:
+                    continue
+                seen_queries.add(query.casefold())
+                strategies.append((name, TorrentSearchRequest(search=query, **common)))
         log: list[dict[str, object]] = []
         for name, request in strategies:
             if before_request is not None:
@@ -599,6 +617,24 @@ class JobProcessor:
             if results:
                 return list(results), log
         return [], log
+
+    @staticmethod
+    def _torrent_search_request_from_snapshot(
+        snapshot: dict[str, object],
+        *,
+        allow_legacy_avistaz: bool,
+    ) -> TorrentSearchCreateRequest:
+        payload = dict(snapshot)
+        if "site_id" not in payload and allow_legacy_avistaz:
+            payload["site_id"] = "avistaz"
+        try:
+            return TorrentSearchCreateRequest.model_validate(payload)
+        except ValidationError as exc:
+            raise AppError(
+                "PT_SEARCH_REQUEST_SNAPSHOT_INVALID",
+                "PT 搜索请求快照无效",
+                status_code=409,
+            ) from exc
 
     async def _guard_automatic_torrent_search(
         self, job_id: str, lease_token: str | None
@@ -682,7 +718,24 @@ class JobProcessor:
                     "PT 搜索完成时影视身份已变化",
                     status_code=409,
                 )
-            requested = TorrentSearchCreateRequest.model_validate(run.sanitized_request)
+            payload_site_id = job.payload.get("site_id")
+            legacy_avistaz_job = (
+                payload_site_id is None
+                and job.job_type == f"TORRENT_SEARCH:{media.id}"
+                and run.site_id == "avistaz"
+            )
+            requested = self._torrent_search_request_from_snapshot(
+                run.sanitized_request,
+                allow_legacy_avistaz=legacy_avistaz_job,
+            )
+            if requested.site_id != run.site_id or (
+                isinstance(payload_site_id, str) and payload_site_id != run.site_id
+            ):
+                raise AppError(
+                    "PT_SITE_BINDING_MISMATCH",
+                    "PT 搜索完成时站点绑定不一致",
+                    status_code=409,
+                )
             expected_fingerprint = job.payload.get("input_fingerprint")
             current_fingerprint = torrent_search_input_fingerprint(
                 media, review, requested, get_settings()

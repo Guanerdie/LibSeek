@@ -34,7 +34,7 @@ from app.schemas.adapters import (
     TorrentSearchRequest,
 )
 
-_TORRENT_ID = re.compile(r"^[A-Za-z0-9._-]{1,180}$")
+_TORRENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$")
 _RESOLUTION = re.compile(r"(?i)\b(2160p|1080p|1080i|720p|576p|480p)\b")
 _YEAR = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
 _SIZE = re.compile(r"(?i)^\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)\s*$")

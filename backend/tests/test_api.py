@@ -145,7 +145,10 @@ async def test_live_read_only_endpoints_are_disabled_by_default(
         resolve = await client.post(f"/api/media/{item.id}/resolve")
         assert resolve.status_code == 409
         assert resolve.json()["error_code"] == "TMDB_LIVE_DISABLED"
-        search = await client.post(f"/api/media/{item.id}/torrent-searches", json={})
+        search = await client.post(
+            f"/api/media/{item.id}/torrent-searches",
+            json={"site_id": "avistaz"},
+        )
         assert search.status_code == 409
         assert search.json()["error_code"] == "AVISTAZ_LIVE_DISABLED"
 

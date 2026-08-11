@@ -1,11 +1,15 @@
 from app.adapters.downloaders import DisabledDownloaderAdapter
 from app.adapters.metadata import MockTmdbProvider
 from app.adapters.pt_sites import AvistaZMockAdapter
+from app.adapters.pt_sites.catalog import PtSiteCatalog, build_pt_site_catalog
 from app.core.config import Settings
-from app.schemas.adapters import AdapterManifest
+from app.schemas.adapters import AdapterManifest, PtSearchMode
 
 
-def adapter_manifests(settings: Settings) -> list[AdapterManifest]:
+def adapter_manifests(
+    settings: Settings,
+    pt_site_catalog: PtSiteCatalog | None = None,
+) -> list[AdapterManifest]:
     nextfind = AdapterManifest(
         id="nextfind",
         name="NextFind",
@@ -36,28 +40,29 @@ def adapter_manifests(settings: Settings) -> list[AdapterManifest]:
             "write_operations": False,
         },
     )
-    avistaz = AdapterManifest(
-        id="avistaz",
-        name="AvistaZ",
-        adapter_type="pt_site",
-        version="1.0",
-        enabled=settings.enable_avistaz_live_search and settings.avistaz_configured,
-        mode=(
-            "LIVE_READ_ONLY_SEARCH"
-            if settings.enable_avistaz_live_search
-            else "DISABLED_BY_DEFAULT"
-        ),
-        description="真实只读候选搜索；认证 Token 只在进程内存，下载端点硬禁用",
-        capabilities={
-            "tmdb_search": True,
-            "imdb_search": True,
-            "text_search": True,
-            "promotion_parsing": True,
-            "hit_and_run_parsing": True,
-            "fetch_torrent_enabled": False,
-            "write_operations": False,
-        },
-    )
+    catalog = pt_site_catalog or build_pt_site_catalog(settings)
+    pt_sites = [
+        AdapterManifest(
+            id=entry.site_id,
+            name=entry.display_name,
+            adapter_type="pt_site",
+            version="1.0",
+            enabled=entry.available_for_search,
+            mode=entry.mode,
+            description=entry.description,
+            capabilities={
+                "tmdb_search": PtSearchMode.TMDB_ID in entry.search_modes,
+                "imdb_search": PtSearchMode.IMDB_ID in entry.search_modes,
+                "text_search": PtSearchMode.TEXT in entry.search_modes,
+                "promotion_parsing": entry.promotion_metadata,
+                "hit_and_run_parsing": entry.hit_and_run_metadata,
+                "manual_only": entry.manual_only,
+                "fetch_torrent_enabled": entry.torrent_fetch_enabled,
+                "write_operations": False,
+            },
+        )
+        for entry in catalog.list_public()
+    ]
     qbittorrent = AdapterManifest(
         id="qbittorrent-read-only",
         name="qBittorrent",
@@ -79,7 +84,7 @@ def adapter_manifests(settings: Settings) -> list[AdapterManifest]:
     return [
         nextfind,
         tmdb,
-        avistaz,
+        *pt_sites,
         qbittorrent,
         MockTmdbProvider().manifest(),
         AvistaZMockAdapter().manifest(),

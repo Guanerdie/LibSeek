@@ -129,7 +129,7 @@ class IdentityReviewResponse(OrmModel):
 class TorrentSearchCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    site_id: SiteId = "avistaz"
+    site_id: SiteId
     preferred_resolutions: list[str] = Field(default_factory=list, max_length=10)
     preferred_sources: list[str] = Field(default_factory=list, max_length=10)
     preferred_audio: list[str] = Field(default_factory=list, max_length=10)
