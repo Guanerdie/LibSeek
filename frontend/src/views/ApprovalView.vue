@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -7,17 +7,23 @@ import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useApprovalStore } from '../stores/approvals'
 import { useAuthStore } from '../stores/auth'
-import type { ApprovalCandidateSnapshot } from '../types'
+import { useExecutionStore } from '../stores/executions'
+import type { ApprovalCandidateSnapshot, DownloadLaunchMode } from '../types'
 import { formatShanghai } from '../utils/format'
 
 const route = useRoute()
 const auth = useAuthStore()
 const store = useApprovalStore()
+const executionStore = useExecutionStore()
 const ttl = ref(60)
 const reason = ref('')
 const acknowledgesHnr = ref(false)
 const acknowledgesSeeding = ref(false)
 const acknowledgesPlanOnly = ref(false)
+const launchMode = ref<DownloadLaunchMode>('ADD_PAUSED')
+const executionPlanConfirmed = ref(false)
+const immediateStartConfirmed = ref(false)
+const finalExecutionConfirmed = ref(false)
 
 const snapshot = computed<ApprovalCandidateSnapshot | null>(() => {
   if (store.approval) return store.approval.candidate
@@ -62,10 +68,14 @@ const preflightPassable = computed(() => {
 const canOperate = computed(() => auth.hasRole('operator'))
 const canAdmin = computed(() => auth.hasRole('admin'))
 
-onMounted(() => {
+onMounted(async () => {
+  executionStore.resetControl()
   const approvalId = route.params.id
   if (approvalId) {
-    void store.loadApproval(String(approvalId))
+    await store.loadApproval(String(approvalId))
+    if (store.approval?.status === 'EXECUTING' || store.approval?.status === 'CONSUMED') {
+      await executionStore.loadForApproval(store.approval.id)
+    }
     return
   }
   void store.loadCandidate(
@@ -74,6 +84,7 @@ onMounted(() => {
     String(route.params.candidateId),
   )
 })
+onBeforeUnmount(() => executionStore.discardIntent())
 
 function formatBytes(value: number | null): string {
   if (value === null) return '未知'
@@ -91,6 +102,34 @@ function createApproval(): void {
   if (!snapshot.value || !canOperate.value) return
   void store.create(snapshot.value.torrent_candidate_id, ttl.value)
 }
+
+function selectLaunchMode(mode: DownloadLaunchMode): void {
+  if (executionStore.intent || executionStore.working) return
+  launchMode.value = mode
+  executionPlanConfirmed.value = false
+  immediateStartConfirmed.value = false
+  finalExecutionConfirmed.value = false
+}
+
+async function createExecutionIntent(): Promise<void> {
+  if (
+    !store.approval ||
+    !canAdmin.value ||
+    !executionPlanConfirmed.value ||
+    (launchMode.value === 'START_IMMEDIATELY' && !immediateStartConfirmed.value)
+  ) return
+  if (await executionStore.createIntent(store.approval.id, launchMode.value)) {
+    finalExecutionConfirmed.value = false
+  }
+}
+
+async function executeApprovedPlan(): Promise<void> {
+  if (!store.approval || !canAdmin.value || !finalExecutionConfirmed.value) return
+  await executionStore.executeIntent(store.approval.id)
+  executionPlanConfirmed.value = false
+  immediateStartConfirmed.value = false
+  finalExecutionConfirmed.value = false
+}
 </script>
 
 <template>
@@ -102,10 +141,12 @@ function createApproval(): void {
     >
       <div class="header-actions"><a class="button secondary" href="/approvals">返回审批列表</a></div>
     </PageHeader>
-    <div class="phase-banner"><span>禁止执行</span>当前阶段只生成下载计划，不获取 .torrent，不向 qBittorrent 添加任务。</div>
+    <div class="phase-banner"><span>受控执行</span>仅管理员可在已批准计划上完成两步确认；默认以暂停状态添加到 qBittorrent。</div>
     <PageState :loading="store.loading" :error="store.error" />
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
     <div v-if="store.planError" class="notice-state warning-state">{{ store.planError }}</div>
+    <div v-if="executionStore.error" class="notice-state warning-state">{{ executionStore.error }}</div>
+    <div v-if="executionStore.notice" class="notice-state">{{ executionStore.notice }}</div>
 
     <template v-if="snapshot && !store.loading">
       <section class="source-strip approval-source">
@@ -145,16 +186,68 @@ function createApproval(): void {
           </div>
 
           <div v-if="store.plan" class="approval-section download-plan">
-            <span class="eyebrow">NON-EXECUTABLE PLAN</span><h2>下载计划</h2>
+            <span class="eyebrow">APPROVED PLAN</span><h2>下载计划</h2>
             <dl class="approval-facts">
               <div><dt>内部种子引用</dt><dd class="mono">{{ store.plan.torrent_ref }}</dd></div>
               <div><dt>预期 info_hash</dt><dd class="mono">{{ store.plan.expected_info_hash ?? '未知' }}</dd></div>
               <div><dt>保存位置引用</dt><dd>{{ store.plan.save_path_ref }}</dd></div>
               <div><dt>分类 / 标签</dt><dd>{{ store.plan.category }} / {{ store.plan.tags.join(', ') || '—' }}</dd></div>
               <div><dt>预计大小</dt><dd>{{ formatBytes(store.plan.estimated_size_bytes) }}</dd></div>
-              <div><dt>模式</dt><dd>PLAN_ONLY_NO_FILE_OPERATION</dd></div>
+              <div><dt>模式</dt><dd>APPROVED_IMMUTABLE_PLAN</dd></div>
             </dl>
-            <div class="phase-banner inline-banner"><span>未执行</span>没有真实下载 URL，也没有向 qBittorrent 提交任何内容。</div>
+            <div v-if="!executionStore.selected" class="phase-banner inline-banner"><span>尚未提交</span>完成下方两步确认前，不会向 qBittorrent 写入任何内容。</div>
+          </div>
+
+          <div v-if="(store.approval?.status === 'APPROVED' && store.plan) || executionStore.selected?.approval_id === store.approval?.id" class="approval-section execution-control-section">
+            <span class="eyebrow">TWO-STEP EXECUTION</span><h2>下载执行确认</h2>
+            <template v-if="!executionStore.selected">
+              <div class="execution-step">
+                <div class="execution-step-heading"><strong>1</strong><div><h3>创建短期执行意图</h3><p>核对启动模式与批准计划。此步骤尚不会向下载器添加种子。</p></div></div>
+                <div class="segmented-control" role="group" aria-label="下载启动模式">
+                  <button type="button" :class="{ active: launchMode === 'ADD_PAUSED' }" :aria-pressed="launchMode === 'ADD_PAUSED'" :disabled="Boolean(executionStore.intent) || executionStore.working" @click="selectLaunchMode('ADD_PAUSED')">
+                    <strong>添加后暂停</strong><small>默认，确认任务后再手动开始</small>
+                  </button>
+                  <button type="button" :class="{ active: launchMode === 'START_IMMEDIATELY' }" :aria-pressed="launchMode === 'START_IMMEDIATELY'" :disabled="Boolean(executionStore.intent) || executionStore.working" @click="selectLaunchMode('START_IMMEDIATELY')">
+                    <strong>立即开始</strong><small>添加成功后立即产生下载流量</small>
+                  </button>
+                </div>
+                <div v-if="!executionStore.intent" class="execution-checks">
+                  <label><input v-model="executionPlanConfirmed" type="checkbox" :disabled="!canAdmin || executionStore.working" />我已核对批准快照、下载计划、保存位置与做种责任</label>
+                  <label v-if="launchMode === 'START_IMMEDIATELY'" class="immediate-warning"><input v-model="immediateStartConfirmed" type="checkbox" :disabled="!canAdmin || executionStore.working" />我明确确认选择“立即开始”，提交后会立即产生下载流量</label>
+                  <button
+                    class="button secondary"
+                    :disabled="executionStore.working || !canAdmin || !executionPlanConfirmed || (launchMode === 'START_IMMEDIATELY' && !immediateStartConfirmed)"
+                    @click="createExecutionIntent"
+                  >
+                    {{ executionStore.working ? '创建中…' : '第一步：创建执行意图' }}
+                  </button>
+                </div>
+                <dl v-else class="intent-summary">
+                  <div><dt>Intent ID</dt><dd class="mono">{{ executionStore.intent.id }}</dd></div>
+                  <div><dt>启动模式</dt><dd>{{ executionStore.intent.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : '立即开始' }}</dd></div>
+                  <div><dt>失效时间</dt><dd>{{ formatShanghai(executionStore.intent.expires_at) }}</dd></div>
+                  <div><dt>计划哈希</dt><dd class="mono">{{ executionStore.intent.plan_hash }}</dd></div>
+                </dl>
+              </div>
+
+              <div v-if="executionStore.intent" class="execution-step final-step">
+                <div class="execution-step-heading"><strong>2</strong><div><h3>最终提交</h3><p>提交会创建一次性执行记录。安全随机凭据不会显示或保存，失败后也不会复用。</p></div></div>
+                <div class="execution-checks">
+                  <label><input v-model="finalExecutionConfirmed" type="checkbox" :disabled="!canAdmin || executionStore.working" />我确认现在向 qBittorrent 执行上述已批准计划</label>
+                  <button class="button primary" :disabled="executionStore.working || !canAdmin || !finalExecutionConfirmed" @click="executeApprovedPlan">
+                    {{ executionStore.working ? '提交中…' : '第二步：提交下载执行' }}
+                  </button>
+                </div>
+              </div>
+              <p v-if="!canAdmin" class="permission-hint">当前角色仅可查看；执行写操作需要管理员权限。</p>
+            </template>
+
+            <div v-else class="execution-created">
+              <div><span class="eyebrow">EXECUTION CREATED</span><StatusPill :status="executionStore.selected.status" /></div>
+              <h3>执行记录已创建，后台结果仍需继续观察</h3>
+              <p>创建记录不等同于下载成功。请进入执行详情查看校验、提交、错误和对账状态。</p>
+              <a class="button secondary" :href="`/executions/${executionStore.selected.id}`">查看执行详情</a>
+            </div>
           </div>
         </div>
 

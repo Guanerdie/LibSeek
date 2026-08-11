@@ -11,7 +11,7 @@ from app.models.enums import (
     MetadataStatus,
     WorkflowStatus,
 )
-from app.schemas.adapters import MetadataRecord, TorrentCandidate
+from app.schemas.adapters import MetadataRecord, SiteId, TorrentCandidate
 from app.schemas.common import OrmModel
 
 
@@ -127,6 +127,9 @@ class IdentityReviewResponse(OrmModel):
 
 
 class TorrentSearchCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    site_id: SiteId = "avistaz"
     preferred_resolutions: list[str] = Field(default_factory=list, max_length=10)
     preferred_sources: list[str] = Field(default_factory=list, max_length=10)
     preferred_audio: list[str] = Field(default_factory=list, max_length=10)

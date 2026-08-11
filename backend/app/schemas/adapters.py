@@ -16,6 +16,15 @@ from app.core.episodes import EpisodeMatrix, normalize_episode_codes, normalize_
 from app.models.enums import IdentityConfidence, MediaType, MetadataStatus
 
 EpisodeCode = Annotated[str, StringConstraints(pattern=r"^S\d{2}E\d{2,3}$")]
+SiteId = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=1,
+        max_length=24,
+        pattern=r"^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$",
+    ),
+]
 
 
 class AdapterManifest(BaseModel):
@@ -131,7 +140,7 @@ class MetadataRecord(BaseModel):
 class TorrentCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    site_id: str
+    site_id: SiteId
     torrent_id: str
     release_title: str = Field(validation_alias=AliasChoices("release_title", "title"))
     details_ref: str

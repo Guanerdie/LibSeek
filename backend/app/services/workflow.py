@@ -27,6 +27,35 @@ from app.schemas.entities import IdentityConfirmationRequest, TorrentSearchCreat
 
 ACTIVE_JOB_STATUSES = (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT)
 ACTIVE_SEARCH_STATUSES = (WorkflowStatus.PT_SEARCH_PENDING, WorkflowStatus.PT_SEARCHING)
+SEARCH_STATUS_PRECEDENCE = (
+    WorkflowStatus.TORRENT_REVIEW,
+    WorkflowStatus.PT_SEARCHING,
+    WorkflowStatus.PT_SEARCH_PENDING,
+    WorkflowStatus.NO_CANDIDATE,
+    WorkflowStatus.SEARCH_FAILED,
+)
+
+
+async def refresh_media_search_workflow_status(
+    session: AsyncSession,
+    media: MediaItem,
+) -> WorkflowStatus:
+    locked_media = await session.get(MediaItem, media.id, with_for_update=True)
+    if locked_media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    media = locked_media
+    statuses = set(
+        (
+            await session.scalars(
+                select(TorrentSearchRun.status).where(TorrentSearchRun.media_id == media.id)
+            )
+        ).all()
+    )
+    for status in SEARCH_STATUS_PRECEDENCE:
+        if status in statuses:
+            media.workflow_status = status
+            return status
+    return media.workflow_status
 
 
 async def enqueue_metadata_resolution(
@@ -160,6 +189,10 @@ async def enqueue_torrent_search(
     *,
     max_attempts: int,
 ) -> tuple[TorrentSearchRun, Job, bool]:
+    locked_media = await session.get(MediaItem, media.id, with_for_update=True)
+    if locked_media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    media = locked_media
     review = await session.scalar(
         select(IdentityReview)
         .where(IdentityReview.media_id == media.id, IdentityReview.status == "CONFIRMED")
@@ -176,16 +209,23 @@ async def enqueue_torrent_search(
         select(TorrentSearchRun)
         .where(
             TorrentSearchRun.media_id == media.id,
+            TorrentSearchRun.site_id == request.site_id,
             TorrentSearchRun.status.in_(ACTIVE_SEARCH_STATUSES),
         )
         .order_by(TorrentSearchRun.created_at.desc())
         .limit(1)
     )
-    job_type = f"TORRENT_SEARCH:{media.id}"
+    job_type = f"TORRENT_SEARCH:{request.site_id}:{media.id}"
     if existing_run is not None:
+        compatible_job_types: tuple[str, ...] = (job_type,)
+        if request.site_id == "avistaz":
+            compatible_job_types += (f"TORRENT_SEARCH:{media.id}",)
         existing_job = await session.scalar(
             select(Job)
-            .where(Job.job_type == job_type, Job.status.in_(ACTIVE_JOB_STATUSES))
+            .where(
+                Job.job_type.in_(compatible_job_types),
+                Job.status.in_(ACTIVE_JOB_STATUSES),
+            )
             .limit(1)
         )
         if existing_job is not None:
@@ -193,7 +233,7 @@ async def enqueue_torrent_search(
     safe_request = request.model_dump(mode="json")
     run = TorrentSearchRun(
         media_id=media.id,
-        site_id="avistaz",
+        site_id=request.site_id,
         status=WorkflowStatus.PT_SEARCH_PENDING,
         sanitized_request=safe_request,
     )
@@ -202,10 +242,14 @@ async def enqueue_torrent_search(
     job = Job(
         job_type=job_type,
         status=JobStatus.PENDING,
-        payload={"media_id": media.id, "search_run_id": run.id, "read_only": True},
+        payload={
+            "media_id": media.id,
+            "search_run_id": run.id,
+            "site_id": request.site_id,
+            "read_only": True,
+        },
         max_attempts=max_attempts,
     )
-    media.workflow_status = WorkflowStatus.PT_SEARCH_PENDING
     session.add_all(
         [
             job,
@@ -213,10 +257,11 @@ async def enqueue_torrent_search(
                 event_type="TORRENT_SEARCH_QUEUED",
                 entity_type="torrent_search_run",
                 entity_id=run.id,
-                sanitized_details={"media_id": media.id, "site_id": "avistaz"},
+                sanitized_details={"media_id": media.id, "site_id": request.site_id},
             ),
         ]
     )
+    await refresh_media_search_workflow_status(session, media)
     await session.flush()
     return run, job, False
 

@@ -158,12 +158,24 @@ async def create_approval_request(
         select(ApprovalRequest)
         .where(
             ApprovalRequest.torrent_candidate_id == candidate_id,
-            ApprovalRequest.status.in_((ApprovalStatus.PENDING, ApprovalStatus.APPROVED)),
+            ApprovalRequest.status.in_(
+                (
+                    ApprovalStatus.PENDING,
+                    ApprovalStatus.APPROVED,
+                    ApprovalStatus.EXECUTING,
+                )
+            ),
         )
         .with_for_update()
         .limit(1)
     )
     if existing is not None:
+        if existing.status == ApprovalStatus.EXECUTING:
+            raise AppError(
+                "APPROVAL_EXECUTION_IN_PROGRESS",
+                "该固定候选已有执行中的审批",
+                status_code=409,
+            )
         if _is_expired(existing, now):
             _transition(
                 session,
@@ -483,6 +495,12 @@ async def revoke_request(
         session, approval, now
     ):
         raise AppError("APPROVAL_EXPIRED", "审批已过期", status_code=409)
+    if approval.status == ApprovalStatus.EXECUTING:
+        raise AppError(
+            "APPROVAL_EXECUTION_IN_PROGRESS",
+            "审批已进入执行预留状态，禁止撤销",
+            status_code=409,
+        )
     if approval.status != ApprovalStatus.APPROVED:
         raise AppError("APPROVAL_NOT_REVOCABLE", "只有已批准审批可以撤销", status_code=409)
     _transition(
@@ -521,8 +539,12 @@ async def consume_approval(
         session, approval, now
     ):
         raise AppError("APPROVAL_EXPIRED", "审批已过期", status_code=409)
-    if approval.status != ApprovalStatus.APPROVED:
-        raise AppError("APPROVAL_NOT_CONSUMABLE", "审批当前状态不可消费", status_code=409)
+    if approval.status != ApprovalStatus.EXECUTING:
+        raise AppError(
+            "APPROVAL_NOT_CONSUMABLE",
+            "只有完成 qBittorrent 目标验证的 EXECUTING 审批可以消费",
+            status_code=409,
+        )
     plan = await session.scalar(select(DownloadPlan).where(DownloadPlan.approval_id == approval.id))
     if plan is None:
         raise AppError("DOWNLOAD_PLAN_NOT_FOUND", "审批没有对应下载计划", status_code=409)

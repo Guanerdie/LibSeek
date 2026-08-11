@@ -5,11 +5,11 @@ from typing import Annotated
 from fastapi import APIRouter, Header, Query, Response
 from sqlalchemy.exc import IntegrityError
 
-from app.api.dependencies import AdminPrincipal, DbSession, ViewerPrincipal
-from app.core.config import get_settings
+from app.api.dependencies import AdminPrincipal, DbSession, SettingsDep, ViewerPrincipal
 from app.errors import AppError
 from app.models.entities import DownloadExecution, ExecutionIntent
 from app.models.enums import DownloadExecutionStatus
+from app.schemas.common import Page
 from app.schemas.executions import (
     DownloadExecutionCreateRequest,
     DownloadExecutionReconcileRequest,
@@ -63,8 +63,14 @@ def _execution_response(execution: DownloadExecution) -> DownloadExecutionRespon
         max_attempts=execution.max_attempts,
         next_retry_at=execution.next_retry_at,
         locked_at=execution.locked_at,
-        locked_by=execution.locked_by,
         actual_info_hash=execution.actual_info_hash,
+        actual_info_hash_v1=execution.actual_info_hash_v1,
+        actual_info_hash_v2=execution.actual_info_hash_v2,
+        actual_size_bytes=execution.actual_size_bytes,
+        actual_file_count=execution.actual_file_count,
+        validated_at=execution.validated_at,
+        submitted_at=execution.submitted_at,
+        verified_at=execution.verified_at,
         error_code=execution.error_code,
         error_message=execution.error_message,
         requested_by=execution.requested_by,
@@ -93,6 +99,7 @@ async def create_approval_execution_intent(
     request: ExecutionIntentCreateRequest,
     response: Response,
     session: DbSession,
+    settings: SettingsDep,
     principal: AdminPrincipal,
 ) -> ExecutionIntentCreateResponse:
     try:
@@ -100,7 +107,7 @@ async def create_approval_execution_intent(
             session,
             approval_id,
             request,
-            get_settings(),
+            settings,
             actor=principal.username,
         )
         await session.commit()
@@ -132,6 +139,7 @@ async def execute_approval_download_plan(
         Header(alias="Idempotency-Key", min_length=16, max_length=200),
     ],
     session: DbSession,
+    settings: SettingsDep,
     principal: AdminPrincipal,
 ) -> DownloadExecutionResponse:
     try:
@@ -140,7 +148,7 @@ async def execute_approval_download_plan(
             approval_id,
             request,
             idempotency_key,
-            get_settings(),
+            settings,
             actor=principal.username,
         )
         await session.commit()
@@ -169,15 +177,26 @@ async def get_approval_download_execution(
     return _execution_response(await get_execution_for_approval(session, approval_id))
 
 
-@router.get("/download-executions", response_model=list[DownloadExecutionResponse])
+@router.get("/download-executions", response_model=Page[DownloadExecutionResponse])
 async def get_download_executions(
     session: DbSession,
     _principal: ViewerPrincipal,
     status: DownloadExecutionStatus | None = None,
-    limit: int = Query(default=100, ge=1, le=200),
-) -> list[DownloadExecutionResponse]:
-    executions = await list_download_executions(session, status=status, limit=limit)
-    return [_execution_response(execution) for execution in executions]
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+) -> Page[DownloadExecutionResponse]:
+    executions, total = await list_download_executions(
+        session,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return Page(
+        items=[_execution_response(execution) for execution in executions],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
 
 
 @router.get(

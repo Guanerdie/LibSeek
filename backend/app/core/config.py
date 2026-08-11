@@ -80,8 +80,23 @@ class Settings(BaseSettings):
     qb_target_instance_ref: str = "qb-primary"
     avistaz_forbidden_qb_versions: tuple[str, ...] = ()
     enable_download_execution_control_plane: bool = False
+    enable_download_executor: bool = False
+    enable_avistaz_torrent_fetch: bool = False
+    enable_qb_write: bool = False
+    enable_download_monitor: bool = False
     execution_intent_default_ttl_seconds: int = Field(default=300, ge=30, le=3600)
     execution_intent_max_ttl_seconds: int = Field(default=900, ge=30, le=3600)
+    download_execution_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    download_execution_lease_renew_interval_seconds: float = Field(
+        default=60, ge=1, le=1800
+    )
+    download_execution_retry_base_seconds: int = Field(default=30, ge=1, le=3600)
+    download_execution_retry_max_seconds: int = Field(default=900, ge=1, le=86_400)
+    download_executor_poll_seconds: float = Field(default=2, ge=0.1, le=60)
+    download_monitor_interval_seconds: float = Field(default=15, ge=1, le=3600)
+    download_monitor_batch_size: int = Field(default=100, ge=1, le=500)
+    torrent_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
+    torrent_max_files: int = Field(default=20_000, ge=1, le=100_000)
     approval_default_ttl_minutes: int = 60
     approval_max_ttl_minutes: int = 7 * 24 * 60
     approval_preflight_max_age_seconds: int = 300
@@ -108,7 +123,24 @@ class Settings(BaseSettings):
             raise ValueError("execution intent default TTL cannot exceed the maximum TTL")
         if not self.qb_target_instance_ref.strip() or len(self.qb_target_instance_ref) > 180:
             raise ValueError("qb target instance ref must be between 1 and 180 characters")
+        if (
+            self.download_execution_lease_renew_interval_seconds
+            >= self.download_execution_lease_seconds
+        ):
+            raise ValueError("download execution lease renewal must be shorter than the lease")
+        if self.download_execution_retry_base_seconds > self.download_execution_retry_max_seconds:
+            raise ValueError("download execution retry base cannot exceed retry maximum")
         return self
+
+    @property
+    def download_executor_enabled(self) -> bool:
+        return all(
+            (
+                self.enable_download_executor,
+                self.enable_avistaz_torrent_fetch,
+                self.enable_qb_write,
+            )
+        )
 
     @field_validator(
         "allowed_external_hosts",

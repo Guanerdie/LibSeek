@@ -41,6 +41,7 @@ class WorkflowStatus(StrEnum):
 class ApprovalStatus(StrEnum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
+    EXECUTING = "EXECUTING"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
     REVOKED = "REVOKED"
@@ -61,6 +62,7 @@ class ExecutionIntentStatus(StrEnum):
 
 class DownloadExecutionStatus(StrEnum):
     PENDING = "PENDING"
+    RETRY_WAIT = "RETRY_WAIT"
     VALIDATING = "VALIDATING"
     SUBMITTING = "SUBMITTING"
     SUBMITTED = "SUBMITTED"
@@ -70,6 +72,23 @@ class DownloadExecutionStatus(StrEnum):
     RECONCILIATION_PENDING = "RECONCILIATION_PENDING"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class DownloadJobStatus(StrEnum):
+    QUEUED = "QUEUED"
+    DOWNLOADING = "DOWNLOADING"
+    PAUSED = "PAUSED"
+    CHECKING = "CHECKING"
+    SEEDING = "SEEDING"
+    COMPLETED = "COMPLETED"
+    MISSING = "MISSING"
+    ERROR = "ERROR"
+
+
+class HnrStatus(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    AT_RISK = "AT_RISK"
+    SATISFIED = "SATISFIED"
 
 
 class PreflightStatus(StrEnum):

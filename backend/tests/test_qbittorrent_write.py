@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-import bencodepy
+import bencodepy  # type: ignore[import-untyped]
 import httpx
 import pytest
 
@@ -279,3 +279,47 @@ async def test_ambiguous_add_response_requires_reconciliation() -> None:
     assert caught.value.error_code == "QB_ADD_OUTCOME_UNKNOWN"
     assert caught.value.retryable is False
     assert caught.value.details == {"external_write_may_have_occurred": True}
+
+
+@pytest.mark.asyncio
+async def test_write_guard_runs_after_deduplication_and_before_add_post() -> None:
+    torrent, info_hash = torrent_fixture()
+    paths: list[str] = []
+    guard_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/v2/torrents/add":
+            raise AssertionError("expired lease must prevent the add POST")
+        raise AssertionError(request.url.path)
+
+    async def reject_expired_lease() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        raise AppError(
+            "DOWNLOAD_EXECUTION_LEASE_LOST",
+            "lease expired",
+            status_code=409,
+        )
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.add_torrent(
+                torrent,
+                expected_info_hash=info_hash,
+                save_path="/downloads",
+                category="movies",
+                write_guard=reject_expired_lease,
+            )
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "DOWNLOAD_EXECUTION_LEASE_LOST"
+    assert guard_calls == 1
+    assert paths == ["/api/v2/auth/login", "/api/v2/torrents/info"]

@@ -28,6 +28,19 @@ x-backend-environment: &backend_environment
   JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
   JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-300}
   JOB_LEASE_RENEW_INTERVAL_SECONDS: ${JOB_LEASE_RENEW_INTERVAL_SECONDS:-60}
+  ENABLE_DOWNLOAD_EXECUTOR: ${ENABLE_DOWNLOAD_EXECUTOR:-false}
+  ENABLE_AVISTAZ_TORRENT_FETCH: ${ENABLE_AVISTAZ_TORRENT_FETCH:-false}
+  ENABLE_QB_WRITE: ${ENABLE_QB_WRITE:-false}
+  ENABLE_DOWNLOAD_MONITOR: ${ENABLE_DOWNLOAD_MONITOR:-false}
+  DOWNLOAD_EXECUTION_LEASE_SECONDS: ${DOWNLOAD_EXECUTION_LEASE_SECONDS:-300}
+  DOWNLOAD_EXECUTION_LEASE_RENEW_INTERVAL_SECONDS: ${DOWNLOAD_EXECUTION_LEASE_RENEW_INTERVAL_SECONDS:-60}
+  DOWNLOAD_EXECUTION_RETRY_BASE_SECONDS: ${DOWNLOAD_EXECUTION_RETRY_BASE_SECONDS:-30}
+  DOWNLOAD_EXECUTION_RETRY_MAX_SECONDS: ${DOWNLOAD_EXECUTION_RETRY_MAX_SECONDS:-900}
+  DOWNLOAD_EXECUTOR_POLL_SECONDS: ${DOWNLOAD_EXECUTOR_POLL_SECONDS:-2}
+  DOWNLOAD_MONITOR_INTERVAL_SECONDS: ${DOWNLOAD_MONITOR_INTERVAL_SECONDS:-15}
+  DOWNLOAD_MONITOR_BATCH_SIZE: ${DOWNLOAD_MONITOR_BATCH_SIZE:-100}
+  TORRENT_MAX_BYTES: ${TORRENT_MAX_BYTES:-10485760}
+  TORRENT_MAX_FILES: ${TORRENT_MAX_FILES:-20000}
 
 services:
   postgres:
@@ -114,6 +127,57 @@ services:
       timeout: 4s
       retries: 5
       start_period: 20s
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [internal]
+
+  download-executor:
+    profiles: [download-execution]
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.download_executor_main"]
+    environment:
+      <<: *backend_environment
+      QB_BASE_URL: ${QB_BASE_URL:-}
+      QB_USERNAME: ${QB_USERNAME:-}
+      QB_PASSWORD: ${QB_PASSWORD:-}
+      QB_ALLOWED_HOSTS: ${QB_ALLOWED_HOSTS:-}
+      QB_ALLOW_INSECURE_HTTP: ${QB_ALLOW_INSECURE_HTTP:-false}
+      QB_TARGET_CATEGORY: ${QB_TARGET_CATEGORY:-}
+      QB_TARGET_SAVE_PATH: ${QB_TARGET_SAVE_PATH:-}
+      QB_SAVE_PATH_REF: ${QB_SAVE_PATH_REF:-qb-default-save-path}
+      QB_ALLOWED_SAVE_PATHS: ${QB_ALLOWED_SAVE_PATHS:-}
+      QB_PLAN_TAGS: ${QB_PLAN_TAGS:-}
+      QB_TARGET_INSTANCE_REF: ${QB_TARGET_INSTANCE_REF:-qb-primary}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [internal]
+
+  download-monitor:
+    profiles: [download-monitor]
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.download_monitor_main"]
+    environment:
+      <<: *backend_environment
+      ENABLE_QB_READ_ONLY: ${ENABLE_QB_READ_ONLY:-false}
+      QB_BASE_URL: ${QB_BASE_URL:-}
+      QB_USERNAME: ${QB_USERNAME:-}
+      QB_PASSWORD: ${QB_PASSWORD:-}
+      QB_ALLOWED_HOSTS: ${QB_ALLOWED_HOSTS:-}
+      QB_ALLOW_INSECURE_HTTP: ${QB_ALLOW_INSECURE_HTTP:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     read_only: true
     tmpfs: [/tmp]
     networks: [internal]

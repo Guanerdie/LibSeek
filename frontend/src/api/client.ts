@@ -3,7 +3,15 @@ import type {
   ApprovalRequest,
   CsrfResponse,
   DiscoveryRun,
+  DownloadExecution,
+  DownloadExecutionStatus,
+  DownloadJob,
+  DownloadJobStatus,
+  DownloadJobSummary,
+  DownloadJobTimeline,
+  DownloadLaunchMode,
   DownloadPlan,
+  ExecutionIntent,
   IdentityReview,
   LoginResponse,
   MediaItem,
@@ -247,6 +255,86 @@ export const approvalApi = {
     request<DownloadPlan>(
       `/api/approval-requests/${encodeURIComponent(approvalId)}/download-plan`,
     ),
+}
+
+export const executionApi = {
+  createIntent: (
+    approvalId: string,
+    launchMode: DownloadLaunchMode,
+    expiresInSeconds?: number,
+  ) =>
+    request<ExecutionIntent>(
+      `/api/approval-requests/${encodeURIComponent(approvalId)}/execution-intents`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          launch_mode: launchMode,
+          ...(expiresInSeconds === undefined ? {} : { expires_in_seconds: expiresInSeconds }),
+        }),
+      },
+    ),
+  execute: (
+    approvalId: string,
+    intentId: string,
+    nonce: string,
+    idempotencyKey: string,
+  ) =>
+    request<DownloadExecution>(
+      `/api/approval-requests/${encodeURIComponent(approvalId)}/execute`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({ intent_id: intentId, nonce }),
+      },
+    ),
+  forApproval: (approvalId: string) =>
+    request<DownloadExecution>(
+      `/api/approval-requests/${encodeURIComponent(approvalId)}/download-execution`,
+    ),
+  list: (params: {
+    page: number
+    pageSize: number
+    status?: DownloadExecutionStatus
+  }) =>
+    request<Page<DownloadExecution>>(
+      `/api/download-executions?${queryString({
+        page: params.page,
+        page_size: params.pageSize,
+        status: params.status,
+      })}`,
+    ),
+  get: (executionId: string) =>
+    request<DownloadExecution>(`/api/download-executions/${encodeURIComponent(executionId)}`),
+  reconcile: (executionId: string, reason?: string) =>
+    request<DownloadExecution>(
+      `/api/download-executions/${encodeURIComponent(executionId)}/reconcile`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason?.trim() || null }),
+      },
+    ),
+}
+
+export const downloadJobApi = {
+  list: (params: { page: number; pageSize: number; status?: DownloadJobStatus }) =>
+    request<Page<DownloadJob>>(
+      `/api/download-jobs?${queryString({
+        page: params.page,
+        page_size: params.pageSize,
+        status: params.status,
+      })}`,
+    ),
+  get: (jobId: string) =>
+    request<DownloadJob>(`/api/download-jobs/${encodeURIComponent(jobId)}`),
+  summary: (jobId: string) =>
+    request<DownloadJobSummary>(`/api/download-jobs/${encodeURIComponent(jobId)}/summary`),
+  timeline: (jobId: string) =>
+    request<DownloadJobTimeline>(`/api/download-jobs/${encodeURIComponent(jobId)}/timeline`),
 }
 
 export const qbApi = {

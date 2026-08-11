@@ -38,6 +38,12 @@ const mocks = vi.hoisted(() => ({
   approvalReject: vi.fn(),
   approvalRevoke: vi.fn(),
   approvalPlan: vi.fn(),
+  executionCreateIntent: vi.fn(),
+  executionExecute: vi.fn(),
+  executionForApproval: vi.fn(),
+  executionList: vi.fn(),
+  executionGet: vi.fn(),
+  executionReconcile: vi.fn(),
   qbStatus: vi.fn(),
   qbTorrents: vi.fn(),
 }))
@@ -79,6 +85,14 @@ vi.mock('../src/api/client', () => ({
     reject: mocks.approvalReject,
     revoke: mocks.approvalRevoke,
     plan: mocks.approvalPlan,
+  },
+  executionApi: {
+    createIntent: mocks.executionCreateIntent,
+    execute: mocks.executionExecute,
+    forApproval: mocks.executionForApproval,
+    list: mocks.executionList,
+    get: mocks.executionGet,
+    reconcile: mocks.executionReconcile,
   },
   qbApi: {
     status: mocks.qbStatus,
@@ -175,6 +189,59 @@ const approval = {
   },
   preflight_checked_at: '2026-08-10T00:10:00Z',
   events: [],
+}
+
+const downloadPlan = {
+  id: 'plan-1',
+  approval_id: 'approval-1',
+  approval_snapshot_hash: 'a'.repeat(64),
+  preflight_policy_fingerprint: 'b'.repeat(64),
+  plan_hash: 'c'.repeat(64),
+  site_id: 'avistaz',
+  torrent_ref: 'avistaz:details:safe',
+  expected_info_hash: '1'.repeat(40),
+  release_title: 'Test Series S01E03 1080p WEB-DL',
+  save_path_ref: 'media-tv',
+  category: 'media',
+  tags: ['unin'],
+  estimated_size_bytes: 2048,
+  media_destination_plan: {},
+  preflight_result: { ...approval.preflight_result, overall_status: 'PASS' as const },
+  warnings: [],
+  created_at: '2026-08-10T00:11:00Z',
+}
+
+const execution = {
+  id: 'execution-1',
+  approval_id: 'approval-1',
+  intent_id: 'intent-1',
+  status: 'PENDING' as const,
+  requires_reconciliation: false,
+  approval_snapshot_hash: 'a'.repeat(64),
+  plan_hash: 'c'.repeat(64),
+  qb_target_fingerprint: 'd'.repeat(64),
+  launch_mode: 'ADD_PAUSED' as const,
+  attempts: 0,
+  max_attempts: 3,
+  next_retry_at: null,
+  locked_at: null,
+  actual_info_hash: null,
+  actual_info_hash_v1: null,
+  actual_info_hash_v2: null,
+  actual_size_bytes: null,
+  actual_file_count: null,
+  validated_at: null,
+  submitted_at: null,
+  verified_at: null,
+  error_code: null,
+  error_message: null,
+  requested_by: 'admin-user',
+  requested_at: '2026-08-10T00:12:00Z',
+  reconciliation_requested_by: null,
+  reconciliation_requested_at: null,
+  reconciliation_reason: null,
+  created_at: '2026-08-10T00:12:00Z',
+  updated_at: '2026-08-10T00:12:00Z',
 }
 
 beforeEach(() => {
@@ -554,7 +621,7 @@ describe('Approval views', () => {
     const wrapper = mount(ApprovalView)
     await flushPromises()
     expect(wrapper.text()).toContain('候选 H&R 规则未知')
-    expect(wrapper.text()).toContain('当前阶段只生成下载计划')
+    expect(wrapper.text()).toContain('仅管理员可在已批准计划上完成两步确认')
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     for (const checkbox of checkboxes) await checkbox.setValue(true)
     const approveButton = wrapper
@@ -598,5 +665,92 @@ describe('Approval views', () => {
     await nextTick()
     expect(findButton('运行 qB 只读预检')?.attributes('disabled')).toBeDefined()
     expect(findButton('拒绝')?.attributes('disabled')).toBeDefined()
+  })
+
+  it('uses a private one-time intent for the two-step paused execution flow', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    mocks.executionCreateIntent.mockResolvedValueOnce({
+      id: 'intent-1',
+      approval_id: 'approval-1',
+      nonce: `ei1_${'n'.repeat(32)}`,
+      status: 'ACTIVE',
+      approval_snapshot_hash: 'a'.repeat(64),
+      plan_hash: 'c'.repeat(64),
+      qb_target_fingerprint: 'd'.repeat(64),
+      launch_mode: 'ADD_PAUSED',
+      expires_at: '2026-08-10T00:20:00Z',
+      created_at: '2026-08-10T00:12:00Z',
+    })
+    mocks.executionExecute.mockResolvedValueOnce(execution)
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+    const control = wrapper.get('.execution-control-section')
+
+    expect(control.get('.segmented-control button.active').text()).toContain('添加后暂停')
+    await control.get('.execution-checks input[type="checkbox"]').setValue(true)
+    await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.executionCreateIntent).toHaveBeenCalledWith('approval-1', 'ADD_PAUSED')
+    expect(wrapper.text()).not.toContain(`ei1_${'n'.repeat(32)}`)
+    await control.get('.final-step input[type="checkbox"]').setValue(true)
+    await control.findAll('button').find((item) => item.text().includes('第二步'))?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.executionExecute).toHaveBeenCalledWith(
+      'approval-1',
+      'intent-1',
+      `ei1_${'n'.repeat(32)}`,
+      expect.stringMatching(/^unin-[0-9a-f]{48}$/),
+    )
+    expect(wrapper.text()).toContain('执行记录已创建')
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('requires an extra explicit confirmation for immediate start', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+    const control = wrapper.get('.execution-control-section')
+    const immediateButton = control.findAll('.segmented-control button').find((item) => item.text().includes('立即开始'))
+    await immediateButton?.trigger('click')
+    const checks = control.findAll('.execution-checks input[type="checkbox"]')
+    await checks[0]?.setValue(true)
+    const firstStep = control.findAll('button').find((item) => item.text().includes('第一步'))
+    expect(firstStep?.attributes('disabled')).toBeDefined()
+    await checks[1]?.setValue(true)
+    expect(firstStep?.attributes('disabled')).toBeUndefined()
+  })
+
+  it('shows a disabled execution backend error without claiming success', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    mocks.executionCreateIntent.mockRejectedValueOnce(new Error('下载执行控制默认关闭'))
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+    const control = wrapper.get('.execution-control-section')
+    await control.get('.execution-checks input[type="checkbox"]').setValue(true)
+    await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('下载执行控制默认关闭')
+    expect(wrapper.text()).not.toContain('执行记录已创建')
+    expect(mocks.executionExecute).not.toHaveBeenCalled()
+  })
+
+  it('resumes an existing execution from an EXECUTING approval without requesting a new intent', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'EXECUTING' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    mocks.executionForApproval.mockResolvedValueOnce({ ...execution, status: 'SUBMITTED' })
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
+    expect(wrapper.text()).toContain('执行记录已创建，后台结果仍需继续观察')
+    expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
+    expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
   })
 })

@@ -18,6 +18,8 @@ describe('authenticated navigation', () => {
   it('registers login and qBittorrent routes and exposes protected navigation', async () => {
     expect(router.resolve('/login').matched).toHaveLength(1)
     expect(router.resolve('/qbittorrent').matched).toHaveLength(1)
+    expect(router.resolve('/executions/execution-1').matched).toHaveLength(1)
+    expect(router.resolve('/download-jobs/job-1').matched).toHaveLength(1)
     await router.push('/')
 
     const wrapper = mount(App, {
@@ -33,6 +35,8 @@ describe('authenticated navigation', () => {
       },
     })
     expect(wrapper.get('a[href="/qbittorrent"]').text()).toContain('qB 状态')
+    expect(wrapper.get('a[href="/executions"]').text()).toContain('下载执行')
+    expect(wrapper.get('a[href="/download-jobs"]').text()).toContain('下载任务')
     expect(wrapper.text()).toContain('admin-user')
     expect(wrapper.text()).toContain('管理员')
   })

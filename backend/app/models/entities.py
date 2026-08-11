@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -27,8 +28,10 @@ from app.db.base import Base
 from app.models.enums import (
     ApprovalStatus,
     DownloadExecutionStatus,
+    DownloadJobStatus,
     DownloadLaunchMode,
     ExecutionIntentStatus,
+    HnrStatus,
     IdentityConfidence,
     JobStatus,
     MediaType,
@@ -39,6 +42,17 @@ from app.models.enums import (
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def portable_hex_check(column: str, lengths: tuple[int, ...]) -> str:
+    stripped = f"lower({column})"
+    for character in "0123456789abcdef":
+        stripped = f"replace({stripped}, '{character}', '')"
+    allowed_lengths = ", ".join(str(length) for length in lengths)
+    return (
+        f"{column} IS NULL OR (length({column}) IN ({allowed_lengths}) "
+        f"AND {column} = lower({column}) AND length({stripped}) = 0)"
+    )
 
 
 class DiscoveryRun(Base):
@@ -285,8 +299,8 @@ class ApprovalRequest(Base):
             "uq_approval_active_candidate",
             "torrent_candidate_id",
             unique=True,
-            postgresql_where=text("status IN ('PENDING', 'APPROVED')"),
-            sqlite_where=text("status IN ('PENDING', 'APPROVED')"),
+            postgresql_where=text("status IN ('PENDING', 'APPROVED', 'EXECUTING')"),
+            sqlite_where=text("status IN ('PENDING', 'APPROVED', 'EXECUTING')"),
         ),
     )
 
@@ -372,6 +386,11 @@ class DownloadPlan(Base):
 class ExecutionIntent(Base):
     __tablename__ = "execution_intents"
     __table_args__ = (
+        CheckConstraint(
+            "((status = 'CONSUMED' AND consumed_at IS NOT NULL AND consumed_by IS NOT NULL) "
+            "OR (status <> 'CONSUMED' AND consumed_at IS NULL AND consumed_by IS NULL))",
+            name="ck_execution_intents_consumed_fields",
+        ),
         Index(
             "uq_execution_intent_active_approval",
             "approval_id",
@@ -411,6 +430,86 @@ class ExecutionIntent(Base):
 
 class DownloadExecution(Base):
     __tablename__ = "download_executions"
+    __table_args__ = (
+        CheckConstraint(
+            "attempts >= 0 AND max_attempts >= 1 AND attempts <= max_attempts",
+            name="ck_download_executions_attempts",
+        ),
+        CheckConstraint(
+            portable_hex_check("actual_info_hash", (40, 64)),
+            name="ck_download_executions_actual_info_hash_shape",
+        ),
+        CheckConstraint(
+            portable_hex_check("actual_info_hash_v1", (40,)),
+            name="ck_download_executions_actual_info_hash_v1_shape",
+        ),
+        CheckConstraint(
+            portable_hex_check("actual_info_hash_v2", (64,)),
+            name="ck_download_executions_actual_info_hash_v2_shape",
+        ),
+        CheckConstraint(
+            "actual_info_hash IS NULL "
+            "OR (actual_info_hash_v1 IS NOT NULL "
+            "AND actual_info_hash = actual_info_hash_v1) "
+            "OR (actual_info_hash_v2 IS NOT NULL "
+            "AND (actual_info_hash = actual_info_hash_v2 "
+            "OR actual_info_hash = substr(actual_info_hash_v2, 1, 40)))",
+            name="ck_download_executions_actual_info_hash_binding",
+        ),
+        CheckConstraint(
+            "((locked_at IS NULL AND locked_by IS NULL AND lease_token IS NULL) OR "
+            "(locked_at IS NOT NULL AND locked_by IS NOT NULL AND lease_token IS NOT NULL))",
+            name="ck_download_executions_lease_fields",
+        ),
+        CheckConstraint(
+            "((status IN ('VALIDATING', 'SUBMITTING') AND locked_at IS NOT NULL) OR "
+            "(status NOT IN ('VALIDATING', 'SUBMITTING') AND locked_at IS NULL))",
+            name="ck_download_executions_lease_status",
+        ),
+        CheckConstraint(
+            "((actual_info_hash IS NULL AND actual_info_hash_v1 IS NULL "
+            "AND actual_info_hash_v2 IS NULL AND actual_size_bytes IS NULL "
+            "AND actual_file_count IS NULL AND validated_at IS NULL "
+            "AND submitted_at IS NULL) OR "
+            "(actual_info_hash IS NOT NULL "
+            "AND (actual_info_hash_v1 IS NOT NULL OR actual_info_hash_v2 IS NOT NULL) "
+            "AND actual_size_bytes > 0 AND actual_file_count > 0 "
+            "AND validated_at IS NOT NULL AND submitted_at IS NOT NULL))",
+            name="ck_download_executions_validation_bundle",
+        ),
+        CheckConstraint(
+            "((status IN ('SUBMITTING', 'SUBMITTED', 'ALREADY_PRESENT', "
+            "'OUTCOME_UNKNOWN', 'RECONCILIATION_REQUIRED', 'RECONCILIATION_PENDING') "
+            "AND actual_info_hash IS NOT NULL) OR "
+            "(status NOT IN ('SUBMITTING', 'SUBMITTED', 'ALREADY_PRESENT', "
+            "'OUTCOME_UNKNOWN', 'RECONCILIATION_REQUIRED', 'RECONCILIATION_PENDING') "
+            "AND actual_info_hash IS NULL))",
+            name="ck_download_executions_submission_metadata",
+        ),
+        CheckConstraint(
+            "((status IN ('SUBMITTED', 'ALREADY_PRESENT') AND verified_at IS NOT NULL) OR "
+            "(status NOT IN ('SUBMITTED', 'ALREADY_PRESENT') AND verified_at IS NULL))",
+            name="ck_download_executions_verified_status",
+        ),
+        CheckConstraint(
+            "((reconciliation_requested_by IS NULL AND reconciliation_requested_at IS NULL) "
+            "OR (reconciliation_requested_by IS NOT NULL "
+            "AND reconciliation_requested_at IS NOT NULL))",
+            name="ck_download_executions_reconciliation_fields",
+        ),
+        CheckConstraint(
+            "status <> 'RECONCILIATION_PENDING' OR "
+            "(reconciliation_requested_by IS NOT NULL "
+            "AND reconciliation_requested_at IS NOT NULL)",
+            name="ck_download_executions_reconciliation_status",
+        ),
+        CheckConstraint(
+            "reconciliation_reason IS NULL OR "
+            "(reconciliation_requested_by IS NOT NULL "
+            "AND reconciliation_requested_at IS NOT NULL)",
+            name="ck_download_executions_reconciliation_reason",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     approval_id: Mapped[str] = mapped_column(
@@ -450,6 +549,13 @@ class DownloadExecution(Base):
     locked_by: Mapped[str | None] = mapped_column(String(180))
     lease_token: Mapped[str | None] = mapped_column(String(36))
     actual_info_hash: Mapped[str | None] = mapped_column(String(64))
+    actual_info_hash_v1: Mapped[str | None] = mapped_column(String(40))
+    actual_info_hash_v2: Mapped[str | None] = mapped_column(String(64))
+    actual_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    actual_file_count: Mapped[int | None] = mapped_column(Integer)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(String(80))
     error_message: Mapped[str | None] = mapped_column(Text)
     requested_by: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -479,6 +585,109 @@ class DownloadExecutionEvent(Base):
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     from_status: Mapped[str | None] = mapped_column(String(40))
     to_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), nullable=False)
+    sanitized_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class DownloadJob(Base):
+    __tablename__ = "download_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "info_hash_v1 IS NOT NULL OR info_hash_v2 IS NOT NULL",
+            name="ck_download_jobs_info_hash_required",
+        ),
+        CheckConstraint(
+            portable_hex_check("info_hash_v1", (40,)),
+            name="ck_download_jobs_info_hash_v1_shape",
+        ),
+        CheckConstraint(
+            portable_hex_check("info_hash_v2", (64,)),
+            name="ck_download_jobs_info_hash_v2_shape",
+        ),
+        CheckConstraint(
+            "size_bytes > 0 AND file_count > 0",
+            name="ck_download_jobs_content_bounds",
+        ),
+        CheckConstraint(
+            "progress >= 0 AND progress <= 1",
+            name="ck_download_jobs_progress",
+        ),
+        CheckConstraint(
+            "download_speed_bps >= 0 AND upload_speed_bps >= 0 "
+            "AND downloaded_bytes >= 0 AND uploaded_bytes >= 0 AND ratio >= -1",
+            name="ck_download_jobs_transfer_metrics",
+        ),
+        CheckConstraint(
+            "status <> 'COMPLETED' OR completed_at IS NOT NULL",
+            name="ck_download_jobs_completed_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("download_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    approval_id: Mapped[str] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    media_item_id: Mapped[str] = mapped_column(
+        ForeignKey("media_items.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    status: Mapped[DownloadJobStatus] = mapped_column(
+        Enum(DownloadJobStatus, native_enum=False, length=20),
+        default=DownloadJobStatus.QUEUED,
+        nullable=False,
+        index=True,
+    )
+    release_title: Mapped[str] = mapped_column(String(1000), nullable=False)
+    info_hash_v1: Mapped[str | None] = mapped_column(String(40))
+    info_hash_v2: Mapped[str | None] = mapped_column(String(64))
+    save_path_ref: Mapped[str] = mapped_column(String(180), nullable=False)
+    category: Mapped[str] = mapped_column(String(300), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    progress: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    download_speed_bps: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    upload_speed_bps: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    downloaded_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    uploaded_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    ratio: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    hnr_status: Mapped[HnrStatus] = mapped_column(
+        Enum(HnrStatus, native_enum=False, length=20),
+        default=HnrStatus.UNKNOWN,
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class DownloadJobEvent(Base):
+    __tablename__ = "download_job_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    download_job_id: Mapped[str] = mapped_column(
+        ForeignKey("download_jobs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(20))
+    to_status: Mapped[str] = mapped_column(String(20), nullable=False)
     actor: Mapped[str] = mapped_column(String(120), nullable=False)
     sanitized_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -520,6 +729,21 @@ _DOWNLOAD_EXECUTION_IMMUTABLE_FIELDS = (
     "launch_mode",
     "requested_by",
     "requested_at",
+    "created_at",
+)
+
+_DOWNLOAD_JOB_IMMUTABLE_FIELDS = (
+    "execution_id",
+    "approval_id",
+    "media_item_id",
+    "release_title",
+    "info_hash_v1",
+    "info_hash_v2",
+    "save_path_ref",
+    "category",
+    "size_bytes",
+    "file_count",
+    "started_at",
     "created_at",
 )
 
@@ -577,6 +801,34 @@ def reject_download_execution_binding_update(
         and info_hash_history.deleted[0] is not None
     ):
         raise ValueError("download execution actual_info_hash cannot change once persisted")
+    for field in (
+        "actual_info_hash_v1",
+        "actual_info_hash_v2",
+        "actual_size_bytes",
+        "actual_file_count",
+        "validated_at",
+        "submitted_at",
+        "verified_at",
+    ):
+        history = state.attrs[field].history
+        if history.has_changes() and history.deleted and history.deleted[0] is not None:
+            raise ValueError(f"download execution {field} cannot change once persisted")
+
+
+@event.listens_for(DownloadJob, "before_update")
+def reject_download_job_identity_update(
+    _mapper: Mapper[DownloadJob],
+    _connection: Connection,
+    target: DownloadJob,
+) -> None:
+    state = inspect(target)
+    changed = [
+        field
+        for field in _DOWNLOAD_JOB_IMMUTABLE_FIELDS
+        if state.attrs[field].history.has_changes()
+    ]
+    if changed:
+        raise ValueError(f"download job immutable fields cannot change: {', '.join(changed)}")
 
 
 @event.listens_for(ApprovalRequest, "before_delete")
@@ -588,6 +840,9 @@ def reject_download_execution_binding_update(
 @event.listens_for(DownloadExecution, "before_delete")
 @event.listens_for(DownloadExecutionEvent, "before_update")
 @event.listens_for(DownloadExecutionEvent, "before_delete")
+@event.listens_for(DownloadJob, "before_delete")
+@event.listens_for(DownloadJobEvent, "before_update")
+@event.listens_for(DownloadJobEvent, "before_delete")
 def reject_immutable_audit_mutation(
     _mapper: Mapper[object],
     _connection: Connection,

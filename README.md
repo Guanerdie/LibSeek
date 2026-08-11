@@ -1,39 +1,37 @@
 # UNIN 影视缺失资源检索与下载编排系统
 
-UNIN 当前版本为 `0.3.0`，完成到第三阶段：从 NextFind 只读发现未入库电影和电视剧，通过 TMDB 只读解析生成待人工确认的影视身份，再通过 AvistaZ 只读搜索生成可解释评分的 PT 候选；操作者可以为一个固定候选创建不可变审批快照，运行 qBittorrent 只读预检并生成不可执行的下载计划。FastAPI、独立 Worker、PostgreSQL 和 Vue 管理端共同保存脱敏审计记录并展示整个流程。
+UNIN 当前版本为 `0.5.0`。系统已实现从 NextFind 发现未入库影视、TMDB 身份与季集补全、PT 候选搜索和人工审批，到受控 AvistaZ 取种、qBittorrent 提交、只读进度监控与下载总结页的完整代码链路。FastAPI、独立 Worker、PostgreSQL 和 Vue 管理端共同保存脱敏的状态与审计记录。
 
-真实 TMDB、AvistaZ 与 qBittorrent 连接默认关闭。本阶段不访问 AvistaZ `download` URL，不获取 `.torrent`，不向 qBittorrent 添加或修改任务，也不移动、复制或删除影视文件。所有身份确认、候选审批均由操作者人工提交；批准只生成下载计划，不会自动选择种子或开始下载。
+真实外部能力仍然默认关闭，且当前只完成 Mock、fixture、静态检查和离线迁移验收；尚未使用真实 TMDB、AvistaZ、qBittorrent 或 NexusPHP 站点完成端到端冒烟测试。只有用户明确批准具体动作、目标和影响，并在本机安全录入运行时 Secret 后，才允许启用相应开关。系统不移动、复制、重命名、硬链接或删除媒体文件，也不执行媒体库写入。
 
 ## 已实现
 
-- Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、httpx。
-- 本地单账号认证与分级授权：签名会话 Cookie、登录前 bootstrap CSRF、所有状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级；认证材料缺失时受保护 API 默认拒绝访问。
-- PostgreSQL 任务队列、`FOR UPDATE SKIP LOCKED`、锁租约恢复、幂等任务与可审计重试。
-- NextFind 只读发现：独立 Cookie、HTTPS 主机白名单、跳转复验、NDJSON 流式解析和响应大小限制。
-- TMDB 真实只读 Provider：Bearer Token、中文/英文详情、外部 ID、最多 5 个搜索候选、已播剧集矩阵、TTL 缓存、限速、429 退避与超时。
-- AvistaZ 真实只读适配器：进程内 Bearer Token、401/412 单次重新认证、429 指数退避、单站并发 1、请求间隔至少 6 秒、跳转域名复验。
-- 人工身份确认：保留 NextFind 原始信息、TMDB 候选、评分理由、冲突、操作者、确认时间和候选快照；重复确认会被拒绝。
-- PT 候选审阅：按 TMDB、IMDb、英文名、原名、中文名或别名依次降级搜索，并展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告。
-- `metadata_matches`、`identity_reviews`、`torrent_search_runs`、`torrent_candidates` 与完整工作流状态迁移。
-- qBittorrent 真实只读适配器：SID Cookie 登录，只读取应用版本、Web API 版本、任务、任务文件和分类；仅 HTTP 2xx 成功，拒绝登录跳转、HTML 页面和越界数值。
-- 不可变审批：审批绑定一个候选快照和规范 JSON SHA-256；重复列必须与快照一致，ORM 与 PostgreSQL trigger 禁止修改/删除固定审批字段和审批事件。候选后续变化不会继承旧审批，重复有效审批、过期审批和重复消费都会被拒绝。
-- 只读下载前预检：检查 qB 连接与版本、AvistaZ 禁止版本规则、分类、重复任务、允许保存路径、大小限制、活跃做种、候选做种者和 H&R。预检绑定策略指纹，必需检查必须完整且汇总状态必须与明细一致；`UNKNOWN` 永远不等于 `PASS`。
-- 非执行下载计划：只有新鲜且总体为 `PASS`/`WARNING` 的预检，以及三项人工确认完成后才能生成；计划以审批快照哈希、预检策略指纹和自身规范哈希绑定，并禁止更新/删除，不含下载 URL、announce、Cookie、Token、PID 或密码。
-- 人工审批页展示固定快照、预检、有效期、审计事件和下载计划。qB 前端状态使用请求 generation，失败会清除旧数据，避免旧响应覆盖新响应。
-- Docker Compose 四服务部署；API 与前端端口只绑定 `127.0.0.1`。本地认证和 qB 的 Secret 只挂载给 API，不挂载给 Worker 或前端。
+- Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、httpx；前端为 Vue 3、Pinia、Vue Router、Vite 和 Vitest。
+- 本地单账号认证与分级授权：签名会话 Cookie、登录前 bootstrap CSRF、所有状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级；认证材料缺失时受保护 API fail closed。
+- NextFind 只读发现：从 `https://nextfind.example/#/discover` 对应服务获取未入库条目，使用独立 Cookie、HTTPS 主机白名单、重定向复验、NDJSON 坏行隔离、分页循环检测和响应大小限制。
+- TMDB 只读补全：优先使用 NextFind 提供的 TMDB ID，否则按标题、年份和类型返回最多 5 个候选；保存中英文名、IMDb 等外部 ID、已播季集矩阵和冲突，最终身份必须人工确认。
+- PT 搜索与审阅：AvistaZ 支持 TMDB/IMDb/标题降级搜索、限速和稳定错误；候选展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告，评分只排序、不自动批准。
+- 多 PT 扩展底座：搜索任务、Worker 和候选均绑定 `site_id`，注册表未知或禁用站点时失败关闭，不回退到其他站点。声明式 `NexusPhpSiteProfile`、同源 HTTP 会话和脱敏 HTML fixture 契约已实现，但默认注册表仍只有 `avistaz`，公开创建搜索的 API 当前也只允许 `avistaz`；没有任何真实 NexusPHP 站点经过验证。
+- 不可变审批和下载计划：候选快照、预检策略与计划均以规范 JSON SHA-256 绑定，并由 ORM、约束和 PostgreSQL trigger 保护。`UNKNOWN` 不等于 `PASS`，批准仍需人工确认 H&R、继续做种和执行风险。
+- 阶段 4 执行控制面：一次性 nonce 只返回一次、数据库只存摘要；`Idempotency-Key`、审批、intent 和计划绑定共同防重。控制面默认关闭，创建执行记录本身不会访问外部服务。
+- 阶段 5 独立执行器：租约和 fencing 保护下重新搜索已批准的 AvistaZ torrent ID，校验 `.torrent` 的 v1/v2 hash、大小和文件数，在任何 qB add 前持久化实际摘要；按全部 hash alias 查重，提交后再只读核验并创建唯一 `DownloadJob`。
+- 未知提交结果不会自动重试：写入可能发生时进入 `OUTCOME_UNKNOWN`，已预留但无法验证时进入 `RECONCILIATION_REQUIRED`；人工对账请求只记录为 `RECONCILIATION_PENDING`，不会冒充成功或再次 add。
+- 独立只读监控器：读取 qB 状态并更新任务进度、速度、上传量、Ratio 和完成时间；它不推断 H&R，未知值保持 `UNKNOWN`，已有人工或外部写入的 `AT_RISK`/`SATISFIED` 不会被覆盖。
+- Vue 管理端包含审批两步执行确认（默认 `ADD_PAUSED`）、执行列表/详情、人工对账、下载任务列表和总结页；`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
+- Docker Compose 默认启动 API、普通 Worker、前端和 PostgreSQL；`download-execution` 与 `download-monitor` profile 分别启用独立执行器和只读监控器。API 与前端端口只绑定 `127.0.0.1`。
 
-架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)。
+架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)，PT Profile 接入约束见 [docs/pt-site-profiles.md](docs/pt-site-profiles.md)。
 
 ## 目录
 
 ```text
-backend/                 FastAPI、适配器、数据库、Worker、Alembic、测试
-frontend/                Vue 3、Pinia、Router、身份与 PT 候选页面、Vitest
+backend/                 FastAPI、适配器、数据库、普通/执行/监控 Worker、Alembic、测试
+frontend/                Vue 3、Pinia、Router、审批、执行与下载总结页面、Vitest
 deploy/                  Docker Secret Compose override 示例
-docs/                    架构、安全、测试文档
+docs/                    架构、安全、测试与 PT Profile 文档
 scripts/                 Windows/Linux 启动与测试脚本
 secrets/                 10 个本地 Secret 文件目录，*.txt 已被 Git 忽略
-compose.yaml             api、worker、frontend、postgres
+compose.yaml             4 个默认服务及 2 个 opt-in profile 服务
 .env.example             无真实密钥的配置样例，真实连接默认关闭
 ```
 
@@ -66,7 +64,7 @@ docker compose ps
 
 ## 本地登录与权限
 
-系统只配置一个本地账号。`AUTH_LOCAL_ROLE` 决定该账号的最高权限：`viewer` 只能读取影视、候选、审批和 qB 只读状态；`operator` 继承读取权限，并可创建发现/解析/搜索/审批申请、执行预检、确认身份和拒绝审批；`admin` 继承前两级权限，并可批准或撤销审批。服务端始终以登录会话中的用户名写审计操作者，忽略客户端伪造的操作者字段。
+系统只配置一个本地账号。`AUTH_LOCAL_ROLE` 决定该账号的最高权限：`viewer` 只能读取影视、候选、审批、执行、下载任务和 qB 只读状态；`operator` 继承读取权限，并可创建发现/解析/搜索/审批申请、执行预检、确认身份和拒绝审批；`admin` 继承前两级权限，并可批准/撤销审批、创建执行意图、提交执行请求和请求人工对账。服务端始终以登录会话中的用户名写审计操作者，忽略客户端伪造的操作者字段。
 
 认证接口：
 
@@ -79,7 +77,7 @@ docker compose ps
 
 三个认证材料应通过下文 Docker Secret 提供：`auth_local_username`、`auth_local_password`、`auth_session_signing_key`。签名密钥至少 32 个字符且应为独立高熵随机值。任一材料缺失、文件不可读或签名密钥过短时，系统 fail closed，不允许匿名降级。
 
-## 第二阶段 API
+## 工作流 API
 
 - `POST /api/media/{id}/resolve`
 - `GET /api/media/{id}/metadata-candidates`
@@ -91,7 +89,7 @@ docker compose ps
 
 原有健康检查、系统状态、发现任务、影视列表和适配器 API 保持兼容。所有分页有边界，错误包含中文 `message` 与机器可读 `error_code`。
 
-## 第三阶段 API
+## 审批与只读 qB API
 
 - `POST /api/candidates/{id}/approval-requests`
 - `GET /api/approval-requests`
@@ -104,9 +102,24 @@ docker compose ps
 - `GET /api/downloaders/qbittorrent/status`
 - `GET /api/downloaders/qbittorrent/torrents`
 
-qBittorrent API 命名空间只有以上两个 `GET`。项目不提供 `execute`、`add`、`start`、`resume`、`pause`、`delete`、`recheck` 或 `download` 路由；适配器支持的任务文件读取只用于后端只读能力，不对前端暴露写入口。`CONSUMED` 是为未来执行阶段预留的内部单次消费保护状态，本阶段没有消费或执行 API。
+qBittorrent 公开命名空间始终只有以上两个 `GET`。系统没有直接映射 qB 的 add/start/resume/pause/delete/recheck/download 业务路由；真实 add 只能由独立执行器在数据库闸门、三开关、租约 fencing 和写前复验全部通过后内部调用。
 
-## 安全配置真实只读连接
+## 执行控制面与下载任务 API
+
+- `POST /api/approval-requests/{id}/execution-intents`
+- `POST /api/approval-requests/{id}/execute`，必须携带 `Idempotency-Key`
+- `GET /api/approval-requests/{id}/download-execution`
+- `GET /api/download-executions`
+- `GET /api/download-executions/{id}`
+- `POST /api/download-executions/{id}/reconcile`
+- `GET /api/download-jobs`
+- `GET /api/download-jobs/{id}`
+- `GET /api/download-jobs/{id}/timeline`
+- `GET /api/download-jobs/{id}/summary`
+
+执行与下载任务列表使用有界分页和稳定排序。API 不返回 intent nonce 的持久副本、幂等摘要、lease token、Worker ID、真实 qB URL、真实保存路径或 Secret；内部错误只暴露稳定 `error_code` 和固定提示。`reconcile` 只登记人工对账请求，不进行 qB 外部调用，也不会把不确定结果改成成功。
+
+## 外部能力与执行开关
 
 默认保持：
 
@@ -114,7 +127,16 @@ qBittorrent API 命名空间只有以上两个 `GET`。项目不提供 `execute`
 ENABLE_TMDB_LIVE=false
 ENABLE_AVISTAZ_LIVE_SEARCH=false
 ENABLE_QB_READ_ONLY=false
+ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false
+ENABLE_DOWNLOAD_EXECUTOR=false
+ENABLE_AVISTAZ_TORRENT_FETCH=false
+ENABLE_QB_WRITE=false
+ENABLE_DOWNLOAD_MONITOR=false
 ```
+
+`ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE` 只允许管理员创建 intent 和 `PENDING` 执行记录。独立执行器要求 `ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 三个开关同时为 `true`；少一个即拒绝启动。实际运行还需要显式启用 AvistaZ 搜索、提供 AvistaZ/qB 运行时 Secret 和 qB 目标策略。任何真实验证前都必须先向用户列出将访问的 URL、将读取或写入的对象和可能影响，并取得明确授权。
+
+`ENABLE_DOWNLOAD_MONITOR=true` 还必须配合 `ENABLE_QB_READ_ONLY=true`。监控器只调用 qB 登录和只读 GET，不调用暂停、恢复、删除或重校验。
 
 推荐使用项目内的本地 Secret 文件和 Compose override。共需 10 个文件：本地认证 3 个、TMDB 1 个、AvistaZ 3 个、qBittorrent 3 个。以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。
 
@@ -169,20 +191,34 @@ secrets/qb_password.txt
 
 认证与 qB 的非密钥策略仍在本机 `.env` 中配置。认证策略包括 `AUTH_LOCAL_ROLE`、会话/CSRF TTL 和 `AUTH_COOKIE_SECURE`；不要在使用 Secret override 时把三个认证值同时写入 `.env`。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
 
-只在用户明确批准真实冒烟测试后，才把本机 `.env` 中对应开关设为 `true`，并使用两个 Compose 文件启动：
+普通开发启动不启用下载执行或监控 profile：
 
 ```powershell
 docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example up -d --build
 ```
 
-TMDB 测试会连接 `api.themoviedb.org`，执行指定一个 TMDB ID 对应的详情、外部 ID 和必要季信息 GET。AvistaZ 测试会连接 `avistaz.to`，执行一次 `POST /api/v1/jackett/auth` 和只读 `GET /api/v1/jackett/torrents`。测试前必须再次确认目标 TMDB ID；不会访问任何 `download` URL，也不会获取 `.torrent`。
+仅在真实执行得到单独授权、三开关已显式启用且目标审批已再次确认后，才允许加入 `download-execution` profile：
 
-如另行批准 qB 只读冒烟测试，系统只会连接 `qb_base_url.txt` 指定且被 `QB_ALLOWED_HOSTS` 精确允许的主机，执行 `POST /api/v2/auth/login`，以及必要的 `GET /api/v2/app/version`、`GET /api/v2/app/webapiVersion`、`GET /api/v2/torrents/info`、`GET /api/v2/torrents/files`、`GET /api/v2/torrents/categories`。不会调用任何 qB 写接口。当前未执行 TMDB、AvistaZ 或 qBittorrent 真实冒烟测试。
+```powershell
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-execution up -d --build
+```
+
+这会允许执行器重新搜索已批准的 AvistaZ torrent ID、访问对应 download URL、读取并校验 `.torrent`，并在通过所有闸门后最多向 `qb_base_url.txt` 指定的 qBittorrent 提交一次 add。默认启动模式是 `ADD_PAUSED`；只有管理员在一次性 intent 中显式选择 `START_IMMEDIATELY` 才会立即启动。
+
+只读监控另用 `download-monitor` profile，并要求 `ENABLE_DOWNLOAD_MONITOR=true` 与 `ENABLE_QB_READ_ONLY=true`：
+
+```powershell
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-monitor up -d --build
+```
+
+TMDB 只读测试会连接 `api.themoviedb.org`；AvistaZ 搜索测试会连接 `avistaz.to` 的认证与搜索端点；qB 只读测试会连接 `qb_base_url.txt` 指定且被 `QB_ALLOWED_HOSTS` 精确允许的实例。当前均未执行真实冒烟测试。执行器测试与只读测试不是同一授权范围：批准搜索或 qB 只读测试，不等于批准访问 AvistaZ download URL 或向 qB add。
 
 ## 明确未实现
 
-- `.torrent` 下载、AvistaZ download URL 访问或候选自动选择。
-- qBittorrent 添加、开始、暂停、恢复、删除、重校验、分类/标签/保存路径/文件优先级修改或任何其他写操作。
-- 自动批准影视身份。
-- 审批自动触发下载、下载执行、完成入库、做种控制或任何媒体文件操作。
-- NexusPHP 页面抓取、浏览器 DOM 抓取或验证码绕过。
+- 自动身份确认、自动候选选择、自动审批和分阶段 `DISABLED`/`MANUAL`/`AUTO_IF_ELIGIBLE` 策略；当前关键节点均为人工触发。
+- qBittorrent 暂停、恢复、删除、重校验、文件优先级修改、做种控制或 H&R 自动判定。执行器唯一允许的 qB 写操作是受控 add。
+- 自动解决 `OUTCOME_UNKNOWN`/`RECONCILIATION_REQUIRED`；当前只能人工登记对账请求，不能自动再次 add。
+- 下载完成后的媒体整理、重命名、移动、复制、硬链接、删除、扫描入库或 NextFind/媒体库写回。
+- 任何已验证可用的真实 NexusPHP 站点 Profile、浏览器 DOM 抓取或验证码/反爬绕过；
+  当前仅有默认关闭的声明式适配骨架与本地 HTML fixture 契约，详见
+  [`docs/pt-site-profiles.md`](docs/pt-site-profiles.md)。

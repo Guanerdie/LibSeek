@@ -1,13 +1,13 @@
 # 架构与状态流
 
-第三阶段保留 NextFind、TMDB 和 AvistaZ 的只读发现与候选链路，并在人工审阅之后增加不可变候选审批、qBittorrent 只读预检和非执行下载计划。浏览器先通过 API 的本地单账号认证与 RBAC；TMDB/AvistaZ 的外部任务仍由独立 Worker 执行。本地认证与 qBittorrent Secret 只挂载给 API，Worker 和前端都拿不到这些凭据。
+版本 `0.5.0` 将系统拆成六个职责边界：FastAPI 控制面、普通发现 Worker、可选下载执行器、可选只读监控器、PostgreSQL 和 Vue 管理端。阶段 4 的 intent/execute/reconcile 只是默认关闭的数据库控制面；阶段 5 的真实 AvistaZ 取种与 qB add 位于独立执行器中，并由 Compose profile、三开关、审批绑定、租约 fencing 和写前闸门共同保护。媒体文件始终不在系统操作范围内。
 
 ```mermaid
 flowchart LR
   UI[Vue 管理端] -->|签名 Cookie + CSRF| Auth[本地认证与 RBAC]
   Auth -->|授权后的查询与操作| API[FastAPI]
   API -->|队列与查询| DB[(PostgreSQL 16)]
-  Worker[独立 Worker] -->|FOR UPDATE SKIP LOCKED| DB
+  Worker[普通 Worker] -->|FOR UPDATE SKIP LOCKED| DB
   Worker -->|HTTPS 只读发现| NF[NextFind]
   Worker -->|开关启用后只读 GET| TMDB[TMDB API]
   Worker -->|认证与只读搜索| AZ[AvistaZ Jackett API]
@@ -16,7 +16,12 @@ flowchart LR
   DB -->|候选与审计| UI
   API -->|SID 登录与只读 GET| QB[qBittorrent Web API]
   API -->|固定快照、预检与计划| DB
-  Plan[不可执行 DownloadPlan] -.不获取 torrent / 不提交任务.-> QB
+  API -->|intent 与幂等执行请求| DB
+  Executor[download-execution profile] -->|租约 claim / fencing| DB
+  Executor -->|精确重搜并取种| AZ
+  Executor -->|受控 add 后只读核验| QB
+  Monitor[download-monitor profile] -->|只读任务观察| QB
+  Monitor -->|进度与状态| DB
 ```
 
 ## 认证与授权流
@@ -58,6 +63,10 @@ IDENTITY_CONFIRMED
 
 搜索策略固定按 TMDB ID、IMDb ID、英文名加年份、原名加年份、中文名或别名降级。首个返回候选的策略停止。候选由纯函数评分，外部 ID、类型、季集覆盖、年份和用户偏好的权重高于活跃度、促销与大小；评分只用于排序和解释，不会触发批准或下载。
 
+搜索数据模型、job type 和 Worker 已按 `site_id` 隔离。`PtSiteRegistry` 保存工厂而非凭据；未知、未启用、payload/run 绑定不一致或候选站点不一致时失败关闭，不会回退到 AvistaZ。默认生产注册表仍只包含 `avistaz`，公开搜索创建路由当前也只放行 `avistaz`。
+
+NexusPHP 扩展只实现了无 Secret 的声明式 `NexusPhpSiteProfile`、HTML parser、严格同源会话和本地 fixture 测试契约。Profile 描述 HTTPS origin、同源路径、分类/查询映射和 CSS selector，默认 `enabled=false`；Cookie/passkey 只能在适配器进程内存中提供。该骨架不表示任何真实国内站点可用，也不会绕过登录页、验证码或浏览器挑战。完整边界见 `docs/pt-site-profiles.md`。
+
 ## 审批工作流
 
 ```mermaid
@@ -69,14 +78,16 @@ stateDiagram-v2
   PENDING --> EXPIRED: 有效期结束
   APPROVED --> REVOKED: 人工撤销
   APPROVED --> EXPIRED: 有效期结束
-  APPROVED --> CONSUMED: 未来阶段内部单次消费保护
-  APPROVED --> DownloadPlan: 同一事务生成计划
-  DownloadPlan --> [*]: 仅保存，不执行
+  APPROVED --> DownloadPlan: 批准时同一事务生成
+  APPROVED --> EXECUTING: 种子已校验并提交预留
+  EXECUTING --> CONSUMED: qB 结果已只读核验
+  DownloadPlan --> ExecutionIntent: 管理员二次确认
+  ExecutionIntent --> DownloadExecution: nonce + Idempotency-Key
 ```
 
 审批只绑定一个 `torrent_candidates` 记录在申请时的完整快照。快照包含影视与候选标识、发布名、大小、info hash、季集、规格、字幕、做种、促销、H&R、匹配分数、理由、警告和有效期；不重新读取后续变化的候选。规范 JSON 使用 SHA-256 生成 `snapshot_hash`，读取和每次状态动作前都重新校验，且 `media_item_id`、`torrent_candidate_id`、申请时间和有效期必须与固定列一致。ORM 事件与 PostgreSQL trigger 禁止修改或删除固定审批字段；数据库的部分唯一索引禁止同一候选同时存在第二个 `PENDING` 或 `APPROVED` 审批。
 
-`approval_events` 追加记录申请、预检、批准、下载计划创建、执行意图、执行请求、拒绝、撤销、过期和内部消费等事件，包括前后状态、操作者、原因、快照哈希与脱敏详情。事件外键为 `RESTRICT`，ORM 与 PostgreSQL trigger 禁止 UPDATE/DELETE。`CONSUMED` 仍只有内部服务保护函数，没有对应公开 API；阶段 4 的控制面创建队列记录时不会提前消费审批。
+`approval_events` 追加记录申请、预检、批准、下载计划创建、执行意图、执行请求、提交预留、拒绝、撤销、过期和消费等事件，包括前后状态、操作者、原因、快照哈希与脱敏详情。事件外键为 `RESTRICT`，ORM 与 PostgreSQL trigger 禁止 UPDATE/DELETE。阶段 4 控制面创建 `PENDING` 执行记录时不会提前消费审批；阶段 5 执行器只有在已校验 `.torrent` 后才将审批置为 `EXECUTING`，并在 qB 提交结果再次读取验证且唯一 `DownloadJob` 创建成功后置为 `CONSUMED`。
 
 批准前必须满足全部条件：
 
@@ -103,7 +114,40 @@ POST /api/download-executions/{id}/reconcile
 
 执行意图绑定审批快照哈希、不可变下载计划哈希、qB 目标指纹、启动模式和有效期。同一审批最多一个 `ACTIVE` 意图；nonce 只在创建响应出现一次，审批事件、执行事件、后续 GET 和数据库都不保存原文。执行请求以全局唯一的 `Idempotency-Key` SHA-256、审批唯一约束和 intent 唯一约束共同防重；相同键与相同请求返回原记录，不同请求复用同一键返回冲突。审批行使用 `SELECT ... FOR UPDATE` 串行化创建。
 
-`download_executions` 初始状态固定为 `PENDING`，审批继续保持 `APPROVED`。未来执行器必须重新锁定审批与执行记录并确认审批仍有效，且在任何 qB add 之前先把实际 info hash 和 `SUBMITTING` 状态提交到数据库。撤销或过期审批无法越过该闸门。`OUTCOME_UNKNOWN`、`RECONCILIATION_REQUIRED` 与 `RECONCILIATION_PENDING` 均禁止自动重试；本阶段 reconcile 只记录对账请求，不访问 qB。表中已预留 `locked_at`、`locked_by`、`lease_token`、`attempts` 与 `next_retry_at` 供后续 executor 实现租约和 fencing。
+`download_executions` 初始状态固定为 `PENDING`，审批继续保持 `APPROVED`。`ADD_PAUSED` 是前端和 schema 默认启动模式；`START_IMMEDIATELY` 必须由管理员在一次性 intent 中显式选择。`OUTCOME_UNKNOWN`、`RECONCILIATION_REQUIRED` 与 `RECONCILIATION_PENDING` 均禁止自动重试；reconcile 只记录人工对账请求，不访问 qB。
+
+## 下载执行器
+
+`download-execution` Compose profile 中的独立执行器只有在以下三个开关同时为真时才运行：
+
+```text
+ENABLE_DOWNLOAD_EXECUTOR=true
+ENABLE_AVISTAZ_TORRENT_FETCH=true
+ENABLE_QB_WRITE=true
+```
+
+它还要求 AvistaZ 实时搜索和运行时凭据、qB 运行时凭据与目标策略已配置。处理顺序固定如下：
+
+```text
+PENDING | 到期的 RETRY_WAIT
+  -> VALIDATING（数据库时间、FOR UPDATE SKIP LOCKED、租约 token 与心跳）
+  -> AvistaZ 精确重搜已批准 torrent ID
+  -> 获取并校验 bencode、v1/v2 hash、大小与文件数
+  -> 同一事务持久化实际摘要，Approval -> EXECUTING，Execution -> SUBMITTING
+  -> 按全部 hash alias 查询 qB；真正 POST 前再次执行数据库 write guard
+  -> add 或确认 ALREADY_PRESENT
+  -> 重新读取 qB 并核验 hash、分类、保存路径和大小
+  -> Approval -> CONSUMED，Execution -> SUBMITTED | ALREADY_PRESENT
+  -> 创建唯一 DownloadJob
+```
+
+执行器在每个外部请求前复验审批、状态、worker、lease token 和基于数据库时间的租约有效期。写入前的可重试校验错误才会进入指数退避的 `RETRY_WAIT`；`SUBMITTING` 后租约失效进入 `RECONCILIATION_REQUIRED`。qB POST 可能已经发生但无法验证时进入 `OUTCOME_UNKNOWN`。这三种对账状态的 `next_retry_at` 为空，执行器绝不自动再次 add。
+
+## 下载监控与总结
+
+`download-monitor` profile 要求 `ENABLE_DOWNLOAD_MONITOR=true` 和 `ENABLE_QB_READ_ONLY=true`。监控器只登录并读取 qB 任务列表，以 v1/v2 hash alias 关联 `DownloadJob`，更新 `QUEUED`、`DOWNLOADING`、`PAUSED`、`CHECKING`、`SEEDING`、`COMPLETED`、`MISSING` 或 `ERROR`，以及进度、速度、流量、Ratio、完成时间和最后观察时间。分类或大小漂移会进入 `ERROR`。
+
+监控器不调用任何 qB mutation，也不从 qB 状态、Ratio 或做种时长推断 H&R。新任务初始为 `UNKNOWN`，已有 `AT_RISK`/`SATISFIED` 值不会被监控器覆盖。总结 API 固定返回 `job/media/approval/execution/warnings`，时间线按时间合并 approval、execution、job 三类追加式事件并再次脱敏。
 
 ## qBittorrent 只读边界
 
@@ -147,11 +191,13 @@ API 对前端只暴露 `/api/downloaders/qbittorrent/status` 和 `/api/downloade
 - `torrent_candidates`：脱敏候选、评分、理由与警告。
 - `approval_requests`：固定候选快照、SHA-256、有效期、状态和最近一次预检。
 - `approval_events`：审批状态变化和预检的追加式脱敏审计记录。
-- `download_plans`：每个已批准审批至多一个非执行计划，只含内部种子引用与保存位置引用。
+- `download_plans`：每个已批准审批至多一个不可变计划，只含内部种子引用与保存位置引用；计划本身不执行外部动作。
 - `execution_intents`：一次性 nonce 摘要及审批、计划、qB 目标和启动模式绑定。
-- `download_executions`：幂等的纯数据库执行请求、租约预留字段、实际 info hash 和对账状态。
+- `download_executions`：幂等执行请求、租约/fencing、实际 v1/v2 info hash、验证时间和对账状态。
 - `download_execution_events`：不可变的执行状态与对账审计事件。
+- `download_jobs`：提交后经 qB 只读核验创建的唯一任务，保存公开路径引用、进度、流量、Ratio 与 H&R 状态。
+- `download_job_events`：任务创建与状态变化的追加式脱敏事件。
 - `jobs`：发现、身份解析、PT 搜索共用的可恢复数据库队列。
 - `audit_events`：关键状态变更与人工操作的脱敏审计记录。
 
-所有数据库时间写 UTC，前端按 `Asia/Shanghai` 展示。候选快照、审批事件和下载计划不含 Cookie、Token、PID、密码、真实下载 URL、announce URL、tracker 或 passkey。`torrent_ref` 与 `save_path_ref` 都是内部引用，计划中的 `media_destination_plan.mode` 固定为 `PLAN_ONLY_NO_FILE_OPERATION`。
+所有数据库时间写 UTC，前端按 `Asia/Shanghai` 展示。候选快照、审批事件、执行响应、下载计划与任务 API 不含 Cookie、Token、PID、密码、真实下载 URL、announce URL、tracker、passkey、lease token、真实 qB URL 或真实保存路径。`torrent_ref` 与 `save_path_ref` 都是内部引用，计划中的 `media_destination_plan.mode` 固定为 `PLAN_ONLY_NO_FILE_OPERATION`；即使下载执行完成，也没有媒体文件操作。

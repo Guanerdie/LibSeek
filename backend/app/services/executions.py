@@ -8,7 +8,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -20,21 +20,27 @@ from app.models.entities import (
     ApprovalRequest,
     DownloadExecution,
     DownloadExecutionEvent,
+    DownloadJob,
+    DownloadJobEvent,
     DownloadPlan,
     ExecutionIntent,
 )
 from app.models.enums import (
     ApprovalStatus,
     DownloadExecutionStatus,
+    DownloadJobStatus,
     DownloadLaunchMode,
     ExecutionIntentStatus,
+    HnrStatus,
 )
 from app.schemas.executions import (
     DownloadExecutionCreateRequest,
     DownloadExecutionReconcileRequest,
     ExecutionIntentCreateRequest,
 )
-from app.services.approvals import verify_download_plan, verify_snapshot
+from app.schemas.qbittorrent import QbTorrent
+from app.services.approvals import consume_approval, verify_download_plan, verify_snapshot
+from app.services.torrent_validation import ValidatedTorrent
 
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{15,199}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -470,16 +476,24 @@ async def list_download_executions(
     session: AsyncSession,
     *,
     status: DownloadExecutionStatus | None = None,
-    limit: int = 100,
-) -> list[DownloadExecution]:
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[DownloadExecution], int]:
     statement = select(DownloadExecution)
+    count_statement = select(func.count()).select_from(DownloadExecution)
     if status is not None:
         statement = statement.where(DownloadExecution.status == status)
-    statement = statement.order_by(DownloadExecution.created_at.desc()).limit(limit)
+        count_statement = count_statement.where(DownloadExecution.status == status)
+    statement = (
+        statement.order_by(DownloadExecution.created_at.desc(), DownloadExecution.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
     executions = list((await session.scalars(statement)).all())
     for execution in executions:
         await verify_download_execution(session, execution)
-    return executions
+    total = int((await session.scalar(count_statement)) or 0)
+    return executions, total
 
 
 async def request_reconciliation(
@@ -528,6 +542,8 @@ async def mark_reconciliation_required(
     execution_id: str,
     *,
     actor: str,
+    lease_token: str | None = None,
+    lease_seconds: int = 300,
     error_code: str = "EXECUTION_RECONCILIATION_REQUIRED",
     error_message: str = "下载执行状态需要按 info hash 对账，禁止自动重试",
 ) -> DownloadExecution:
@@ -544,11 +560,21 @@ async def mark_reconciliation_required(
             "当前下载执行状态不能标记为需要对账",
             status_code=409,
         )
+    if execution.status == DownloadExecutionStatus.SUBMITTING:
+        _require_execution_lease(
+            execution,
+            lease_token or "",
+            lease_seconds=lease_seconds,
+            now=await _database_now(session),
+        )
     previous = execution.status
     execution.status = DownloadExecutionStatus.RECONCILIATION_REQUIRED
     execution.error_code = error_code
     execution.error_message = error_message
     execution.next_retry_at = None
+    execution.locked_at = None
+    execution.locked_by = None
+    execution.lease_token = None
     _add_execution_event(
         session,
         execution,
@@ -567,6 +593,8 @@ async def mark_outcome_unknown(
     execution_id: str,
     *,
     actor: str,
+    lease_token: str,
+    lease_seconds: int = 300,
     error_code: str = "QB_ADD_OUTCOME_UNKNOWN",
     error_message: str = "qBittorrent 添加结果不确定，禁止自动重试",
 ) -> DownloadExecution:
@@ -580,6 +608,12 @@ async def mark_outcome_unknown(
             "当前下载执行状态不能标记为结果不确定",
             status_code=409,
         )
+    _require_execution_lease(
+        execution,
+        lease_token,
+        lease_seconds=lease_seconds,
+        now=await _database_now(session),
+    )
     if execution.actual_info_hash is None:
         raise AppError(
             "DOWNLOAD_EXECUTION_INFO_HASH_REQUIRED",
@@ -591,6 +625,9 @@ async def mark_outcome_unknown(
     execution.error_code = error_code
     execution.error_message = error_message
     execution.next_retry_at = None
+    execution.locked_at = None
+    execution.locked_by = None
+    execution.lease_token = None
     _add_execution_event(
         session,
         execution,
@@ -607,21 +644,39 @@ async def mark_outcome_unknown(
 async def persist_info_hash_before_submission(
     session: AsyncSession,
     execution_id: str,
-    info_hash: str,
+    metadata: ValidatedTorrent,
     *,
     actor: str,
+    lease_token: str,
+    lease_seconds: int = 300,
 ) -> DownloadExecution:
-    """Reserve submission after rechecking approval, without consuming it or calling qB."""
-    normalized = info_hash.casefold()
-    if not _INFO_HASH.fullmatch(normalized):
+    """Reserve submission after rechecking approval, without calling qB.
+
+    An invalidated approval is persisted as a terminal ``CANCELLED`` execution and returned
+    to the caller. This keeps the audited terminal state in the caller-owned transaction.
+    """
+    selected_hash = metadata.info_hash_v1 or metadata.info_hash_v2
+    if selected_hash is None:
         raise AppError(
             "DOWNLOAD_EXECUTION_INFO_HASH_INVALID",
-            "实际 info hash 格式无效",
+            "种子没有可持久化的实际 info hash",
             status_code=409,
         )
     execution = await get_download_execution(session, execution_id, for_update=True)
+    _require_execution_lease(
+        execution,
+        lease_token,
+        lease_seconds=lease_seconds,
+        now=await _database_now(session),
+    )
     if execution.status == DownloadExecutionStatus.SUBMITTING:
-        if execution.actual_info_hash == normalized:
+        if (
+            execution.actual_info_hash == selected_hash
+            and execution.actual_info_hash_v1 == metadata.info_hash_v1
+            and execution.actual_info_hash_v2 == metadata.info_hash_v2
+            and execution.actual_size_bytes == metadata.total_size_bytes
+            and execution.actual_file_count == metadata.file_count
+        ):
             return execution
         raise AppError(
             "DOWNLOAD_EXECUTION_INFO_HASH_MISMATCH",
@@ -648,11 +703,7 @@ async def persist_info_hash_before_submission(
             actor=actor,
             error_code="APPROVAL_REQUEST_NOT_FOUND",
         )
-        raise AppError(
-            "DOWNLOAD_EXECUTION_APPROVAL_INVALIDATED",
-            "下载执行绑定的审批不存在，执行已取消",
-            status_code=409,
-        )
+        return execution
     verify_snapshot(approval)
     if approval.status == ApprovalStatus.APPROVED and _as_utc(
         approval.expires_at
@@ -675,17 +726,41 @@ async def persist_info_hash_before_submission(
             actor=actor,
             error_code=f"APPROVAL_{approval.status.value}",
         )
-        raise AppError(
-            "DOWNLOAD_EXECUTION_APPROVAL_INVALIDATED",
-            "审批已撤销、过期或不再可执行，下载执行已取消",
-            status_code=409,
-            details={"approval_status": approval.status.value},
-        )
-    await _get_verified_plan(session, approval)
+        return execution
+    plan = await _get_verified_plan(session, approval)
+    expected_hash = plan.expected_info_hash.casefold() if plan.expected_info_hash else None
+    if expected_hash is not None:
+        if not metadata.matches_hash(expected_hash):
+            raise AppError(
+                "TORRENT_INFO_HASH_MISMATCH",
+                "种子文件与已批准候选的 info hash 不一致",
+                status_code=409,
+            )
+        selected_hash = expected_hash
     previous = execution.status
-    execution.actual_info_hash = normalized
+    previous_approval = approval.status
+    approval.status = ApprovalStatus.EXECUTING
+    execution.actual_info_hash = selected_hash
+    execution.actual_info_hash_v1 = metadata.info_hash_v1
+    execution.actual_info_hash_v2 = metadata.info_hash_v2
+    execution.actual_size_bytes = metadata.total_size_bytes
+    execution.actual_file_count = metadata.file_count
+    execution.validated_at = now
+    execution.submitted_at = now
     execution.status = DownloadExecutionStatus.SUBMITTING
     execution.next_retry_at = None
+    _add_approval_event(
+        session,
+        approval,
+        event_type="EXECUTION_RESERVED",
+        actor=actor,
+        details={
+            "download_execution_id": execution.id,
+            "actual_info_hash_v1": metadata.info_hash_v1,
+            "actual_info_hash_v2": metadata.info_hash_v2,
+        },
+        from_status=previous_approval,
+    )
     _add_execution_event(
         session,
         execution,
@@ -693,10 +768,290 @@ async def persist_info_hash_before_submission(
         actor=actor,
         from_status=previous,
         to_status=DownloadExecutionStatus.SUBMITTING,
-        details={"actual_info_hash": normalized, "external_request_performed": False},
+        details={
+            "actual_info_hash_v1": metadata.info_hash_v1,
+            "actual_info_hash_v2": metadata.info_hash_v2,
+            "actual_size_bytes": metadata.total_size_bytes,
+            "actual_file_count": metadata.file_count,
+            "external_request_performed": False,
+        },
     )
     await session.flush()
     return execution
+
+
+async def finalize_download_submission(
+    session: AsyncSession,
+    execution_id: str,
+    observed: QbTorrent,
+    outcome: DownloadExecutionStatus,
+    settings: Settings,
+    *,
+    actor: str,
+    lease_token: str,
+) -> DownloadJob:
+    """Finalize a previously submitted torrent using an already-fetched qB observation."""
+    if outcome not in {
+        DownloadExecutionStatus.SUBMITTED,
+        DownloadExecutionStatus.ALREADY_PRESENT,
+    }:
+        raise AppError(
+            "DOWNLOAD_EXECUTION_OUTCOME_INVALID",
+            "下载提交终态必须为 SUBMITTED 或 ALREADY_PRESENT",
+            status_code=409,
+        )
+    execution = await get_download_execution(session, execution_id, for_update=True)
+    existing_job = await session.scalar(
+        select(DownloadJob)
+        .where(DownloadJob.execution_id == execution.id)
+        .with_for_update()
+        .limit(1)
+    )
+    if execution.status in {
+        DownloadExecutionStatus.SUBMITTED,
+        DownloadExecutionStatus.ALREADY_PRESENT,
+    }:
+        if existing_job is None or execution.status != outcome:
+            raise AppError(
+                "DOWNLOAD_EXECUTION_FINALIZATION_INVALID",
+                "下载执行终态与监控任务不一致",
+                status_code=409,
+            )
+        return existing_job
+    if existing_job is not None:
+        raise AppError(
+            "DOWNLOAD_EXECUTION_FINALIZATION_INVALID",
+            "非终态下载执行已经绑定监控任务",
+            status_code=409,
+        )
+    if execution.status != DownloadExecutionStatus.SUBMITTING:
+        raise AppError(
+            "DOWNLOAD_EXECUTION_TRANSITION_INVALID",
+            "只有 SUBMITTING 下载执行可以确认提交结果",
+            status_code=409,
+        )
+    _require_execution_lease(
+        execution,
+        lease_token,
+        lease_seconds=settings.download_execution_lease_seconds,
+        now=await _database_now(session),
+    )
+
+    approval = await session.scalar(
+        select(ApprovalRequest)
+        .where(ApprovalRequest.id == execution.approval_id)
+        .with_for_update()
+        .limit(1)
+    )
+    if approval is None or approval.status != ApprovalStatus.EXECUTING:
+        raise AppError(
+            "DOWNLOAD_EXECUTION_APPROVAL_INVALIDATED",
+            "下载执行的审批不再处于 EXECUTING 状态",
+            status_code=409,
+        )
+    verify_snapshot(approval)
+    plan = await _get_verified_plan(session, approval)
+    if qb_target_fingerprint(settings, plan, execution.launch_mode) != (
+        execution.qb_target_fingerprint
+    ):
+        raise AppError(
+            "EXECUTION_TARGET_CONFIG_CHANGED",
+            "qBittorrent 执行目标与预留时不一致",
+            status_code=409,
+        )
+    configured_save_path = settings.qb_target_save_path
+    if (
+        configured_save_path is None
+        or not _same_qb_save_path(observed.save_path, configured_save_path)
+        or observed.category != plan.category
+    ):
+        raise AppError(
+            "QB_SUBMISSION_TARGET_MISMATCH",
+            "qBittorrent 中的下载目标与已批准计划不一致",
+            status_code=409,
+        )
+    persisted_hashes = _execution_identity_hashes(execution)
+    if not persisted_hashes or persisted_hashes.isdisjoint(observed.identity_hashes):
+        raise AppError(
+            "QB_SUBMISSION_INFO_HASH_MISMATCH",
+            "qBittorrent 中的种子与已校验种子不一致",
+            status_code=409,
+        )
+    if execution.actual_size_bytes is None or observed.size != execution.actual_size_bytes:
+        raise AppError(
+            "QB_SUBMISSION_SIZE_MISMATCH",
+            "qBittorrent 中的种子大小与已校验种子不一致",
+            status_code=409,
+        )
+    if execution.actual_file_count is None:
+        raise AppError(
+            "DOWNLOAD_EXECUTION_BINDING_INVALID",
+            "下载执行缺少已校验文件数量",
+            status_code=409,
+        )
+
+    now = utc_now()
+    job_status = _download_job_status(observed)
+    job = DownloadJob(
+        execution_id=execution.id,
+        approval_id=approval.id,
+        media_item_id=approval.media_item_id,
+        status=job_status,
+        release_title=plan.release_title,
+        info_hash_v1=execution.actual_info_hash_v1,
+        info_hash_v2=execution.actual_info_hash_v2,
+        save_path_ref=plan.save_path_ref,
+        category=plan.category,
+        size_bytes=execution.actual_size_bytes,
+        file_count=execution.actual_file_count,
+        progress=observed.progress,
+        download_speed_bps=observed.dlspeed,
+        upload_speed_bps=observed.upspeed,
+        downloaded_bytes=observed.downloaded,
+        uploaded_bytes=observed.uploaded,
+        ratio=observed.ratio,
+        hnr_status=HnrStatus.UNKNOWN,
+        started_at=_qb_timestamp(observed.added_on) or execution.submitted_at or now,
+        completed_at=_completion_time(observed, now),
+        last_seen_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(job)
+    await session.flush()
+
+    await consume_approval(session, approval, actor=actor)
+    previous = execution.status
+    execution.status = outcome
+    execution.verified_at = now
+    execution.next_retry_at = None
+    execution.locked_at = None
+    execution.locked_by = None
+    execution.lease_token = None
+    execution.error_code = None
+    execution.error_message = None
+    _add_execution_event(
+        session,
+        execution,
+        event_type="SUBMISSION_VERIFIED",
+        actor=actor,
+        from_status=previous,
+        to_status=outcome,
+        details={
+            "download_job_id": job.id,
+            "outcome": outcome.value,
+            "observed_state": observed.state,
+            "actual_info_hash_v1": execution.actual_info_hash_v1,
+            "actual_info_hash_v2": execution.actual_info_hash_v2,
+            "external_request_performed": False,
+        },
+    )
+    _add_approval_event(
+        session,
+        approval,
+        event_type="DOWNLOAD_JOB_CREATED",
+        actor=actor,
+        details={
+            "download_execution_id": execution.id,
+            "download_job_id": job.id,
+            "outcome": outcome.value,
+        },
+    )
+    _add_job_event(
+        session,
+        job,
+        event_type="CREATED",
+        actor=actor,
+        from_status=None,
+        to_status=job_status,
+        details={
+            "execution_id": execution.id,
+            "observed_state": observed.state,
+            "progress": observed.progress,
+        },
+    )
+    await session.flush()
+    return job
+
+
+async def update_download_job_observation(
+    session: AsyncSession,
+    job_id: str,
+    observed: QbTorrent | None,
+    *,
+    expected_save_path: str,
+    actor: str,
+    observed_at: datetime | None = None,
+) -> DownloadJob:
+    """Apply an already-fetched qB snapshot to a monitored job without external I/O."""
+    if not expected_save_path.strip() or any(
+        marker in expected_save_path for marker in ("\x00", "\r", "\n")
+    ):
+        raise AppError(
+            "DOWNLOAD_MONITOR_TARGET_INVALID",
+            "The approved qBittorrent monitoring target is invalid",
+            status_code=409,
+        )
+    job = await session.get(DownloadJob, job_id, with_for_update=True)
+    if job is None:
+        raise AppError("DOWNLOAD_JOB_NOT_FOUND", "下载任务不存在", status_code=404)
+    now = observed_at or utc_now()
+    previous = job.status
+    if observed is None:
+        job.status = DownloadJobStatus.MISSING
+        job.error_code = "QB_TORRENT_MISSING"
+        job.error_message = "qBittorrent 中未找到对应种子"
+    else:
+        if _job_identity_hashes(job).isdisjoint(observed.identity_hashes):
+            raise AppError(
+                "DOWNLOAD_JOB_INFO_HASH_MISMATCH",
+                "qBittorrent 观察结果与下载任务不一致",
+                status_code=409,
+            )
+        job.progress = observed.progress
+        job.download_speed_bps = observed.dlspeed
+        job.upload_speed_bps = observed.upspeed
+        job.downloaded_bytes = observed.downloaded
+        job.uploaded_bytes = observed.uploaded
+        job.ratio = observed.ratio
+        job.last_seen_at = now
+        if (
+            not _same_qb_save_path(observed.save_path, expected_save_path)
+            or observed.category != job.category
+            or observed.size != job.size_bytes
+        ):
+            job.status = DownloadJobStatus.ERROR
+            job.error_code = "QB_TORRENT_BINDING_DRIFT"
+            job.error_message = (
+                "qBittorrent 种子的保存路径、分类或大小与已批准下载任务不一致"
+            )
+        else:
+            job.status = _download_job_status(observed)
+            if job.status == DownloadJobStatus.ERROR:
+                job.error_code = "QB_TORRENT_STATE_ERROR"
+                job.error_message = "qBittorrent 种子处于异常状态"
+            else:
+                job.error_code = None
+                job.error_message = None
+        completion = _completion_time(observed, now)
+        if job.completed_at is None and completion is not None:
+            job.completed_at = completion
+    if job.status != previous:
+        _add_job_event(
+            session,
+            job,
+            event_type="STATUS_CHANGED",
+            actor=actor,
+            from_status=previous,
+            to_status=job.status,
+            details={
+                "observed_state": observed.state if observed is not None else None,
+                "progress": observed.progress if observed is not None else job.progress,
+                "error_code": job.error_code,
+            },
+        )
+    await session.flush()
+    return job
 
 
 async def verify_download_execution(
@@ -723,6 +1078,20 @@ async def verify_download_execution(
             "下载执行记录包含无效 info hash",
             status_code=409,
         )
+    if execution.actual_info_hash is not None:
+        bound_hashes = {
+            value.casefold()
+            for value in (execution.actual_info_hash_v1, execution.actual_info_hash_v2)
+            if value is not None
+        }
+        if execution.actual_info_hash_v2 is not None:
+            bound_hashes.add(execution.actual_info_hash_v2[:40].casefold())
+        if execution.actual_info_hash.casefold() not in bound_hashes:
+            raise AppError(
+                "DOWNLOAD_EXECUTION_BINDING_INVALID",
+                "下载执行记录的实际 info hash 与 v1/v2 摘要不一致",
+                status_code=409,
+            )
     if execution.status in {
         DownloadExecutionStatus.SUBMITTING,
         DownloadExecutionStatus.SUBMITTED,
@@ -734,6 +1103,27 @@ async def verify_download_execution(
         raise AppError(
             "DOWNLOAD_EXECUTION_BINDING_INVALID",
             "下载执行在提交或对账状态前未持久化实际 info hash",
+            status_code=409,
+        )
+    if execution.status in {
+        DownloadExecutionStatus.SUBMITTING,
+        DownloadExecutionStatus.SUBMITTED,
+        DownloadExecutionStatus.ALREADY_PRESENT,
+        DownloadExecutionStatus.OUTCOME_UNKNOWN,
+        DownloadExecutionStatus.RECONCILIATION_REQUIRED,
+        DownloadExecutionStatus.RECONCILIATION_PENDING,
+    } and (
+        execution.actual_size_bytes is None
+        or execution.actual_size_bytes <= 0
+        or execution.actual_file_count is None
+        or execution.actual_file_count <= 0
+        or execution.validated_at is None
+        or execution.submitted_at is None
+        or not {execution.actual_info_hash_v1, execution.actual_info_hash_v2} - {None}
+    ):
+        raise AppError(
+            "DOWNLOAD_EXECUTION_BINDING_INVALID",
+            "下载执行在提交前未持久化完整种子校验摘要",
             status_code=409,
         )
     approval = await session.get(ApprovalRequest, execution.approval_id)
@@ -964,6 +1354,97 @@ def _add_execution_event(
     )
 
 
+def _add_job_event(
+    session: AsyncSession,
+    job: DownloadJob,
+    *,
+    event_type: str,
+    actor: str,
+    from_status: DownloadJobStatus | None,
+    to_status: DownloadJobStatus,
+    details: dict[str, object],
+) -> None:
+    session.add(
+        DownloadJobEvent(
+            download_job_id=job.id,
+            event_type=event_type,
+            from_status=from_status.value if from_status else None,
+            to_status=to_status.value,
+            actor=actor.strip(),
+            sanitized_details=sanitize_details(details),
+        )
+    )
+
+
+def _execution_identity_hashes(execution: DownloadExecution) -> frozenset[str]:
+    hashes = {
+        value.casefold()
+        for value in (
+            execution.actual_info_hash,
+            execution.actual_info_hash_v1,
+            execution.actual_info_hash_v2,
+        )
+        if value
+    }
+    if execution.actual_info_hash_v2 is not None:
+        hashes.add(execution.actual_info_hash_v2[:40].casefold())
+    return frozenset(hashes)
+
+
+def _job_identity_hashes(job: DownloadJob) -> frozenset[str]:
+    hashes = {value.casefold() for value in (job.info_hash_v1, job.info_hash_v2) if value}
+    if job.info_hash_v2 is not None:
+        hashes.add(job.info_hash_v2[:40].casefold())
+    return frozenset(hashes)
+
+
+def _same_qb_save_path(actual: str, expected: str) -> bool:
+    def normalized(value: str) -> str:
+        stripped = value.strip()
+        while len(stripped) > 1 and stripped.endswith(("/", "\\")):
+            stripped = stripped[:-1]
+        return stripped
+
+    return normalized(actual) == normalized(expected)
+
+
+def _download_job_status(observed: QbTorrent) -> DownloadJobStatus:
+    state = observed.state.casefold()
+    if state in {"error", "missingfiles", "unknown"}:
+        return DownloadJobStatus.ERROR
+    if state in {"checkingdl", "checkingup", "checkingresumedata", "moving"}:
+        return DownloadJobStatus.CHECKING
+    if state in {"pauseddl", "pausedup", "stoppeddl", "stoppedup"}:
+        return DownloadJobStatus.PAUSED
+    if state in {"queueddl", "queuedup", "allocating"}:
+        return DownloadJobStatus.QUEUED
+    if state in {"downloading", "forceddl", "stalleddl", "metadl"}:
+        return DownloadJobStatus.DOWNLOADING
+    if state in {"uploading", "forcedup", "stalledup"}:
+        return DownloadJobStatus.SEEDING
+    if state == "completed" or observed.progress >= 1:
+        return DownloadJobStatus.COMPLETED
+    return DownloadJobStatus.ERROR
+
+
+def _qb_timestamp(value: int) -> datetime | None:
+    if value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _completion_time(observed: QbTorrent, now: datetime) -> datetime | None:
+    completed_at = _qb_timestamp(observed.completion_on)
+    if completed_at is not None:
+        return completed_at
+    if observed.progress >= 1:
+        return now
+    return None
+
+
 def _require_control_plane_enabled(settings: Settings) -> None:
     if not settings.enable_download_execution_control_plane:
         raise AppError(
@@ -971,6 +1452,35 @@ def _require_control_plane_enabled(settings: Settings) -> None:
             "下载执行控制面默认关闭",
             status_code=409,
         )
+
+
+def _require_execution_lease(
+    execution: DownloadExecution,
+    lease_token: str,
+    *,
+    lease_seconds: int,
+    now: datetime,
+) -> None:
+    if (
+        lease_seconds <= 0
+        or not lease_token
+        or execution.lease_token is None
+        or not hmac.compare_digest(execution.lease_token, lease_token)
+        or execution.locked_by is None
+        or execution.locked_at is None
+        or _as_utc(execution.locked_at) + timedelta(seconds=lease_seconds)
+        <= _as_utc(now)
+    ):
+        raise AppError(
+            "DOWNLOAD_EXECUTION_LEASE_LOST",
+            "下载执行租约已失效，禁止提交状态变更",
+            status_code=409,
+        )
+
+
+async def _database_now(session: AsyncSession) -> datetime:
+    value = await session.scalar(select(func.now()))
+    return value if isinstance(value, datetime) else utc_now()
 
 
 def _as_utc(value: datetime) -> datetime:

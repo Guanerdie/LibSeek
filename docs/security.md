@@ -4,11 +4,14 @@
 
 - `ENABLE_TMDB_LIVE=false`、`ENABLE_AVISTAZ_LIVE_SEARCH=false` 与 `ENABLE_QB_READ_ONLY=false` 默认禁止三个真实只读边界。
 - AvistaZ 上游响应中的 `download`、announce、tracker、passkey 等字段在标准化时直接丢弃；`details_ref` 仅为 SHA256 派生的不可逆内部引用。
-- `fetch_torrent()` 固定返回 `PHASE_NOT_ENABLED`，不会访问任何 download URL。
-- qBittorrent 公开 API 只允许 SID 登录及版本、任务、任务文件和分类读取。内部写适配器默认关闭，阶段 4 没有执行 Worker，也没有任何 qB 写业务路由。
-- 批准审批只生成非执行 `DownloadPlan`；执行 intent/execute/reconcile 端点也只写 PostgreSQL，不会获取 `.torrent`、访问 AvistaZ download URL 或调用 qBittorrent。
+- 阶段 4 控制面由 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 默认关闭；intent/execute/reconcile 只写 PostgreSQL，不直接获取 `.torrent` 或调用 qBittorrent。
+- 阶段 5 执行器位于独立 `download-execution` profile。`ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 默认全部为 `false` 且必须同时为真；缺一即拒绝启动。启用意味着会访问已批准候选的 AvistaZ download URL，并可能向指定 qBittorrent 执行一次受控 add，因此必须逐次获得用户明确授权。
+- qBittorrent 公开 API 仍只允许 SID 登录及版本、任务、任务文件和分类读取；不存在直接 add/start/resume/pause/delete/recheck/download 业务路由。内部写适配器只允许执行器使用 add，且在真正 POST 前执行数据库 write guard。
+- 独立监控器由 `ENABLE_DOWNLOAD_MONITOR=false` 默认关闭，并额外要求 `ENABLE_QB_READ_ONLY=true`；它只读 qB，不调用任何 mutation，也不推断或覆盖 H&R 结论。
 - 没有文件移动、复制、硬链接、删除或媒体库写入代码。
-- 没有自动身份批准、自动候选批准、自动种子选择、NexusPHP 页面抓取或验证码绕过。
+- 没有自动身份批准、自动候选批准或自动种子选择。默认注册表没有任何 NexusPHP 真实站点；
+  声明式 NexusPHP 骨架默认关闭，只按经过审查的本地 HTML fixture 解析，且明确拒绝验证码和
+  浏览器挑战，不提供任何绕过能力。
 
 ## 本地认证、RBAC 与 CSRF
 
@@ -57,7 +60,7 @@ GET /api/downloaders/qbittorrent/torrents
 - 批准必须同时确认 H&R、继续做种和仅生成计划三项声明；拒绝与撤销原因可选，但操作者、时间、前后状态、原因、快照哈希与脱敏详情都会进入 `approval_events`。
 - 每个审批最多生成一个 `DownloadPlan`。计划只保存严格格式的内部 `torrent_ref`、`save_path_ref`、预期 info hash、分类/标签、预计大小、封闭类型的目的地规划、预检快照和警告；并绑定审批快照哈希、预检策略指纹与自身规范哈希。读取和内部消费前重新校验，ORM 与 PostgreSQL trigger 禁止计划 UPDATE/DELETE。
 - 计划禁止包含真实下载 URL、PID、Cookie、Bearer Token、announce URL、passkey 或 qB 密码；`media_destination_plan` 明确标记 `PLAN_ONLY_NO_FILE_OPERATION`。
-- `CONSUMED` 是后续执行器使用的内部单次消费保护，函数会先对审批执行 `SELECT ... FOR UPDATE`；当前没有公开消费 API，execute 控制面只排队且批准本身不会进入 `CONSUMED`。
+- `CONSUMED` 是执行器成功终结时使用的内部单次消费保护。execute 控制面只排队，审批保持 `APPROVED`；实际 `.torrent` 校验和提交预留时才进入 `EXECUTING`，qB 结果只读验证且唯一 `DownloadJob` 创建成功后才进入 `CONSUMED`。没有公开消费 API。
 
 ## 执行意图、幂等与对账边界
 
@@ -65,9 +68,24 @@ GET /api/downloaders/qbittorrent/torrents
 - 执行意图 nonce 使用密码学安全随机数生成，只在 `POST .../execution-intents` 的首次成功响应返回原文。数据库、审计与后续查询只保存或返回 SHA-256；丢失原文后不能恢复。
 - intent 固定绑定审批快照哈希、下载计划哈希、qB 目标指纹、`ADD_PAUSED`/`START_IMMEDIATELY` 启动模式和短有效期。执行时重新计算全部绑定，配置漂移、过期、撤销、错误 nonce 或已消费 intent 都会失败。
 - `Idempotency-Key` 限 16 至 200 位安全字符，数据库只保存 SHA-256 并施加唯一约束；审批 ID 与 intent ID 也分别唯一。相同键只能重放完全相同的请求，不能改绑其他审批、intent 或 nonce。
-- execute 只创建 `PENDING` 记录，不消费审批、不取种、不连接 qB。未来提交闸门必须在同一事务锁住审批与执行记录，确认审批仍为 `APPROVED` 且未过期，并在 qB add 前持久化实际 info hash。
+- execute 只创建 `PENDING` 记录，不消费审批、不取种、不连接 qB。独立执行器随后使用数据库时间和租约 token 锁定记录，在每个外部请求前复验审批与 fencing，并在 qB add 前同一事务持久化实际 v1/v2 info hash、大小、文件数和 `SUBMITTING` 状态。
 - 不确定结果进入 `OUTCOME_UNKNOWN` 或 `RECONCILIATION_REQUIRED`，`next_retry_at` 必须为空。reconcile 端点只把它排入 `RECONCILIATION_PENDING` 并写不可变事件，不执行外部请求、不把人工请求冒充为已成功。
 - 执行响应不暴露 nonce、幂等键摘要、请求哈希、lease token、真实 qB URL、保存路径或凭据。PostgreSQL trigger 和 ORM 事件禁止修改 intent/execution 固定绑定、删除记录、修改审计事件，实际 info hash 一旦写入也不可替换。
+
+## 执行器与未知结果
+
+- 执行器只处理 `PENDING` 或已到期的 `RETRY_WAIT`，通过 `FOR UPDATE SKIP LOCKED` claim；租约续期、外部请求前检查和真正 qB POST 前的 `write_guard` 都使用数据库时间，避免主机时钟漂移和失去租约的 Worker 继续写入。
+- AvistaZ 必须精确重新搜索唯一的已批准 torrent ID；标题、TMDB ID、候选 hash 或大小漂移均失败关闭。`.torrent` 必须是有界合法 bencode，文件数量/总大小受限，并计算 v1/v2 hash alias 后再允许提交。
+- qB add 前按全部 hash alias 查重；add 后必须重新读取 qB 并验证 hash、分类、保存路径和大小。无法观察到唯一一致任务不能视为成功。
+- `VALIDATING` 中只有明确标记为 retryable 且尚未超过尝试上限的错误可进入 `RETRY_WAIT`。一旦提交预留已经持久化，任何失败都禁止自动再次 add：写入可能发生时进入 `OUTCOME_UNKNOWN`，尚未确认写入但无法完成验证时进入 `RECONCILIATION_REQUIRED`，提交中租约过期同样要求人工对账。
+- API 的人工 reconcile 只追加请求事件并进入 `RECONCILIATION_PENDING`；当前没有自动对账执行器，也不会根据人工请求直接标记成功或失败。
+
+## 下载任务与监控边界
+
+- 提交成功或确认已存在后只能创建一个绑定 execution/approval/media/hash 的 `DownloadJob`。列表和详情只返回内部 `save_path_ref`，不返回真实保存路径、qB URL、Worker ID 或 lease token；内部错误消息替换为固定提示。
+- 监控器只读取 qB 快照并更新状态、进度、速度、流量、Ratio、完成时间和最后观察时间。任务缺失标记为 `MISSING`，分类或大小漂移标记为 `ERROR`；它不暂停、恢复、删除、重校验或修改 qB。
+- H&R 没有可靠通用 qB 来源。新任务固定为 `UNKNOWN`；监控器不会根据 Ratio、做种时间或状态推断 H&R，也不会覆盖已经存在的 `AT_RISK` 或 `SATISFIED`。
+- summary 固定组合 job/media/approval/execution/warnings；timeline 合并三类追加式事件并再次执行递归脱敏。`HNR_STATUS_UNKNOWN` 作为警告展示，不会被包装成已满足。
 
 SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写入路径的完整性保护，不是外部签名或 WORM 存储。生产数据库仍必须最小化写权限、限制管理员访问并备份 `approval_events`；能够禁用 trigger 并同时改写记录和哈希的数据库超级管理员超出当前应用层威胁模型。若需覆盖该威胁，应引入运行时 HMAC 密钥或外部追加式审计锚点。
 
@@ -75,7 +93,7 @@ SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写�
 
 本地认证 username/password/session signing key、TMDB Bearer Access Token、AvistaZ username/password/PID 以及 qBittorrent base URL/username/password 只可来自服务端运行时 Secret。它们不会写入数据库、前端响应或应用日志。
 
-推荐采用 `deploy/compose.secrets.yaml.example`。API 读取全部 10 个 `/run/secrets/...` 文件；Worker 只读取 TMDB 与 AvistaZ 的 4 个外部服务文件，不获得本地认证或 qB Secret；前端不挂载任何 Secret。override 会把主 Compose 中同名明文环境变量清空。
+推荐采用 `deploy/compose.secrets.yaml.example`。API 读取全部 10 个 `/run/secrets/...` 文件；普通 Worker 只读取 TMDB 与 AvistaZ 的 4 个外部服务文件；下载执行器只读取 AvistaZ 与 qB 的 6 个文件；只读监控器只读取 qB 的 3 个文件；前端不挂载任何 Secret。override 会把主 Compose 中同名明文环境变量清空。
 
 | 本地文件 | 容器 Secret | 可见服务 |
 |---|---|---|
@@ -83,12 +101,12 @@ SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写�
 | `secrets/auth_local_password.txt` | `auth_local_password` | 仅 API |
 | `secrets/auth_session_signing_key.txt` | `auth_session_signing_key` | 仅 API |
 | `secrets/tmdb_access_token.txt` | `tmdb_access_token` | API、Worker |
-| `secrets/avistaz_username.txt` | `avistaz_username` | API、Worker |
-| `secrets/avistaz_password.txt` | `avistaz_password` | API、Worker |
-| `secrets/avistaz_pid.txt` | `avistaz_pid` | API、Worker |
-| `secrets/qb_base_url.txt` | `qb_base_url` | 仅 API |
-| `secrets/qb_username.txt` | `qb_username` | 仅 API |
-| `secrets/qb_password.txt` | `qb_password` | 仅 API |
+| `secrets/avistaz_username.txt` | `avistaz_username` | API、普通 Worker、下载执行器 |
+| `secrets/avistaz_password.txt` | `avistaz_password` | API、普通 Worker、下载执行器 |
+| `secrets/avistaz_pid.txt` | `avistaz_pid` | API、普通 Worker、下载执行器 |
+| `secrets/qb_base_url.txt` | `qb_base_url` | API、下载执行器、只读监控器 |
+| `secrets/qb_username.txt` | `qb_username` | API、下载执行器、只读监控器 |
+| `secrets/qb_password.txt` | `qb_password` | API、下载执行器、只读监控器 |
 
 项目内 `secrets/*.txt` 已被 `.gitignore` 排除，但文件仍是本机明文 Secret。部署者必须限制 ACL、禁止云同步/备份到不受控位置，并在不再使用时安全移除。文件内容只放值本身，不加引号、不加 `KEY=`，末尾换行会被读取时移除。
 
@@ -101,6 +119,7 @@ SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写�
 - TMDB 目标域名为 `api.themoviedb.org`，只对一个用户指定 TMDB ID 执行详情、外部 ID 和必要季信息 GET。
 - AvistaZ 目标域名为 `avistaz.to`，只执行 `POST /api/v1/jackett/auth` 与 `GET /api/v1/jackett/torrents`。
 - qBittorrent 只读测试目标必须是 `qb_base_url.txt` 指定且被 `QB_ALLOWED_HOSTS` 精确允许的主机，只执行 SID 登录和已列出的只读 GET。
-- 不访问任何 download URL，不获取 `.torrent`，不调用 qB 写接口，不操作影视文件。
+- 上述只读授权不包含 AvistaZ download URL、`.torrent` 获取或 qB add。若要验证执行器，必须另行列出已批准候选、将访问的 AvistaZ download URL 类型、目标 qB 实例引用、分类、保存路径引用和启动模式，并明确说明会新增真实 qB 任务；获得单独确认后才可启用三开关和 `download-execution` profile。
+- 监控器也需单独确认目标 qB 实例，但只执行登录与只读 GET。任何授权都不包含暂停、恢复、删除、重校验、媒体文件操作或媒体库写入。
 
-Mock 验收通过不代表已验证真实账号、真实站点或真实 qB 实例响应。真实开关应在冒烟测试结束后恢复为 `false`。本阶段未执行任何真实 TMDB、AvistaZ 或 qBittorrent 连接。
+Mock/fixture 验收通过不代表已验证真实账号、真实站点或真实 qB 实例响应。真实开关应在冒烟测试结束后恢复为 `false`。当前未执行任何真实 TMDB、AvistaZ、qBittorrent 或 NexusPHP 连接，也没有真实 NexusPHP Profile 可用。

@@ -78,7 +78,12 @@ export const useApprovalStore = defineStore('approvals', () => {
       if (current === generation) {
         approval.value = result
       }
-      if (result.status === 'APPROVED' || result.status === 'REVOKED' || result.status === 'CONSUMED') {
+      if (
+        result.status === 'APPROVED' ||
+        result.status === 'EXECUTING' ||
+        result.status === 'REVOKED' ||
+        result.status === 'CONSUMED'
+      ) {
         await loadPlan(approvalId, current)
       }
     } catch (caught) {
@@ -115,7 +120,11 @@ export const useApprovalStore = defineStore('approvals', () => {
         candidate.value = selected
         approval.value = selectedApproval
       }
-      if (selectedApproval?.status === 'APPROVED') await loadPlan(selectedApproval.id, current)
+      if (
+        selectedApproval?.status === 'APPROVED' ||
+        selectedApproval?.status === 'EXECUTING' ||
+        selectedApproval?.status === 'CONSUMED'
+      ) await loadPlan(selectedApproval.id, current)
     } catch (caught) {
       if (current === generation) {
         clearDetail()

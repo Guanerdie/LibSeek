@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -104,6 +105,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         category: str,
         tags: tuple[str, ...] = (),
         start_immediately: bool = True,
+        write_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> QbAddResult:
         if not self.enable_write:
             raise AppError(
@@ -137,6 +139,8 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
             "tags": ",".join(tags),
             "paused": "false" if start_immediately else "true",
         }
+        if write_guard is not None:
+            await write_guard()
         try:
             response = await self._request(
                 "POST",

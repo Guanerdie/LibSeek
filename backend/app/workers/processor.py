@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
@@ -13,6 +14,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.base import MediaSourceAdapter, MetadataProvider, PtSiteAdapter
+from app.adapters.pt_sites.registry import PtSiteRegistry, default_pt_site_registry
 from app.core.config import get_settings
 from app.core.episodes import derive_missing_episode_codes
 from app.core.security import sanitize_details
@@ -39,6 +41,7 @@ from app.schemas.adapters import (
 )
 from app.schemas.entities import TorrentSearchCreateRequest
 from app.services.matching import MatchPreferences, score_metadata_match, score_torrent_candidate
+from app.services.workflow import refresh_media_search_workflow_status
 
 
 class JobProcessor:
@@ -50,6 +53,7 @@ class JobProcessor:
         metadata_provider_factory: Callable[[], MetadataProvider] | None = None,
         pt_site_factory: Callable[[], PtSiteAdapter] | None = None,
         *,
+        pt_site_registry: PtSiteRegistry | None = None,
         lease_seconds: int = 300,
         lease_renew_interval_seconds: float = 60,
     ) -> None:
@@ -61,7 +65,11 @@ class JobProcessor:
         self.worker_id = worker_id
         self.adapter_factory = adapter_factory
         self.metadata_provider_factory = metadata_provider_factory
-        self.pt_site_factory = pt_site_factory
+        if pt_site_factory is not None and pt_site_registry is not None:
+            raise ValueError("provide either pt_site_factory or pt_site_registry, not both")
+        self.pt_site_registry = pt_site_registry or PtSiteRegistry()
+        if pt_site_factory is not None:
+            self.pt_site_registry = default_pt_site_registry(pt_site_factory)
         self.lease_seconds = lease_seconds
         self.lease_renew_interval_seconds = lease_renew_interval_seconds
 
@@ -121,18 +129,23 @@ class JobProcessor:
                     )
                 )
             media_id = job.payload.get("media_id")
+            media: MediaItem | None = None
             if isinstance(media_id, str):
-                media = await session.get(MediaItem, media_id)
+                media = await session.get(
+                    MediaItem,
+                    media_id,
+                    with_for_update=job.job_type.startswith("TORRENT_SEARCH:"),
+                )
                 if media is not None and job.job_type.startswith("RESOLVE_METADATA:"):
                     media.workflow_status = WorkflowStatus.METADATA_PENDING
-                if media is not None and job.job_type.startswith("TORRENT_SEARCH:"):
-                    media.workflow_status = WorkflowStatus.PT_SEARCHING
             search_run_id = job.payload.get("search_run_id")
             if isinstance(search_run_id, str):
                 search_run = await session.get(TorrentSearchRun, search_run_id)
                 if search_run is not None:
                     search_run.status = WorkflowStatus.PT_SEARCHING
                     search_run.started_at = search_run.started_at or now
+                    if media is not None and job.job_type.startswith("TORRENT_SEARCH:"):
+                        await refresh_media_search_workflow_status(session, media)
             await session.commit()
             return job
 
@@ -369,11 +382,14 @@ class JobProcessor:
     async def _run_torrent_search(self, job: Job) -> None:
         adapter: PtSiteAdapter | None = None
         try:
-            if self.pt_site_factory is None:
-                raise AppError("AVISTAZ_LIVE_DISABLED", "AvistaZ 真实只读搜索未启用")
             media_id = job.payload.get("media_id")
             search_run_id = job.payload.get("search_run_id")
-            if not isinstance(media_id, str) or not isinstance(search_run_id, str):
+            payload_site_id = job.payload.get("site_id")
+            if (
+                not isinstance(media_id, str)
+                or not isinstance(search_run_id, str)
+                or (payload_site_id is not None and not isinstance(payload_site_id, str))
+            ):
                 raise AppError("INVALID_JOB_PAYLOAD", "PT 搜索任务参数无效")
             async with self.session_factory() as session:
                 media = await session.get(MediaItem, media_id)
@@ -389,17 +405,54 @@ class JobProcessor:
                 )
                 if media is None or search_run is None:
                     raise AppError("SEARCH_RUN_NOT_FOUND", "PT 搜索任务不存在", status_code=404)
+                if search_run.media_id != media_id:
+                    raise AppError(
+                        "PT_MEDIA_BINDING_MISMATCH",
+                        "PT search job, run, and media bindings do not match",
+                        status_code=409,
+                    )
+                site_id = payload_site_id
+                legacy_job_type = f"TORRENT_SEARCH:{media_id}"
+                if site_id is None:
+                    if job.job_type != legacy_job_type or search_run.site_id != "avistaz":
+                        raise AppError(
+                            "PT_SITE_BINDING_MISMATCH",
+                            "旧版 PT 搜索任务无法安全推导站点绑定",
+                            status_code=409,
+                        )
+                    site_id = "avistaz"
+                expected_job_types = {f"TORRENT_SEARCH:{site_id}:{media_id}"}
+                if site_id == "avistaz":
+                    expected_job_types.add(legacy_job_type)
+                if search_run.site_id != site_id or job.job_type not in expected_job_types:
+                    raise AppError(
+                        "PT_SITE_BINDING_MISMATCH",
+                        "PT 搜索任务、运行记录与站点绑定不一致",
+                        status_code=409,
+                    )
                 if review is None:
                     raise AppError(
                         "IDENTITY_CONFIRMATION_REQUIRED", "影视身份尚未人工确认", status_code=409
                     )
                 metadata = MetadataRecord.model_validate(review.candidate_snapshot)
                 requested = TorrentSearchCreateRequest.model_validate(search_run.sanitized_request)
-                prior_titles = await self._prior_candidate_titles(session, media_id)
-            adapter = self.pt_site_factory()
+                if requested.site_id != site_id:
+                    raise AppError(
+                        "PT_SITE_BINDING_MISMATCH",
+                        "PT 搜索请求快照与运行站点绑定不一致",
+                        status_code=409,
+                    )
+                prior_titles = await self._prior_candidate_titles(session, media_id, site_id)
+            adapter = self.pt_site_registry.create(site_id)
             candidates, strategy_log = await self._search_with_fallbacks(
                 adapter, metadata, requested
             )
+            if any(candidate.site_id != site_id for candidate in candidates):
+                raise AppError(
+                    "PT_SITE_CANDIDATE_MISMATCH",
+                    "PT 适配器返回了其他站点的候选，结果已拒绝",
+                    status_code=502,
+                )
             settings = get_settings()
             preferences = MatchPreferences(
                 resolutions=tuple(requested.preferred_resolutions)
@@ -493,11 +546,16 @@ class JobProcessor:
         return [], log
 
     @staticmethod
-    async def _prior_candidate_titles(session: AsyncSession, media_id: str) -> set[str]:
+    async def _prior_candidate_titles(
+        session: AsyncSession, media_id: str, site_id: str
+    ) -> set[str]:
         statement = (
             select(TorrentCandidateRecord.candidate_snapshot)
             .join(TorrentSearchRun, TorrentSearchRun.id == TorrentCandidateRecord.search_run_id)
-            .where(TorrentSearchRun.media_id == media_id)
+            .where(
+                TorrentSearchRun.media_id == media_id,
+                TorrentSearchRun.site_id == site_id,
+            )
         )
         snapshots = (await session.scalars(statement)).all()
         return {
@@ -527,6 +585,16 @@ class JobProcessor:
                 or media is None
             ):
                 return
+            if (
+                run.media_id != media.id
+                or job.payload.get("media_id") != media.id
+                or job.payload.get("search_run_id") != run.id
+            ):
+                raise AppError(
+                    "PT_MEDIA_BINDING_MISMATCH",
+                    "PT search job, run, and media bindings do not match",
+                    status_code=409,
+                )
             for candidate in candidates:
                 session.add(
                     TorrentCandidateRecord(
@@ -549,7 +617,7 @@ class JobProcessor:
             run.finished_at = now
             run.error_code = None
             run.error_message = None
-            media.workflow_status = target_status
+            await refresh_media_search_workflow_status(session, media)
             job.status = JobStatus.SUCCEEDED
             job.locked_at = None
             job.locked_by = None
@@ -567,6 +635,7 @@ class JobProcessor:
                     entity_id=run.id,
                     sanitized_details={
                         "candidate_count": len(candidates),
+                        "site_id": run.site_id,
                         "strategies": strategy_log,
                         "read_only": True,
                     },
@@ -729,6 +798,7 @@ class JobProcessor:
             if job is None or not self._owns_lease(job, lease_token):
                 return
             retry = error.retryable and job.attempts < job.max_attempts
+            retry_delay = self._retry_delay_seconds(error, job.attempts) if retry else None
             status = JobStatus.RETRY_WAIT if retry else JobStatus.FAILED
             job.status = status
             job.error_code = error.error_code
@@ -736,7 +806,11 @@ class JobProcessor:
             job.locked_at = None
             job.locked_by = None
             job.lease_token = None
-            job.next_retry_at = utc_now() + timedelta(seconds=2**job.attempts) if retry else None
+            job.next_retry_at = (
+                utc_now() + timedelta(seconds=retry_delay)
+                if retry_delay is not None
+                else None
+            )
             run = await session.get(DiscoveryRun, job.run_id) if job.run_id else None
             if run is not None:
                 run.status = status
@@ -762,7 +836,11 @@ class JobProcessor:
                 )
             media_id = job.payload.get("media_id")
             media = (
-                await session.get(MediaItem, media_id)
+                await session.get(
+                    MediaItem,
+                    media_id,
+                    with_for_update=job.job_type.startswith("TORRENT_SEARCH:"),
+                )
                 if isinstance(media_id, str)
                 else None
             )
@@ -798,8 +876,8 @@ class JobProcessor:
                 if not retry:
                     search_run.status = WorkflowStatus.SEARCH_FAILED
                     search_run.finished_at = utc_now()
-                    if media is not None:
-                        media.workflow_status = WorkflowStatus.SEARCH_FAILED
+                if media is not None:
+                    await refresh_media_search_workflow_status(session, media)
                 session.add(
                     AuditEvent(
                         event_type=(
@@ -813,7 +891,19 @@ class JobProcessor:
                             "error_code": error.error_code,
                             "message": error.message,
                             "retryable": retry,
+                            "site_id": search_run.site_id,
                         },
                     )
                 )
             await session.commit()
+
+    @staticmethod
+    def _retry_delay_seconds(error: AppError, attempts: int) -> float:
+        fallback = float(min(3600, 2**attempts))
+        value = error.details.get("retry_after_seconds")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return fallback
+        requested = float(value)
+        if not math.isfinite(requested):
+            return fallback
+        return max(fallback, min(3600.0, max(0.0, requested)))

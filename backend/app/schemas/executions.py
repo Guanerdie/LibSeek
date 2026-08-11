@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.security import sanitize_public_text
 from app.models.enums import (
     DownloadExecutionStatus,
     DownloadLaunchMode,
@@ -62,8 +63,14 @@ class DownloadExecutionResponse(BaseModel):
     max_attempts: int = Field(ge=1)
     next_retry_at: datetime | None
     locked_at: datetime | None
-    locked_by: str | None
     actual_info_hash: str | None
+    actual_info_hash_v1: str | None
+    actual_info_hash_v2: str | None
+    actual_size_bytes: int | None
+    actual_file_count: int | None
+    validated_at: datetime | None
+    submitted_at: datetime | None
+    verified_at: datetime | None
     error_code: str | None
     error_message: str | None
     requested_by: str
@@ -73,3 +80,13 @@ class DownloadExecutionResponse(BaseModel):
     reconciliation_reason: str | None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("error_message")
+    @classmethod
+    def replace_internal_error_message(cls, value: str | None) -> str | None:
+        return "下载执行异常，请根据错误代码查看审计记录" if value is not None else None
+
+    @field_validator("reconciliation_reason")
+    @classmethod
+    def redact_reconciliation_reason(cls, value: str | None) -> str | None:
+        return sanitize_public_text(value) if value is not None else None

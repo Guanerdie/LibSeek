@@ -123,6 +123,12 @@ async def create_torrent_search(
     _principal: OperatorPrincipal,
 ) -> TorrentSearchAccepted:
     settings = get_settings()
+    if request.site_id != "avistaz":
+        raise AppError(
+            "PT_SITE_NOT_REGISTERED",
+            "PT 站点未注册；不会回退到 AvistaZ 或其他站点",
+            status_code=409,
+        )
     if not settings.enable_avistaz_live_search:
         raise AppError(
             "AVISTAZ_LIVE_DISABLED", "AvistaZ 真实只读搜索默认关闭", status_code=409

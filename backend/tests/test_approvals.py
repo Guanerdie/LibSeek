@@ -368,6 +368,8 @@ async def test_expired_and_consumed_approvals_cannot_be_reused(
         assert isinstance(plan, DownloadPlan)
         assert plan.plan_hash == download_plan_hash(plan)
         assert verify_download_plan(plan, approval) is plan
+        approval.status = ApprovalStatus.EXECUTING
+        await session.flush()
         await consume_approval(session, approval, actor="future-executor-test")
         assert approval.status == ApprovalStatus.CONSUMED
         with pytest.raises(AppError) as consumed:

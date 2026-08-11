@@ -7,6 +7,10 @@ import AdaptersView from '../views/AdaptersView.vue'
 import ApprovalListView from '../views/ApprovalListView.vue'
 import ApprovalView from '../views/ApprovalView.vue'
 import DiscoveryView from '../views/DiscoveryView.vue'
+import DownloadJobDetailView from '../views/DownloadJobDetailView.vue'
+import DownloadJobListView from '../views/DownloadJobListView.vue'
+import ExecutionDetailView from '../views/ExecutionDetailView.vue'
+import ExecutionListView from '../views/ExecutionListView.vue'
 import MediaView from '../views/MediaView.vue'
 import IdentityView from '../views/IdentityView.vue'
 import LoginView from '../views/LoginView.vue'
@@ -35,6 +39,10 @@ const router = createRouter({
     },
     { path: '/approvals', component: ApprovalListView },
     { path: '/approvals/:id', component: ApprovalView },
+    { path: '/executions', component: ExecutionListView },
+    { path: '/executions/:id', component: ExecutionDetailView },
+    { path: '/download-jobs', component: DownloadJobListView },
+    { path: '/download-jobs/:id', component: DownloadJobDetailView },
     { path: '/discovery', component: DiscoveryView },
     { path: '/adapters', component: AdaptersView },
     { path: '/qbittorrent', component: QbittorrentView },

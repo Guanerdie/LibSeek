@@ -4,6 +4,8 @@ import {
   ApiError,
   approvalApi,
   authApi,
+  downloadJobApi,
+  executionApi,
   mediaApi,
   setApiCsrfToken,
   setUnauthorizedHandler,
@@ -99,5 +101,48 @@ describe('API request security', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       expires_in_minutes: 60,
     })
+  })
+
+  it('sends execution idempotency and intent material only in the protected mutation', async () => {
+    const fetchMock = vi.mocked(fetch)
+    setApiCsrfToken('csrf-session')
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'execution-1' }))
+
+    await executionApi.execute(
+      'approval-1',
+      'intent-1',
+      `ei1_${'n'.repeat(32)}`,
+      `unin-${'a'.repeat(48)}`,
+    )
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    const headers = new Headers(init?.headers)
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-session')
+    expect(headers.get('Idempotency-Key')).toBe(`unin-${'a'.repeat(48)}`)
+    expect(JSON.parse(String(init?.body))).toEqual({
+      intent_id: 'intent-1',
+      nonce: `ei1_${'n'.repeat(32)}`,
+    })
+  })
+
+  it('uses read-only encoded download job endpoints and the explicit page contract', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({})))
+
+    await downloadJobApi.list({ page: 2, pageSize: 50, status: 'DOWNLOADING' })
+    await downloadJobApi.get('job/unsafe')
+    await downloadJobApi.summary('job/unsafe')
+    await downloadJobApi.timeline('job/unsafe')
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/download-jobs?page=2&page_size=50&status=DOWNLOADING',
+      '/api/download-jobs/job%2Funsafe',
+      '/api/download-jobs/job%2Funsafe/summary',
+      '/api/download-jobs/job%2Funsafe/timeline',
+    ])
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.method).toBeUndefined()
+      expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
+    }
   })
 })

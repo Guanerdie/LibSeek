@@ -229,6 +229,7 @@ export interface TorrentCandidateResult {
 export type ApprovalStatus =
   | 'PENDING'
   | 'APPROVED'
+  | 'EXECUTING'
   | 'REJECTED'
   | 'EXPIRED'
   | 'REVOKED'
@@ -323,6 +324,162 @@ export interface DownloadPlan {
   preflight_result: PreflightResult
   warnings: string[]
   created_at: string
+}
+
+export type DownloadLaunchMode = 'ADD_PAUSED' | 'START_IMMEDIATELY'
+
+export type ExecutionIntentStatus = 'ACTIVE' | 'CONSUMED' | 'EXPIRED' | 'CANCELLED'
+
+export interface ExecutionIntent {
+  id: string
+  approval_id: string
+  nonce: string
+  status: ExecutionIntentStatus
+  approval_snapshot_hash: string
+  plan_hash: string
+  qb_target_fingerprint: string
+  launch_mode: DownloadLaunchMode
+  expires_at: string
+  created_at: string
+}
+
+export type DownloadExecutionStatus =
+  | 'PENDING'
+  | 'RETRY_WAIT'
+  | 'VALIDATING'
+  | 'SUBMITTING'
+  | 'SUBMITTED'
+  | 'ALREADY_PRESENT'
+  | 'OUTCOME_UNKNOWN'
+  | 'RECONCILIATION_REQUIRED'
+  | 'RECONCILIATION_PENDING'
+  | 'FAILED'
+  | 'CANCELLED'
+
+export interface DownloadExecution {
+  id: string
+  approval_id: string
+  intent_id: string
+  status: DownloadExecutionStatus
+  requires_reconciliation: boolean
+  approval_snapshot_hash: string
+  plan_hash: string
+  qb_target_fingerprint: string
+  launch_mode: DownloadLaunchMode
+  attempts: number
+  max_attempts: number
+  next_retry_at: string | null
+  locked_at: string | null
+  actual_info_hash: string | null
+  actual_info_hash_v1: string | null
+  actual_info_hash_v2: string | null
+  actual_size_bytes: number | null
+  actual_file_count: number | null
+  validated_at: string | null
+  submitted_at: string | null
+  verified_at: string | null
+  error_code: string | null
+  error_message: string | null
+  requested_by: string
+  requested_at: string
+  reconciliation_requested_by: string | null
+  reconciliation_requested_at: string | null
+  reconciliation_reason: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type DownloadJobStatus =
+  | 'QUEUED'
+  | 'DOWNLOADING'
+  | 'PAUSED'
+  | 'CHECKING'
+  | 'SEEDING'
+  | 'COMPLETED'
+  | 'MISSING'
+  | 'ERROR'
+
+export type HnrStatus = 'UNKNOWN' | 'AT_RISK' | 'SATISFIED'
+
+export interface DownloadJob {
+  id: string
+  execution_id: string
+  approval_id: string
+  media_item_id: string
+  status: DownloadJobStatus
+  release_title: string
+  info_hash_v1: string | null
+  info_hash_v2: string | null
+  save_path_ref: string
+  category: string
+  size_bytes: number
+  file_count: number
+  progress: number
+  download_speed_bps: number
+  upload_speed_bps: number
+  downloaded_bytes: number
+  uploaded_bytes: number
+  ratio: number
+  hnr_status: HnrStatus
+  started_at: string
+  completed_at: string | null
+  last_seen_at: string | null
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DownloadJobSummaryMedia {
+  id: string
+  title: string
+  media_type: 'movie' | 'tv'
+  tmdb_id: number | null
+  year: number | null
+  season: number | null
+  episodes: number[] | null
+}
+
+export interface DownloadJobSummaryApproval {
+  id: string
+  status: ApprovalStatus
+  snapshot_hash: string
+  expires_at: string
+}
+
+export interface DownloadJobSummaryExecution {
+  id: string
+  status: DownloadExecutionStatus
+  launch_mode: DownloadLaunchMode
+  requires_reconciliation: boolean
+  actual_info_hash_v1: string | null
+  actual_info_hash_v2: string | null
+  validated_at: string | null
+  submitted_at: string | null
+  verified_at: string | null
+}
+
+export interface DownloadJobSummary {
+  job: DownloadJob
+  media: DownloadJobSummaryMedia
+  approval: DownloadJobSummaryApproval
+  execution: DownloadJobSummaryExecution
+  warnings: string[]
+}
+
+export interface DownloadJobTimelineItem {
+  source: 'approval' | 'execution' | 'job'
+  event_type: string
+  from_status: string | null
+  to_status: string
+  actor: string
+  sanitized_details: Record<string, unknown>
+  created_at: string
+}
+
+export interface DownloadJobTimeline {
+  job_id: string
+  items: DownloadJobTimelineItem[]
 }
 
 export interface QbStatus {

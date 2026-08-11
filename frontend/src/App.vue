@@ -14,6 +14,8 @@ const navItems = [
   { to: '/discovery', label: '发现任务', icon: '↻' },
   { to: '/adapters', label: '适配器', icon: '◇' },
   { to: '/approvals', label: '审批计划', icon: '✓' },
+  { to: '/executions', label: '下载执行', icon: '▶' },
+  { to: '/download-jobs', label: '下载任务', icon: '↓' },
   { to: '/qbittorrent', label: 'qB 状态', icon: '⇄' },
 ]
 
@@ -42,14 +44,14 @@ async function logout(): Promise<void> {
       </nav>
       <div class="phase-note">
         <span class="status-dot"></span>
-        <div><strong>第三阶段</strong><small>审批与计划模式</small></div>
+        <div><strong>第五阶段</strong><small>下载监控模式</small></div>
       </div>
     </aside>
     <main class="main-content">
       <header class="topbar">
         <div><span class="eyebrow">CONTROL PLANE</span><span class="divider">/</span> 本地管理端</div>
         <div class="topbar-actions">
-          <span class="safe-badge">无下载写操作</span>
+          <span class="safe-badge">写操作需双重确认</span>
           <div v-if="auth.principal" class="session-summary">
             <span><strong>{{ auth.principal.username }}</strong><small>{{ auth.roleLabel }}</small></span>
             <button class="button secondary small" :disabled="auth.working" @click="logout">
