@@ -53,6 +53,26 @@ async def test_login_success_sets_authenticated(adapter: NextFindAdapter) -> Non
 
 
 @pytest.mark.asyncio
+async def test_nextfind_client_ignores_ambient_proxy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://private-proxy.invalid:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    proxy_safe_adapter = NextFindAdapter(
+        base_url=BASE_URL,
+        allowed_hosts=("nextfind.example",),
+        username="reader",
+        password="super-secret",
+    )
+    try:
+        assert proxy_safe_adapter._client._trust_env is False
+        assert proxy_safe_adapter._client._mounts == {}
+    finally:
+        await proxy_safe_adapter.aclose()
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_login_failure_is_stable_and_logs_no_secrets(
     adapter: NextFindAdapter, caplog: pytest.LogCaptureFixture
@@ -285,6 +305,39 @@ async def test_worker_factory_scopes_nextfind_to_base_url_host(
 
     assert built_adapter.allowed_hosts == ("nextfind.example",)
     await built_adapter.aclose()
+
+
+@pytest.mark.parametrize(
+    "borrowed_url",
+    ("https://api.themoviedb.org", "https://avistaz.to"),
+)
+def test_worker_factory_rejects_borrowing_a_global_host_for_nextfind(
+    monkeypatch: pytest.MonkeyPatch,
+    borrowed_url: str,
+) -> None:
+    private_username = "private-nextfind-user"
+    private_password = "PRIVATE-NEXTFIND-PASSWORD"
+    settings = Settings(
+        nextfind_base_url=borrowed_url,
+        nextfind_allowed_hosts=("nextfind.example",),
+        nextfind_username=private_username,
+        nextfind_password=private_password,
+        allowed_external_hosts=(
+            "nextfind.example",
+            "api.themoviedb.org",
+            "avistaz.to",
+        ),
+    )
+    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
+
+    with pytest.raises(AppError) as caught:
+        worker_main.build_nextfind_adapter()
+
+    assert caught.value.error_code == "EXTERNAL_HOST_NOT_ALLOWED"
+    serialized_error = f"{caught.value.message} {caught.value.details}"
+    assert borrowed_url.partition("://")[2] not in serialized_error
+    assert private_username not in serialized_error
+    assert private_password not in serialized_error
 
 
 @pytest.mark.asyncio

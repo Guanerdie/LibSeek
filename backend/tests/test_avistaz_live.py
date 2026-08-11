@@ -11,6 +11,7 @@ from app.adapters.pt_sites.avistaz_live import AvistaZAdapter
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.schemas.adapters import TorrentSearchRequest
+from app.workers.processor import JobProcessor
 
 BASE = "https://avistaz.to"
 
@@ -24,13 +25,14 @@ def adapter(
     *,
     enable_torrent_fetch: bool = False,
     before_request: Callable[[], Awaitable[None]] | None = None,
+    sleep: Callable[[float], Awaitable[None]] = no_sleep,
 ) -> AvistaZAdapter:
     return AvistaZAdapter(
         username="test-user",
         password="test-password",
         pid="test-pid",
         min_interval_seconds=0,
-        sleep=no_sleep,
+        sleep=sleep,
         transport=transport,
         before_request=before_request,
         enable_torrent_fetch=enable_torrent_fetch,
@@ -288,6 +290,88 @@ async def test_429_uses_bounded_exponential_retry() -> None:
     assert await avistaz.search(TorrentSearchRequest(tmdb=123)) == []
     assert route.call_count == 2
     await avistaz.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_429_honors_retry_after_before_retrying() -> None:
+    delays: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    respx.post(f"{BASE}/api/v1/jackett/auth").mock(
+        return_value=httpx.Response(200, json={"token": "memory-token"})
+    )
+    route = respx.get(f"{BASE}/api/v1/jackett/torrents").mock(
+        side_effect=[
+            httpx.Response(
+                429,
+                json={"message": "slow down"},
+                headers={"Retry-After": "17"},
+            ),
+            httpx.Response(200, json={"results": []}),
+        ]
+    )
+    avistaz = adapter(sleep=record_sleep)
+    assert await avistaz.search(TorrentSearchRequest(tmdb=123)) == []
+    assert route.call_count == 2
+    assert delays == [17.0]
+    await avistaz.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_final_429_preserves_bounded_retry_after_for_job_rescheduling() -> None:
+    delays: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    respx.post(f"{BASE}/api/v1/jackett/auth").mock(
+        return_value=httpx.Response(200, json={"token": "memory-token"})
+    )
+    route = respx.get(f"{BASE}/api/v1/jackett/torrents").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "17"}),
+            httpx.Response(429, headers={"Retry-After": "23"}),
+            httpx.Response(429, headers={"Retry-After": "29"}),
+        ]
+    )
+    avistaz = adapter(sleep=record_sleep)
+    try:
+        with pytest.raises(AppError) as caught:
+            await avistaz.search(TorrentSearchRequest(tmdb=123))
+    finally:
+        await avistaz.aclose()
+
+    assert route.call_count == 3
+    assert delays == [17.0, 23.0]
+    assert caught.value.error_code == "AVISTAZ_RATE_LIMITED"
+    assert caught.value.retryable is True
+    assert caught.value.details == {"retry_after_seconds": 29.0}
+    assert JobProcessor._retry_delay_seconds(caught.value, attempts=1) == 29.0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (None, None),
+        ("not-a-retry-delay", None),
+        ("-5", 0.0),
+        ("nan", None),
+        ("inf", None),
+        ("-inf", None),
+        ("3601", 3600.0),
+        ("Thu, 01 Jan 1970 00:00:00 GMT", 0.0),
+        ("Fri, 31 Dec 9999 23:59:59 GMT", 3600.0),
+    ),
+)
+def test_retry_after_seconds_rejects_invalid_values_and_applies_safe_bounds(
+    value: str | None,
+    expected: float | None,
+) -> None:
+    assert AvistaZAdapter._retry_after_seconds(value) == expected
 
 
 @pytest.mark.asyncio

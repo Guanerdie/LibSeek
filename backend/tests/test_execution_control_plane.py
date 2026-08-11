@@ -23,6 +23,7 @@ from app.db.session import get_session
 from app.errors import AppError
 from app.main import app
 from app.models.entities import (
+    ApprovalEvent,
     ApprovalRequest,
     DownloadExecution,
     DownloadExecutionEvent,
@@ -45,6 +46,7 @@ from app.models.enums import (
     IdentityConfidence,
     MediaType,
     MetadataStatus,
+    Origin,
     PreflightStatus,
     WorkflowStatus,
 )
@@ -74,6 +76,7 @@ from app.services.executions import (
     request_reconciliation,
     update_download_job_observation,
 )
+from app.services.preflight import preflight_policy_fingerprint
 from app.services.torrent_validation import ValidatedTorrent
 
 INFO_HASH = "1234567890abcdef1234567890abcdef12345678"
@@ -164,6 +167,7 @@ async def seed_approved_plan(
     expected_info_hash: str | None = INFO_HASH,
 ) -> ApprovalRequest:
     now = datetime.now(UTC)
+    policy_settings = execution_settings()
     expires_at = now + timedelta(hours=1)
     tmdb_id = int(hashlib.sha256(source_item_id.encode()).hexdigest()[:7], 16)
     media = MediaItem(
@@ -234,7 +238,7 @@ async def seed_approved_plan(
                 )
             ],
             checked_at=now,
-            policy_fingerprint="a" * 64,
+            policy_fingerprint=preflight_policy_fingerprint(policy_settings),
         )
         approval = ApprovalRequest(
             media_item_id=media.id,
@@ -349,6 +353,180 @@ def execution_api_client_factory(
 
     yield create
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", (Origin.MANUAL, Origin.AUTOMATION))
+@pytest.mark.parametrize("target_change", ("base_url", "instance_ref"))
+async def test_execution_intent_rejects_preflight_target_drift_without_audit_writes(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Origin,
+    target_change: str,
+) -> None:
+    approval = await seed_approved_plan(
+        session_factory,
+        source_item_id=f"intent-drift-{origin.value}-{target_change}",
+    )
+    if target_change == "base_url":
+        drifted = execution_settings(
+            qb_base_url="https://qb-secondary.internal.test",
+            qb_allowed_hosts=("qb-secondary.internal.test",),
+        )
+    else:
+        drifted = execution_settings(qb_target_instance_ref="qb-secondary")
+
+    async with session_factory() as session:
+        events_before = list(
+            (
+                await session.scalars(
+                    select(ApprovalEvent).where(
+                        ApprovalEvent.approval_request_id == approval.id
+                    )
+                )
+            ).all()
+        )
+        with pytest.raises(AppError) as caught:
+            await create_execution_intent(
+                session,
+                approval.id,
+                ExecutionIntentCreateRequest(),
+                drifted,
+                actor="execution-admin",
+                origin=origin,
+                automation_policy_revision_id=(
+                    "policy-revision-test" if origin == Origin.AUTOMATION else None
+                ),
+                automation_decision_id=(
+                    "automation-decision-test" if origin == Origin.AUTOMATION else None
+                ),
+            )
+
+        assert caught.value.error_code == "PREFLIGHT_CONFIG_CHANGED"
+        assert caught.value.status_code == 409
+        assert "qb-secondary.internal.test" not in caught.value.message
+        assert (
+            await session.scalar(
+                select(ExecutionIntent)
+                .where(ExecutionIntent.approval_id == approval.id)
+                .limit(1)
+            )
+            is None
+        )
+        events_after = list(
+            (
+                await session.scalars(
+                    select(ApprovalEvent).where(
+                        ApprovalEvent.approval_request_id == approval.id
+                    )
+                )
+            ).all()
+        )
+        assert events_after == events_before
+
+
+@pytest.mark.asyncio
+async def test_execution_intent_accepts_unchanged_target_with_opaque_fingerprints(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    approval = await seed_approved_plan(
+        session_factory,
+        source_item_id="intent-unchanged-target",
+    )
+    settings = execution_settings(
+        qb_username="private-user",
+        qb_password="private-password",
+    )
+    async with session_factory() as session:
+        intent, _ = await create_execution_intent(
+            session,
+            approval.id,
+            ExecutionIntentCreateRequest(),
+            settings,
+            actor="execution-admin",
+        )
+        plan = await session.scalar(
+            select(DownloadPlan).where(DownloadPlan.approval_id == approval.id).limit(1)
+        )
+
+        assert plan is not None
+        assert plan.preflight_policy_fingerprint == preflight_policy_fingerprint(settings)
+        public_fingerprints = json.dumps(
+            {
+                "preflight": plan.preflight_policy_fingerprint,
+                "target": intent.qb_target_fingerprint,
+            }
+        )
+        assert all(
+            secret not in public_fingerprints
+            for secret in (
+                "qb.internal.test",
+                "private-user",
+                "private-password",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_execution_rejects_policy_drift_after_intent_without_consuming_it_or_audit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    approval = await seed_approved_plan(
+        session_factory,
+        source_item_id="execution-policy-drift-after-intent",
+    )
+    settings = execution_settings()
+    drifted = execution_settings(max_candidate_size_bytes=512)
+
+    async with session_factory() as session:
+        intent, nonce = await create_execution_intent(
+            session,
+            approval.id,
+            ExecutionIntentCreateRequest(),
+            settings,
+            actor="execution-admin",
+        )
+        events_before = list(
+            (
+                await session.scalars(
+                    select(ApprovalEvent).where(
+                        ApprovalEvent.approval_request_id == approval.id
+                    )
+                )
+            ).all()
+        )
+
+        with pytest.raises(AppError) as caught:
+            await execute_approved_plan(
+                session,
+                approval.id,
+                DownloadExecutionCreateRequest(intent_id=intent.id, nonce=nonce),
+                "execution-policy-drift-idempotency-key",
+                drifted,
+                actor="execution-admin",
+            )
+
+        assert caught.value.error_code == "PREFLIGHT_CONFIG_CHANGED"
+        assert caught.value.status_code == 409
+        assert (
+            await session.scalar(
+                select(DownloadExecution)
+                .where(DownloadExecution.approval_id == approval.id)
+                .limit(1)
+            )
+            is None
+        )
+        await session.refresh(intent)
+        assert intent.status == ExecutionIntentStatus.ACTIVE
+        events_after = list(
+            (
+                await session.scalars(
+                    select(ApprovalEvent).where(
+                        ApprovalEvent.approval_request_id == approval.id
+                    )
+                )
+            ).all()
+        )
+        assert events_after == events_before
 
 
 @pytest.mark.asyncio
@@ -524,7 +702,7 @@ async def test_expired_intent_and_target_drift_fail_without_execution(
                 drifted,
                 actor="execution-admin",
             )
-        assert mismatch.value.error_code == "EXECUTION_INTENT_BINDING_MISMATCH"
+        assert mismatch.value.error_code == "PREFLIGHT_CONFIG_CHANGED"
 
 
 @pytest.mark.asyncio

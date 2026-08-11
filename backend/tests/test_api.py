@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.dependencies import (
@@ -12,10 +13,21 @@ from app.api.dependencies import (
     get_operator_principal,
     get_viewer_principal,
 )
+from app.api.routes import workflow as workflow_routes
 from app.core.auth import Principal
+from app.core.config import Settings
 from app.db.session import get_session
 from app.main import app
-from app.models.entities import MediaItem, MetadataMatch, TorrentCandidateRecord, TorrentSearchRun
+from app.models.entities import (
+    AuditEvent,
+    IdentityReview,
+    Job,
+    MediaItem,
+    MetadataMatch,
+    TorrentCandidateRecord,
+    TorrentSearchRun,
+    WorkerHeartbeat,
+)
 from app.models.enums import (
     AuthRole,
     IdentityConfidence,
@@ -24,6 +36,8 @@ from app.models.enums import (
     WorkflowStatus,
 )
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
+from app.services.automation_policy import get_current_policy
+from app.workers.identity import job_worker_id
 
 
 @pytest.fixture
@@ -68,6 +82,50 @@ async def test_health_system_and_validation_errors(api_client_factory) -> None:
         invalid = await client.get("/api/media?page_size=999")
         assert invalid.status_code == 422
         assert invalid.json()["error_code"] == "API_VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_system_status_ignores_specialized_worker_heartbeats(
+    session_factory: async_sessionmaker[AsyncSession], api_client_factory
+) -> None:
+    now = datetime.now(UTC)
+    job_worker = WorkerHeartbeat(
+        worker_id=job_worker_id("api-status"),
+        last_seen_at=now - timedelta(minutes=5),
+    )
+    async with session_factory() as session:
+        session.add_all(
+            [
+                job_worker,
+                WorkerHeartbeat(
+                    worker_id="automation-preflight:fresh-specialized-worker",
+                    last_seen_at=now,
+                ),
+                WorkerHeartbeat(
+                    worker_id="download-executor:fresh-specialized-worker",
+                    last_seen_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+    async with api_client_factory() as client:
+        stale = await client.get("/api/system/status")
+        assert stale.status_code == 200
+        assert stale.json()["worker"]["healthy"] is False
+        assert stale.json()["worker"]["message"] == "Worker 心跳已过期"
+
+    async with session_factory() as session:
+        refreshed = await session.get(WorkerHeartbeat, job_worker.worker_id)
+        assert refreshed is not None
+        refreshed.last_seen_at = datetime.now(UTC)
+        await session.commit()
+
+    async with api_client_factory() as client:
+        healthy = await client.get("/api/system/status")
+        assert healthy.status_code == 200
+        assert healthy.json()["worker"]["healthy"] is True
+        assert healthy.json()["worker"]["message"] == "Worker 运行正常"
 
 
 @pytest.mark.asyncio
@@ -151,6 +209,93 @@ async def test_live_read_only_endpoints_are_disabled_by_default(
         )
         assert search.status_code == 409
         assert search.json()["error_code"] == "AVISTAZ_LIVE_DISABLED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence_kind", ("confirmed_review", "run_only"))
+async def test_resolve_api_rejects_durable_identity_evidence_without_writes(
+    session_factory: async_sessionmaker[AsyncSession],
+    api_client_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_kind: str,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        enable_tmdb_live=True,
+        tmdb_access_token="test-tmdb-token",
+    )
+    monkeypatch.setattr(workflow_routes, "get_settings", lambda: settings)
+    now = datetime.now(UTC)
+    item = MediaItem(
+        source="nextfind",
+        source_item_id=f"nextfind:resolve-evidence-{evidence_kind}",
+        media_type=MediaType.MOVIE,
+        tmdb_id=501,
+        title="Evidence Movie",
+        identity_confidence=IdentityConfidence.HIGH,
+        metadata_status=MetadataStatus.RESOLVED,
+        workflow_status=WorkflowStatus.IDENTITY_REVIEW,
+        discovered_at=now,
+        updated_at=now,
+    )
+    candidate = MetadataRecord(
+        tmdb_id=501,
+        media_type=MediaType.MOVIE,
+        title="Evidence Movie",
+        english_title="Evidence Movie",
+        confidence=1,
+    )
+    async with session_factory() as session:
+        await get_current_policy(session)
+        session.add(item)
+        await session.flush()
+        if evidence_kind == "confirmed_review":
+            match = MetadataMatch(
+                media_id=item.id,
+                tmdb_id=501,
+                rank=1,
+                score=1,
+                match_reasons=["TMDB_ID_EXACT"],
+                conflicts=[],
+                candidate_snapshot=candidate.model_dump(mode="json"),
+            )
+            session.add(match)
+            await session.flush()
+            session.add(
+                IdentityReview(
+                    media_id=item.id,
+                    metadata_match_id=match.id,
+                    status="CONFIRMED",
+                    confirmed_by="api-test-admin",
+                    candidate_snapshot=candidate.model_dump(mode="json"),
+                )
+            )
+        else:
+            session.add(
+                TorrentSearchRun(
+                    media_id=item.id,
+                    site_id="avistaz",
+                    status=WorkflowStatus.TORRENT_REVIEW,
+                    sanitized_request={},
+                )
+            )
+        await session.commit()
+        jobs_before = await session.scalar(select(func.count()).select_from(Job))
+        audits_before = await session.scalar(select(func.count()).select_from(AuditEvent))
+
+    async with api_client_factory() as client:
+        response = await client.post(f"/api/media/{item.id}/resolve")
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "IDENTITY_ALREADY_CONFIRMED"
+    assert "test-tmdb-token" not in response.text
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.workflow_status == WorkflowStatus.IDENTITY_REVIEW
+        assert refreshed.metadata_status == MetadataStatus.RESOLVED
+        assert await session.scalar(select(func.count()).select_from(Job)) == jobs_before
+        assert await session.scalar(select(func.count()).select_from(AuditEvent)) == audits_before
 
 
 @pytest.mark.asyncio

@@ -125,6 +125,60 @@ async def test_tv_episode_matrix_excludes_future_and_unknown_air_dates() -> None
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_tv_without_a_known_season_count_has_an_unknown_episode_matrix() -> None:
+    def details(request: httpx.Request) -> httpx.Response:
+        name = "中文剧" if request.url.params["language"] == "zh-CN" else "English TV"
+        return httpx.Response(
+            200,
+            json={
+                "id": 21,
+                "name": name,
+                "original_name": "Original TV",
+                "first_air_date": "2026-01-01",
+                "number_of_seasons": None,
+                "number_of_episodes": None,
+            },
+        )
+
+    respx.get(f"{BASE}/3/tv/21").mock(side_effect=details)
+    tmdb = provider()
+    result = await tmdb.get_by_tmdb_id(MediaType.TV, 21)
+    assert result.episode_matrix is None
+    await tmdb.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("season_count", (None, 0))
+@respx.mock
+async def test_public_episode_matrix_skips_season_requests_when_count_is_unknown(
+    season_count: int | None,
+) -> None:
+    details_route = respx.get(f"{BASE}/3/tv/22").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 22,
+                "name": "Unknown Matrix TV",
+                "number_of_seasons": season_count,
+            },
+        )
+    )
+    season_route = respx.get(f"{BASE}/3/tv/22/season/1").mock(
+        return_value=httpx.Response(
+            200,
+            json={"season_number": 1, "episodes": []},
+        )
+    )
+    tmdb = provider()
+
+    assert await tmdb.get_tv_episode_matrix(22) is None
+    assert details_route.call_count == 1
+    assert season_route.call_count == 0
+    await tmdb.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_tmdb_429_and_timeout_are_stable_errors() -> None:
     limited = respx.get(f"{BASE}/3/movie/10/external_ids").mock(
         return_value=httpx.Response(429, json={"status_message": "limit"})
@@ -152,4 +206,3 @@ async def test_tmdb_unmatched_request_cannot_reach_real_network() -> None:
     with respx.mock(assert_all_mocked=True), pytest.raises(AssertionError):
         await tmdb.get_external_ids(MediaType.MOVIE, 99)
     await tmdb.aclose()
-

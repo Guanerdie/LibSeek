@@ -154,7 +154,7 @@ class MetadataRecord(BaseModel):
     year: int | None = None
     number_of_seasons: int | None = Field(default=None, ge=0)
     number_of_episodes: int | None = Field(default=None, ge=0)
-    episode_matrix: dict[int, list[int]] = Field(default_factory=dict)
+    episode_matrix: dict[int, list[int]] | None = None
     poster_path: str | None = None
     backdrop_path: str | None = None
     status: str | None = None
@@ -163,11 +163,8 @@ class MetadataRecord(BaseModel):
 
     @field_validator("episode_matrix", mode="before")
     @classmethod
-    def validate_episode_matrix(cls, value: object) -> EpisodeMatrix:
-        normalized = normalize_episode_matrix(value)
-        if normalized is None:
-            raise ValueError("episode matrix cannot be null")
-        return normalized
+    def validate_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
+        return normalize_episode_matrix(value)
 
 
 class TorrentCandidate(BaseModel):

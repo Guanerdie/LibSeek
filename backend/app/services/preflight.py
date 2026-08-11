@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import hmac
 import json
 import re
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
+from urllib.parse import urlsplit
 
 from app.adapters.base import ReadOnlyDownloaderAdapter
 from app.core.config import Settings
@@ -31,8 +33,17 @@ PREFLIGHT_CHECK_CODES = (
 
 
 def preflight_policy_fingerprint(settings: Settings) -> str:
+    normalized_base_url = _normalized_qb_base_url_for_policy(settings)
+    allowed_hosts = sorted(
+        {host.strip().casefold() for host in settings.qb_allowed_hosts if host.strip()}
+    )
     policy = {
-        "version": 1,
+        "version": 2,
+        "downloader": "qbittorrent",
+        "base_url": normalized_base_url,
+        "target_instance_ref": settings.qb_target_instance_ref,
+        "allowed_hosts": allowed_hosts,
+        "allow_insecure_http": settings.qb_allow_insecure_http,
         "target_category": settings.qb_target_category,
         "target_save_path": settings.qb_target_save_path,
         "allowed_save_paths": sorted(settings.qb_allowed_save_paths),
@@ -48,11 +59,84 @@ def preflight_policy_fingerprint(settings: Settings) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def require_preflight_policy_current(
+    expected_fingerprint: str,
+    settings: Settings,
+) -> None:
+    current_fingerprint = preflight_policy_fingerprint(settings)
+    if not hmac.compare_digest(expected_fingerprint, current_fingerprint):
+        raise AppError(
+            "PREFLIGHT_CONFIG_CHANGED",
+            "qBittorrent 预检目标配置已变化，请重新预检并批准",
+            status_code=409,
+        )
+
+
+def _normalized_qb_base_url_for_policy(settings: Settings) -> str:
+    try:
+        configured_url = settings.qb_base_url_value()
+    except OSError as exc:
+        raise AppError(
+            "PREFLIGHT_TARGET_CONFIG_UNAVAILABLE",
+            "qBittorrent 预检目标配置无法读取",
+            status_code=409,
+        ) from exc
+    if not configured_url:
+        raise AppError(
+            "PREFLIGHT_TARGET_CONFIG_UNAVAILABLE",
+            "qBittorrent 预检目标尚未配置",
+            status_code=409,
+        )
+
+    raw_url = configured_url.strip()
+    try:
+        parsed = urlsplit(raw_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise AppError(
+            "PREFLIGHT_TARGET_CONFIG_INVALID",
+            "qBittorrent 预检目标地址不符合安全配置",
+            status_code=409,
+        ) from exc
+
+    scheme = parsed.scheme.casefold()
+    host = (parsed.hostname or "").casefold()
+    allowed_hosts = {
+        allowed.strip().casefold()
+        for allowed in settings.qb_allowed_hosts
+        if allowed.strip()
+    }
+    allowed_schemes = {"https", "http"} if settings.qb_allow_insecure_http else {"https"}
+    if (
+        configured_url != raw_url
+        or any(ord(character) < 33 or ord(character) == 127 for character in raw_url)
+        or scheme not in allowed_schemes
+        or not host
+        or host not in allowed_hosts
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise AppError(
+            "PREFLIGHT_TARGET_CONFIG_INVALID",
+            "qBittorrent 预检目标地址不符合安全配置",
+            status_code=409,
+        )
+
+    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    normalized_host = f"[{host}]" if ":" in host else host
+    normalized_port = "" if port is None or default_port else f":{port}"
+    normalized_path = parsed.path.rstrip("/")
+    return f"{scheme}://{normalized_host}{normalized_port}{normalized_path}"
+
+
 async def evaluate_preflight(
     adapter: ReadOnlyDownloaderAdapter,
     snapshot: ApprovalCandidateSnapshot,
     settings: Settings,
 ) -> PreflightResult:
+    policy_fingerprint = preflight_policy_fingerprint(settings)
     checks: list[PreflightCheck] = []
     application_version: str | None = None
     torrents: list[QbTorrent] | None = None
@@ -143,7 +227,7 @@ async def evaluate_preflight(
         overall_status=overall,
         checks=checks,
         checked_at=utc_now(),
-        policy_fingerprint=preflight_policy_fingerprint(settings),
+        policy_fingerprint=policy_fingerprint,
     )
 
 

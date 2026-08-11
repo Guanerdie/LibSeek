@@ -4,13 +4,19 @@ import { onMounted } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import { useMediaStore } from '../stores/media'
+import type { MediaItem } from '../types'
 import { formatShanghai } from '../utils/format'
+import { hasConfirmedIdentityStatus } from '../utils/identity'
 
 const store = useMediaStore()
 onMounted(() => store.load())
 
 function episodeValue(value: number | null): string {
   return value === null ? '—' : String(value)
+}
+
+function canOpenTorrentCandidates(item: MediaItem): boolean {
+  return hasConfirmedIdentityStatus(item.workflow_status)
 }
 </script>
 
@@ -48,7 +54,21 @@ function episodeValue(value: number | null): string {
             <td><span v-if="item.missing_episodes?.length" class="missing-list">{{ item.missing_episodes.join(', ') }}</span><span v-else>—</span></td>
             <td><span :class="['confidence', item.identity_confidence === 'HIGH' ? 'high' : 'confirm']">{{ item.identity_confidence === 'HIGH' ? '高' : '待确认' }}</span></td>
             <td>{{ formatShanghai(item.discovered_at) }}</td>
-            <td><div class="row-actions"><a :href="`/media/${item.id}/identity`">身份</a><a :href="`/media/${item.id}/torrents`">PT 候选</a></div></td>
+            <td>
+              <div class="row-actions">
+                <a :href="`/media/${item.id}/identity`">{{ canOpenTorrentCandidates(item) ? '身份' : '确认身份' }}</a>
+                <a v-if="canOpenTorrentCandidates(item)" :href="`/media/${item.id}/torrents`">PT 候选</a>
+                <button
+                  v-else
+                  class="button small"
+                  type="button"
+                  disabled
+                  title="必须先完成身份确认"
+                >
+                  PT 候选（需先确认）
+                </button>
+              </div>
+            </td>
           </tr>
         </tbody>
       </table>

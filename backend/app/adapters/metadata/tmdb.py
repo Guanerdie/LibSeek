@@ -219,8 +219,8 @@ class TmdbProvider(MetadataProvider):
                 aliases.append(value)
         year = self._year(chinese.release_date or chinese.first_air_date)
         external_ids = self._external_id_dict(chinese.external_ids)
-        matrix: dict[int, list[int]] = {}
-        if media_type == MediaType.TV:
+        matrix: dict[int, list[int]] | None = None
+        if media_type == MediaType.TV and (chinese.number_of_seasons or 0) > 0:
             matrix = await self._episode_matrix(tmdb_id, chinese.number_of_seasons or 0)
         return MetadataRecord(
             tmdb_id=chinese.id,
@@ -273,8 +273,10 @@ class TmdbProvider(MetadataProvider):
         except ValidationError as exc:
             raise AppError("TMDB_VALIDATION_ERROR", "TMDB 外部 ID 校验失败") from exc
 
-    async def get_tv_episode_matrix(self, tmdb_id: int) -> dict[int, list[int]]:
+    async def get_tv_episode_matrix(self, tmdb_id: int) -> dict[int, list[int]] | None:
         details = await self._details(MediaType.TV, tmdb_id, "zh-CN", append=False)
+        if (details.number_of_seasons or 0) <= 0:
+            return None
         return await self._episode_matrix(tmdb_id, details.number_of_seasons or 0)
 
     async def _episode_matrix(self, tmdb_id: int, season_count: int) -> dict[int, list[int]]:
@@ -325,4 +327,3 @@ class TmdbProvider(MetadataProvider):
         if value.tvdb_id is not None:
             result["tvdb_id"] = str(value.tvdb_id)
         return result
-

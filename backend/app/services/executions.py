@@ -51,6 +51,7 @@ from app.services.automation_policy import (
     verify_automation_decision,
     verify_policy_revision,
 )
+from app.services.preflight import require_preflight_policy_current
 from app.services.torrent_validation import ValidatedTorrent
 
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{15,199}$")
@@ -168,6 +169,12 @@ async def create_execution_intent(
     now = utc_now()
     _require_approved(approval, session, now)
     plan = await _get_verified_plan(session, approval)
+    require_preflight_policy_current(plan.preflight_policy_fingerprint, settings)
+    current_target_fingerprint = qb_target_fingerprint(
+        settings,
+        plan,
+        request.launch_mode,
+    )
 
     existing_execution = await session.scalar(
         select(DownloadExecution).where(DownloadExecution.approval_id == approval.id).limit(1)
@@ -219,7 +226,7 @@ async def create_execution_intent(
         nonce_sha256=hash_secret(nonce),
         approval_snapshot_hash=approval.snapshot_hash,
         plan_hash=plan.plan_hash,
-        qb_target_fingerprint=qb_target_fingerprint(settings, plan, request.launch_mode),
+        qb_target_fingerprint=current_target_fingerprint,
         launch_mode=request.launch_mode,
         origin=origin,
         automation_policy_revision_id=automation_policy_revision_id,
@@ -317,6 +324,7 @@ async def execute_approved_plan(
 
     _require_approved(approval, session, now)
     plan = await _get_verified_plan(session, approval)
+    require_preflight_policy_current(plan.preflight_policy_fingerprint, settings)
     approval_execution = await session.scalar(
         select(DownloadExecution).where(DownloadExecution.approval_id == approval.id).limit(1)
     )

@@ -28,6 +28,7 @@ const selectedSiteSupportsMedia = computed(() =>
 const canCreateSearch = computed(
   () =>
     canOperate.value &&
+    store.identityGatePassed &&
     !store.catalogLoading &&
     !store.catalogError &&
     Boolean(selectedSite.value?.available_for_search) &&
@@ -159,7 +160,17 @@ function searchModesLabel(site: PtSiteCatalogItem): string {
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
 
     <template v-if="store.media && !store.loading">
-      <form class="search-preferences" @submit.prevent="createSearch">
+      <div v-if="!store.identityGatePassed" class="notice-state identity-required" role="status">
+        <strong>需要先确认影视身份</strong>
+        <span>
+          {{ canOperate
+            ? 'PT 搜索必须关联一条已确认的身份审核记录。'
+            : '当前角色可查看身份候选；身份确认需要操作者权限。' }}
+        </span>
+        <a class="button secondary" :href="`/media/${mediaId}/identity`">前往身份确认</a>
+      </div>
+
+      <form v-else class="search-preferences" @submit.prevent="createSearch">
         <div class="preference-heading"><div><span class="eyebrow">SEARCH PREFERENCES</span><h2>PT 搜索偏好</h2></div><button class="button small" type="button" :disabled="store.working" @click="resetPreferences">恢复默认</button></div>
 
         <div class="pt-site-selection">

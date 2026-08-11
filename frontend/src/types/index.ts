@@ -130,7 +130,7 @@ export interface MetadataRecord {
   year: number | null
   number_of_seasons: number | null
   number_of_episodes: number | null
-  episode_matrix: Record<string, number[]>
+  episode_matrix: Record<string, number[]> | null
   poster_path: string | null
   backdrop_path: string | null
   status: string | null

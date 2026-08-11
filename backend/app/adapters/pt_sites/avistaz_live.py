@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -239,15 +241,39 @@ class AvistaZAdapter(PtSiteAdapter):
                     )
                 if response.status_code != 429:
                     return response
+                retry_after = self._retry_after_seconds(response.retry_after)
                 if attempt == 2:
                     raise AppError(
                         "AVISTAZ_RATE_LIMITED",
                         "AvistaZ 请求受到限速，请稍后重试",
                         status_code=429,
                         retryable=True,
+                        details=(
+                            {"retry_after_seconds": retry_after}
+                            if retry_after is not None
+                            else None
+                        ),
                     )
-                await self.sleep(float(2**attempt))
+                await self.sleep(max(float(2**attempt), retry_after or 0.0))
         raise AppError("AVISTAZ_RATE_LIMITED", "AvistaZ 请求受到限速", retryable=True)
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            seconds = (parsed - datetime.now(UTC)).total_seconds()
+        if not math.isfinite(seconds):
+            return None
+        return min(3600.0, max(0.0, seconds))
 
     async def _authenticate(self) -> None:
         response = await self._send(

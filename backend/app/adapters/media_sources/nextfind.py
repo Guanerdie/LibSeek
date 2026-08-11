@@ -135,6 +135,7 @@ class NextFindAdapter(MediaSourceAdapter):
             cookies=self.cookies,
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
+            trust_env=False,
             follow_redirects=False,
             headers={"Accept": "application/json, application/x-ndjson"},
         )
@@ -192,6 +193,7 @@ class NextFindAdapter(MediaSourceAdapter):
         *,
         params: dict[str, str | int] | None = None,
         json_body: dict[str, str] | None = None,
+        allow_redirects: bool = True,
     ) -> AsyncIterator[httpx.Response]:
         current_url = urljoin(f"{self.base_url}/", path.lstrip("/"))
         current_method = method
@@ -220,7 +222,7 @@ class NextFindAdapter(MediaSourceAdapter):
                         status_code=502,
                         retryable=True,
                     ) from exc
-                if not response.is_redirect:
+                if not response.is_redirect or not allow_redirects:
                     yield response
                     return
                 location = response.headers.get("location")
@@ -231,12 +233,13 @@ class NextFindAdapter(MediaSourceAdapter):
                     raise AppError("UPSTREAM_INVALID_REDIRECT", "NextFind 返回了无效跳转")
                 redirect_url = urljoin(current_url, location)
                 validate_external_url(redirect_url, self.allowed_hosts)
-                if current_body is not None and self._origin(redirect_url) != self._origin(
-                    current_url
-                ):
+                carries_authenticated_state = self._authenticated or bool(self.cookies)
+                if (
+                    current_body is not None or carries_authenticated_state
+                ) and self._origin(redirect_url) != self._origin(current_url):
                     raise AppError(
                         "UPSTREAM_CROSS_ORIGIN_REDIRECT",
-                        "NextFind 认证请求拒绝跨源跳转",
+                        "NextFind 请求拒绝跨源跳转",
                         status_code=502,
                     )
                 current_url = redirect_url
@@ -289,11 +292,12 @@ class NextFindAdapter(MediaSourceAdapter):
         if "json" not in content_type:
             raise AppError("UPSTREAM_NON_JSON", "NextFind 返回了非 JSON 响应", status_code=502)
 
-    async def authenticate(self) -> None:
+    async def authenticate(self, *, allow_redirects: bool = True) -> None:
         async with self._open_response(
             "POST",
             "/api/admin/login",
             json_body={"username": self.username, "password": self.password},
+            allow_redirects=allow_redirects,
         ) as response:
             self._raise_for_status(response, authenticating=True)
             self._require_json_content(response)
@@ -307,6 +311,28 @@ class NextFindAdapter(MediaSourceAdapter):
         if payload.get("success") is False or payload.get("ok") is False:
             raise AppError("AUTH_FAILED", "NextFind 登录失败", status_code=401)
         self._authenticated = True
+
+    async def read_first_discover_page_for_contract_probe(self) -> tuple[str, bytes]:
+        """Read only the first discover page for the manual schema contract probe."""
+        if not self._authenticated:
+            await self.authenticate(allow_redirects=False)
+        params: dict[str, str | int] = {
+            "status": "未入库",
+            "page": 1,
+            "page_size": 100,
+            "sort": "updated_at",
+        }
+        async with self._open_response(
+            "GET",
+            "/api/discover",
+            params=params,
+            allow_redirects=False,
+        ) as response:
+            self._raise_for_status(response)
+            self._require_json_content(response)
+            content_type = response.headers.get("content-type", "").lower()
+            payload_bytes = await self._read_limited(response)
+        return content_type, payload_bytes
 
     async def list_missing_media(self) -> MediaDiscoveryResult:
         if not self._authenticated:

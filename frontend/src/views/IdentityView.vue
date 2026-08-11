@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -13,7 +13,7 @@ const store = useIdentityStore()
 const mediaId = computed(() => String(route.params.id))
 const canOperate = computed(() => auth.hasRole('operator'))
 
-onMounted(() => store.load(mediaId.value))
+watch(mediaId, (value) => void store.load(value), { immediate: true })
 
 function posterUrl(path: string | null): string | null {
   return path ? `https://image.tmdb.org/t/p/w342${path}` : null
@@ -35,9 +35,15 @@ function confirm(matchId: string): void {
       <div class="header-actions">
         <a class="button secondary" href="/media">返回列表</a>
         <button class="button secondary" :disabled="store.loading || store.working" @click="store.load(mediaId)">刷新候选</button>
-        <button class="button primary" :disabled="store.working || !canOperate" @click="store.resolve(mediaId)">
+        <button class="button primary" :disabled="store.loading || store.working || !canOperate || store.identityGatePassed" @click="store.resolve(mediaId)">
           {{ store.working ? '处理中…' : '重新解析' }}
         </button>
+        <a
+          v-if="store.identityGatePassed"
+          class="button primary"
+          data-testid="continue-pt-search"
+          :href="`/media/${mediaId}/torrents`"
+        >继续 PT 搜索</a>
       </div>
     </PageHeader>
 
@@ -85,7 +91,7 @@ function confirm(matchId: string): void {
             <div v-if="match.conflicts.length" class="warning-list"><span v-for="conflict in match.conflicts" :key="conflict">{{ conflict }}</span></div>
             <button
               class="button primary confirm-button"
-              :disabled="store.working || !canOperate || store.media.workflow_status === 'IDENTITY_CONFIRMED'"
+              :disabled="store.working || !canOperate || store.identityGatePassed"
               @click="confirm(match.id)"
             >
               确认此身份

@@ -25,15 +25,18 @@ logger = logging.getLogger("unin.worker")
 
 def build_nextfind_adapter() -> NextFindAdapter:
     settings = get_settings()
-    credentials = settings.nextfind_credentials()
-    if credentials is None:
-        raise AppError("NEXTFIND_NOT_CONFIGURED", "NextFind 尚未配置运行时凭据")
     validated_base_url = validate_external_url(
         settings.nextfind_base_url, settings.allowed_external_hosts
+    )
+    validated_base_url = validate_external_url(
+        validated_base_url, settings.nextfind_allowed_hosts
     )
     nextfind_host = urlparse(validated_base_url).hostname
     if nextfind_host is None:
         raise AppError("INVALID_EXTERNAL_URL", "NextFind 地址格式无效", status_code=400)
+    credentials = settings.nextfind_credentials()
+    if credentials is None:
+        raise AppError("NEXTFIND_NOT_CONFIGURED", "NextFind 尚未配置运行时凭据")
     username, password = credentials
     return NextFindAdapter(
         base_url=validated_base_url,

@@ -10,7 +10,9 @@ from app.adapters.metadata.mock_tmdb import MockTmdbProvider
 from app.adapters.pt_sites.avistaz import AvistaZMockAdapter
 from app.errors import AppError
 from app.models.entities import (
+    AuditEvent,
     IdentityReview,
+    Job,
     MediaItem,
     MetadataMatch,
     TorrentCandidateRecord,
@@ -18,6 +20,7 @@ from app.models.entities import (
 )
 from app.models.enums import (
     IdentityConfidence,
+    JobStatus,
     MediaType,
     MetadataStatus,
     WorkflowStatus,
@@ -25,9 +28,11 @@ from app.models.enums import (
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
 from app.schemas.entities import IdentityConfirmationRequest, TorrentSearchCreateRequest
 from app.services.workflow import (
+    METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE,
     confirm_identity,
     enqueue_metadata_resolution,
     enqueue_torrent_search,
+    metadata_resolution_input_fingerprint,
 )
 from app.workers.processor import JobProcessor
 from tests.test_discovery_worker import FakeMediaSource
@@ -53,7 +58,7 @@ def record(
         english_title="Test Movie" if media_type == MediaType.MOVIE else "Test Show",
         original_title="Original",
         year=2026,
-        episode_matrix=episode_matrix or {},
+        episode_matrix=episode_matrix,
         confidence=1,
     )
 
@@ -190,6 +195,36 @@ async def test_exact_tv_metadata_derives_missing_from_aired_minus_local_matrix(
         refreshed = await session.get(MediaItem, item.id)
         assert refreshed is not None
         assert refreshed.missing_episodes == ["S01E02", "S01E04", "S02E02"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_tmdb_episode_matrix_preserves_upstream_missing_episodes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    item = media(tmdb_id=17, media_type=MediaType.TV)
+    item.local_episode_matrix = {1: [1, 2]}
+    item.missing_episodes = ["S01E03"]
+    async with session_factory() as session:
+        session.add(item)
+        await session.commit()
+        await enqueue_metadata_resolution(session, item, max_attempts=3)
+        await session.commit()
+    provider = RecordingProvider(
+        [record(17, media_type=MediaType.TV, episode_matrix=None)]
+    )
+    processor = JobProcessor(
+        session_factory,
+        "worker-tv-unknown-matrix",
+        FakeMediaSource,
+        lambda: provider,
+    )
+
+    assert await processor.run_once() is True
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.missing_episodes == ["S01E03"]
 
 
 @pytest.mark.asyncio
@@ -330,6 +365,560 @@ async def test_manual_tv_identity_confirmation_derives_missing_from_selected_can
         await session.commit()
 
         assert item.missing_episodes == ["S01E02", "S01E04"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evidence_kind", ("confirmed_review", "run_only"))
+async def test_metadata_resolution_rejects_durable_identity_evidence_without_writes(
+    session_factory: async_sessionmaker[AsyncSession],
+    evidence_kind: str,
+) -> None:
+    item = media(tmdb_id=70)
+    item.workflow_status = WorkflowStatus.IDENTITY_REVIEW
+    item.metadata_status = MetadataStatus.RESOLVED
+    candidate = record(70)
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        if evidence_kind == "confirmed_review":
+            match = MetadataMatch(
+                media_id=item.id,
+                tmdb_id=70,
+                rank=1,
+                score=1,
+                match_reasons=["TMDB_ID_EXACT"],
+                conflicts=[],
+                candidate_snapshot=candidate.model_dump(mode="json"),
+            )
+            session.add(match)
+            await session.flush()
+            session.add(
+                IdentityReview(
+                    media_id=item.id,
+                    metadata_match_id=match.id,
+                    status="CONFIRMED",
+                    confirmed_by="operator-a",
+                    candidate_snapshot=candidate.model_dump(mode="json"),
+                )
+            )
+        else:
+            session.add(
+                TorrentSearchRun(
+                    media_id=item.id,
+                    site_id="avistaz",
+                    status=WorkflowStatus.TORRENT_REVIEW,
+                    sanitized_request={},
+                )
+            )
+        await session.commit()
+
+        jobs_before = await session.scalar(select(func.count()).select_from(Job))
+        audits_before = await session.scalar(select(func.count()).select_from(AuditEvent))
+        matches_before = await session.scalar(select(func.count()).select_from(MetadataMatch))
+        with pytest.raises(AppError) as caught:
+            await enqueue_metadata_resolution(session, item, max_attempts=3)
+
+        assert caught.value.error_code == "IDENTITY_ALREADY_CONFIRMED"
+        assert caught.value.status_code == 409
+        assert not session.new
+        assert not session.dirty
+        assert await session.scalar(select(func.count()).select_from(Job)) == jobs_before
+        assert await session.scalar(select(func.count()).select_from(AuditEvent)) == audits_before
+        assert (
+            await session.scalar(select(func.count()).select_from(MetadataMatch))
+            == matches_before
+        )
+        assert item.workflow_status == WorkflowStatus.IDENTITY_REVIEW
+        assert item.metadata_status == MetadataStatus.RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_run_only_history_blocks_identity_replacement_and_new_search_without_writes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    item = media(tmdb_id=80)
+    item.workflow_status = WorkflowStatus.TORRENT_REVIEW
+    candidate = record(81)
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        match = MetadataMatch(
+            media_id=item.id,
+            tmdb_id=81,
+            rank=1,
+            score=0.9,
+            match_reasons=["TITLE_EXACT"],
+            conflicts=[],
+            candidate_snapshot=candidate.model_dump(mode="json"),
+        )
+        session.add_all(
+            [
+                match,
+                TorrentSearchRun(
+                    media_id=item.id,
+                    site_id="avistaz",
+                    status=WorkflowStatus.TORRENT_REVIEW,
+                    sanitized_request={},
+                ),
+            ]
+        )
+        await session.commit()
+        jobs_before = await session.scalar(select(func.count()).select_from(Job))
+        audits_before = await session.scalar(select(func.count()).select_from(AuditEvent))
+        runs_before = await session.scalar(select(func.count()).select_from(TorrentSearchRun))
+
+        with pytest.raises(AppError) as confirmation_error:
+            await confirm_identity(
+                session,
+                item,
+                IdentityConfirmationRequest(metadata_match_id=match.id),
+                actor="operator-a",
+            )
+        assert confirmation_error.value.error_code == "IDENTITY_CONFIRMATION_DUPLICATE"
+
+        with pytest.raises(AppError) as search_error:
+            await enqueue_torrent_search(
+                session,
+                item,
+                TorrentSearchCreateRequest(site_id="avistaz"),
+                max_attempts=3,
+            )
+        assert search_error.value.error_code == "IDENTITY_CONFIRMATION_REQUIRED"
+        assert not session.new
+        assert not session.dirty
+        assert await session.scalar(select(func.count()).select_from(Job)) == jobs_before
+        assert await session.scalar(select(func.count()).select_from(AuditEvent)) == audits_before
+        assert (
+            await session.scalar(select(func.count()).select_from(TorrentSearchRun))
+            == runs_before
+        )
+        assert await session.scalar(select(func.count()).select_from(IdentityReview)) == 0
+        assert item.tmdb_id == 80
+        assert item.workflow_status == WorkflowStatus.TORRENT_REVIEW
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "audit_event_type",
+    ("IDENTITY_CONFIRMED_MANUALLY", "IDENTITY_CONFIRMED_AUTOMATICALLY"),
+)
+async def test_confirmation_cancels_active_resolution_and_late_completion_is_inert(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit_event_type: str,
+) -> None:
+    item = media(tmdb_id=90)
+    candidate = record(90)
+    processor = JobProcessor(
+        session_factory,
+        "late-metadata-worker",
+        FakeMediaSource,
+        lambda: MockTmdbProvider(),
+    )
+    lease_token = "late-metadata-lease"
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        match = MetadataMatch(
+            media_id=item.id,
+            tmdb_id=90,
+            rank=1,
+            score=1,
+            match_reasons=["TMDB_ID_EXACT"],
+            conflicts=[],
+            candidate_snapshot=candidate.model_dump(mode="json"),
+        )
+        session.add(match)
+        await session.commit()
+        job, deduplicated = await enqueue_metadata_resolution(session, item, max_attempts=3)
+        assert deduplicated is False
+        job.status = JobStatus.RUNNING
+        job.attempts = 1
+        job.locked_at = datetime.now(UTC)
+        job.locked_by = processor.worker_id
+        job.lease_token = lease_token
+        await session.commit()
+
+        await confirm_identity(
+            session,
+            item,
+            IdentityConfirmationRequest(metadata_match_id=match.id),
+            actor="operator-a",
+            audit_event_type=audit_event_type,
+        )
+        await session.commit()
+
+        cancelled = await session.get(Job, job.id)
+        assert cancelled is not None
+        assert cancelled.status == JobStatus.CANCELLED
+        assert cancelled.error_code == METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE
+        assert cancelled.locked_at is None
+        assert cancelled.locked_by is None
+        assert cancelled.lease_token is None
+        assert item.workflow_status == WorkflowStatus.IDENTITY_CONFIRMED
+        assert item.metadata_status == MetadataStatus.RESOLVED
+        matches_before = await session.scalar(select(func.count()).select_from(MetadataMatch))
+        audits_before = await session.scalar(select(func.count()).select_from(AuditEvent))
+        cancellation_events = list(
+            (
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.entity_id == job.id,
+                        AuditEvent.event_type == "METADATA_RESOLUTION_CANCELLED",
+                    )
+                )
+            ).all()
+        )
+        assert len(cancellation_events) == 1
+        assert cancellation_events[0].sanitized_details["error_code"] == (
+            METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE
+        )
+
+    await processor._complete_metadata_resolution(
+        job.id,
+        item.id,
+        [candidate],
+        lease_token=lease_token,
+    )
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.workflow_status == WorkflowStatus.IDENTITY_CONFIRMED
+        assert refreshed.metadata_status == MetadataStatus.RESOLVED
+        assert (
+            await session.scalar(select(func.count()).select_from(MetadataMatch))
+            == matches_before
+        )
+        assert await session.scalar(select(func.count()).select_from(AuditEvent)) == audits_before
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "METADATA_CANDIDATES_READY")
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence_kind", "expected_status", "expected_evidence"),
+    (
+        (
+            "confirmed_review",
+            WorkflowStatus.IDENTITY_CONFIRMED,
+            "CONFIRMED_IDENTITY_REVIEW",
+        ),
+        ("run_only", WorkflowStatus.TORRENT_REVIEW, "TORRENT_SEARCH_HISTORY"),
+    ),
+)
+async def test_late_completion_cancels_finalized_identity_job_without_candidate_pollution(
+    session_factory: async_sessionmaker[AsyncSession],
+    evidence_kind: str,
+    expected_status: WorkflowStatus,
+    expected_evidence: str,
+) -> None:
+    item = media(tmdb_id=91)
+    item.workflow_status = expected_status
+    item.metadata_status = MetadataStatus.RESOLVED
+    candidate = record(91)
+    processor = JobProcessor(
+        session_factory,
+        "legacy-run-metadata-worker",
+        FakeMediaSource,
+        lambda: MockTmdbProvider(),
+    )
+    lease_token = "legacy-run-metadata-lease"
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        job = Job(
+            job_type=f"RESOLVE_METADATA:{item.id}",
+            status=JobStatus.RUNNING,
+            payload={
+                "media_id": item.id,
+                "input_fingerprint": metadata_resolution_input_fingerprint(item),
+                "read_only": True,
+            },
+            attempts=1,
+            max_attempts=3,
+            locked_at=datetime.now(UTC),
+            locked_by=processor.worker_id,
+            lease_token=lease_token,
+        )
+        session.add(job)
+        if evidence_kind == "confirmed_review":
+            match = MetadataMatch(
+                media_id=item.id,
+                tmdb_id=91,
+                rank=1,
+                score=1,
+                match_reasons=["TMDB_ID_EXACT"],
+                conflicts=[],
+                candidate_snapshot=candidate.model_dump(mode="json"),
+            )
+            session.add(match)
+            await session.flush()
+            session.add(
+                IdentityReview(
+                    media_id=item.id,
+                    metadata_match_id=match.id,
+                    status="CONFIRMED",
+                    confirmed_by="legacy-confirmation",
+                    candidate_snapshot=candidate.model_dump(mode="json"),
+                )
+            )
+        else:
+            session.add(
+                TorrentSearchRun(
+                    media_id=item.id,
+                    site_id="avistaz",
+                    status=WorkflowStatus.TORRENT_REVIEW,
+                    sanitized_request={},
+                )
+            )
+        await session.commit()
+        matches_before = await session.scalar(select(func.count()).select_from(MetadataMatch))
+
+    await processor._complete_metadata_resolution(
+        job.id,
+        item.id,
+        [candidate],
+        lease_token=lease_token,
+    )
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        cancelled = await session.get(Job, job.id)
+        assert refreshed is not None
+        assert refreshed.workflow_status == expected_status
+        assert refreshed.metadata_status == MetadataStatus.RESOLVED
+        assert cancelled is not None
+        assert cancelled.status == JobStatus.CANCELLED
+        assert cancelled.error_code == METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE
+        assert cancelled.locked_at is None
+        assert cancelled.locked_by is None
+        assert cancelled.lease_token is None
+        assert (
+            await session.scalar(select(func.count()).select_from(MetadataMatch))
+            == matches_before
+        )
+        events = list((await session.scalars(select(AuditEvent))).all())
+        assert [event.event_type for event in events] == ["METADATA_RESOLUTION_CANCELLED"]
+        assert events[0].entity_id == job.id
+        assert events[0].sanitized_details["evidence"] == expected_evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence_kind", "expected_status", "expected_evidence"),
+    (
+        (
+            "confirmed_review",
+            WorkflowStatus.IDENTITY_CONFIRMED,
+            "CONFIRMED_IDENTITY_REVIEW",
+        ),
+        ("run_only", WorkflowStatus.TORRENT_REVIEW, "TORRENT_SEARCH_HISTORY"),
+    ),
+)
+async def test_finalized_identity_cancels_legacy_resolution_before_provider_factory(
+    session_factory: async_sessionmaker[AsyncSession],
+    evidence_kind: str,
+    expected_status: WorkflowStatus,
+    expected_evidence: str,
+) -> None:
+    item = media(tmdb_id=92)
+    item.workflow_status = expected_status
+    item.metadata_status = MetadataStatus.RESOLVED
+    candidate = record(92)
+    provider_factory_calls = 0
+
+    def forbidden_provider_factory() -> MockTmdbProvider:
+        nonlocal provider_factory_calls
+        provider_factory_calls += 1
+        raise AssertionError("finalized identity must be checked before provider creation")
+
+    processor = JobProcessor(
+        session_factory,
+        "legacy-finalized-metadata-worker",
+        FakeMediaSource,
+        forbidden_provider_factory,
+    )
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        job = Job(
+            job_type=f"RESOLVE_METADATA:{item.id}",
+            status=JobStatus.PENDING,
+            payload={
+                "media_id": item.id,
+                "input_fingerprint": metadata_resolution_input_fingerprint(item),
+                "read_only": True,
+            },
+            max_attempts=3,
+        )
+        session.add(job)
+        if evidence_kind == "confirmed_review":
+            match = MetadataMatch(
+                media_id=item.id,
+                tmdb_id=92,
+                rank=1,
+                score=1,
+                match_reasons=["TMDB_ID_EXACT"],
+                conflicts=[],
+                candidate_snapshot=candidate.model_dump(mode="json"),
+            )
+            session.add(match)
+            await session.flush()
+            session.add(
+                IdentityReview(
+                    media_id=item.id,
+                    metadata_match_id=match.id,
+                    status="CONFIRMED",
+                    confirmed_by="legacy-confirmation",
+                    candidate_snapshot=candidate.model_dump(mode="json"),
+                )
+            )
+        else:
+            session.add(
+                TorrentSearchRun(
+                    media_id=item.id,
+                    site_id="avistaz",
+                    status=WorkflowStatus.TORRENT_REVIEW,
+                    sanitized_request={},
+                )
+            )
+        await session.commit()
+
+    assert await processor.run_once() is True
+    assert provider_factory_calls == 0
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        cancelled = await session.get(Job, job.id)
+        assert refreshed is not None
+        assert refreshed.workflow_status == expected_status
+        assert refreshed.metadata_status == MetadataStatus.RESOLVED
+        assert cancelled is not None
+        assert cancelled.status == JobStatus.CANCELLED
+        assert cancelled.error_code == METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE
+        events = list(
+            (
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.entity_id == job.id,
+                        AuditEvent.event_type == "METADATA_RESOLUTION_CANCELLED",
+                    )
+                )
+            ).all()
+        )
+        assert len(events) == 1
+        assert events[0].sanitized_details["evidence"] == expected_evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evidence_kind", "expected_status"),
+    (
+        ("confirmed_review", WorkflowStatus.IDENTITY_CONFIRMED),
+        ("run_only", WorkflowStatus.TORRENT_REVIEW),
+    ),
+)
+async def test_metadata_failure_recheck_preserves_finalized_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+    evidence_kind: str,
+    expected_status: WorkflowStatus,
+) -> None:
+    item = media(tmdb_id=93)
+    item.workflow_status = expected_status
+    item.metadata_status = MetadataStatus.RESOLVED
+    candidate = record(93)
+    processor = JobProcessor(
+        session_factory,
+        "late-failing-metadata-worker",
+        FakeMediaSource,
+        lambda: MockTmdbProvider(),
+    )
+    lease_token = "late-failing-metadata-lease"
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        job = Job(
+            job_type=f"RESOLVE_METADATA:{item.id}",
+            status=JobStatus.RUNNING,
+            payload={
+                "media_id": item.id,
+                "input_fingerprint": metadata_resolution_input_fingerprint(item),
+                "read_only": True,
+            },
+            attempts=1,
+            max_attempts=3,
+            locked_at=datetime.now(UTC),
+            locked_by=processor.worker_id,
+            lease_token=lease_token,
+        )
+        session.add(job)
+        if evidence_kind == "confirmed_review":
+            match = MetadataMatch(
+                media_id=item.id,
+                tmdb_id=93,
+                rank=1,
+                score=1,
+                match_reasons=["TMDB_ID_EXACT"],
+                conflicts=[],
+                candidate_snapshot=candidate.model_dump(mode="json"),
+            )
+            session.add(match)
+            await session.flush()
+            session.add(
+                IdentityReview(
+                    media_id=item.id,
+                    metadata_match_id=match.id,
+                    status="CONFIRMED",
+                    confirmed_by="legacy-confirmation",
+                    candidate_snapshot=candidate.model_dump(mode="json"),
+                )
+            )
+        else:
+            session.add(
+                TorrentSearchRun(
+                    media_id=item.id,
+                    site_id="avistaz",
+                    status=WorkflowStatus.TORRENT_REVIEW,
+                    sanitized_request={},
+                )
+            )
+        await session.commit()
+
+    await processor._fail(
+        job.id,
+        AppError(
+            "TMDB_UNAVAILABLE",
+            "TMDB unavailable",
+            retryable=True,
+            details={"retry_after_seconds": 120},
+        ),
+        lease_token=lease_token,
+    )
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        cancelled = await session.get(Job, job.id)
+        assert refreshed is not None
+        assert refreshed.workflow_status == expected_status
+        assert refreshed.metadata_status == MetadataStatus.RESOLVED
+        assert cancelled is not None
+        assert cancelled.status == JobStatus.CANCELLED
+        assert cancelled.error_code == METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE
+        assert cancelled.next_retry_at is None
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "METADATA_RESOLUTION_RETRY_SCHEDULED")
+            )
+            == 0
+        )
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,10 @@ from app.schemas.entities import IdentityConfirmationRequest, TorrentSearchCreat
 
 ACTIVE_JOB_STATUSES = (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT)
 ACTIVE_SEARCH_STATUSES = (WorkflowStatus.PT_SEARCH_PENDING, WorkflowStatus.PT_SEARCHING)
+METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE = "METADATA_RESOLUTION_SUPERSEDED"
+METADATA_RESOLUTION_SUPERSEDED_MESSAGE = (
+    "影视身份已确认或已进入 PT 流程，元数据解析任务已取消"
+)
 SEARCH_STATUS_PRECEDENCE = (
     WorkflowStatus.TORRENT_REVIEW,
     WorkflowStatus.PT_SEARCHING,
@@ -120,8 +124,17 @@ async def refresh_media_search_workflow_status(
 async def enqueue_metadata_resolution(
     session: AsyncSession, media: MediaItem, *, max_attempts: int
 ) -> tuple[Job, bool]:
-    if media.workflow_status == WorkflowStatus.IDENTITY_CONFIRMED:
-        raise AppError("IDENTITY_ALREADY_CONFIRMED", "该影视身份已经人工确认", status_code=409)
+    locked_media = await session.get(MediaItem, media.id, with_for_update=True)
+    if locked_media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    media = locked_media
+    evidence = await identity_finalization_evidence(session, media)
+    if evidence is not None:
+        raise AppError(
+            "IDENTITY_ALREADY_CONFIRMED",
+            "该影视身份已确认或已进入 PT 搜索，禁止重新解析",
+            status_code=409,
+        )
     job_type = f"RESOLVE_METADATA:{media.id}"
     existing = await session.scalar(
         select(Job).where(Job.job_type == job_type, Job.status.in_(ACTIVE_JOB_STATUSES)).limit(1)
@@ -155,6 +168,90 @@ async def enqueue_metadata_resolution(
     return job, False
 
 
+async def identity_finalization_evidence(
+    session: AsyncSession,
+    media: MediaItem,
+) -> str | None:
+    confirmed_review_id = await session.scalar(
+        select(IdentityReview.id)
+        .where(IdentityReview.media_id == media.id, IdentityReview.status == "CONFIRMED")
+        .limit(1)
+    )
+    if confirmed_review_id is not None:
+        return "CONFIRMED_IDENTITY_REVIEW"
+    search_run_id = await session.scalar(
+        select(TorrentSearchRun.id).where(TorrentSearchRun.media_id == media.id).limit(1)
+    )
+    if search_run_id is not None:
+        return "TORRENT_SEARCH_HISTORY"
+    if media.workflow_status == WorkflowStatus.IDENTITY_CONFIRMED:
+        return "IDENTITY_CONFIRMED_STATUS"
+    return None
+
+
+def cancel_metadata_resolution_job(
+    session: AsyncSession,
+    job: Job,
+    *,
+    media_id: str,
+    evidence: str,
+) -> bool:
+    if job.status not in ACTIVE_JOB_STATUSES:
+        return False
+    previous_status = job.status
+    job.status = JobStatus.CANCELLED
+    job.error_code = METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE
+    job.error_message = METADATA_RESOLUTION_SUPERSEDED_MESSAGE
+    job.next_retry_at = None
+    job.locked_at = None
+    job.locked_by = None
+    job.lease_token = None
+    session.add(
+        AuditEvent(
+            event_type="METADATA_RESOLUTION_CANCELLED",
+            entity_type="job",
+            entity_id=job.id,
+            sanitized_details={
+                "media_id": media_id,
+                "from_status": previous_status.value,
+                "error_code": METADATA_RESOLUTION_SUPERSEDED_ERROR_CODE,
+                "evidence": evidence,
+            },
+        )
+    )
+    return True
+
+
+async def cancel_active_metadata_resolution_jobs(
+    session: AsyncSession,
+    media_id: str,
+    *,
+    evidence: str,
+) -> int:
+    jobs = list(
+        (
+            await session.scalars(
+                select(Job)
+                .where(
+                    Job.job_type == f"RESOLVE_METADATA:{media_id}",
+                    Job.status.in_(ACTIVE_JOB_STATUSES),
+                )
+                .order_by(Job.created_at.asc(), Job.id.asc())
+                .with_for_update()
+            )
+        ).all()
+    )
+    return sum(
+        cancel_metadata_resolution_job(
+            session,
+            job,
+            media_id=media_id,
+            evidence=evidence,
+        )
+        for job in jobs
+    )
+
+
 async def list_metadata_matches(session: AsyncSession, media_id: str) -> list[MetadataMatch]:
     statement = (
         select(MetadataMatch)
@@ -176,15 +273,11 @@ async def confirm_identity(
     if locked_media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
     media = locked_media
-    existing = await session.scalar(
-        select(IdentityReview)
-        .where(IdentityReview.media_id == media.id, IdentityReview.status == "CONFIRMED")
-        .limit(1)
-    )
-    if existing is not None:
+    evidence = await identity_finalization_evidence(session, media)
+    if evidence is not None:
         raise AppError(
             "IDENTITY_CONFIRMATION_DUPLICATE",
-            "该影视身份已经确认，禁止重复提交",
+            "该影视身份已确认或已进入 PT 搜索，禁止重复提交",
             status_code=409,
         )
     match = await session.get(MetadataMatch, request.metadata_match_id)
@@ -207,6 +300,11 @@ async def confirm_identity(
             "同一来源中已有影视条目使用该 TMDB ID",
             status_code=409,
         )
+    await cancel_active_metadata_resolution_jobs(
+        session,
+        media.id,
+        evidence="IDENTITY_CONFIRMATION_COMMITTED",
+    )
     review = IdentityReview(
         media_id=media.id,
         metadata_match_id=match.id,

@@ -13,7 +13,9 @@ import QbittorrentView from '../src/views/QbittorrentView.vue'
 import SystemView from '../src/views/SystemView.vue'
 import TorrentCandidatesView from '../src/views/TorrentCandidatesView.vue'
 import { useAuthStore } from '../src/stores/auth'
+import { useIdentityStore } from '../src/stores/identity'
 import { useMediaStore } from '../src/stores/media'
+import type { MetadataMatch } from '../src/types'
 
 const mocks = vi.hoisted(() => ({
   systemStatus: vi.fn(),
@@ -49,8 +51,12 @@ const mocks = vi.hoisted(() => ({
   qbTorrents: vi.fn(),
 }))
 
+const routeState = vi.hoisted(() => ({
+  params: { id: 'media-1' } as Record<string, string | undefined>,
+}))
+
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: { id: 'media-1' } }),
+  useRoute: () => routeState,
 }))
 
 vi.mock('../src/api/client', () => ({
@@ -238,6 +244,47 @@ const approval = {
   events: [],
 }
 
+const torrentCandidateResult = {
+  id: 'candidate-1',
+  search_run_id: 'search-1',
+  match_score: 0.93,
+  match_reasons: ['TMDB_ID_EXACT', 'EPISODE_COVERAGE_EXACT'],
+  warnings: [],
+  created_at: '2026-08-10T00:01:00Z',
+  candidate: {
+    site_id: 'avistaz',
+    torrent_id: 'torrent-1',
+    release_title: 'Test Series S01E03 1080p WEB-DL',
+    details_ref: 'avistaz:details:safe',
+    media_type: 'tv',
+    tmdb_id: 42,
+    imdb_id: 'tt0042',
+    year: 2026,
+    season: 1,
+    episodes: [3],
+    collection_type: 'episode',
+    resolution: '1080p',
+    source: 'WEB-DL',
+    codec: 'H.265',
+    hdr: null,
+    audio: ['Japanese'],
+    subtitles: ['Chinese'],
+    size_bytes: 2048,
+    file_count: 1,
+    seeders: 4,
+    leechers: 1,
+    completed: 10,
+    download_factor: 0,
+    upload_factor: 1,
+    hit_and_run: false,
+    info_hash: '1'.repeat(40),
+    published_at: '2026-08-10T00:00:00Z',
+    match_score: 0.93,
+    match_reasons: ['TMDB_ID_EXACT'],
+    warnings: [],
+  },
+}
+
 const downloadPlan = {
   id: 'plan-1',
   approval_id: 'approval-1',
@@ -291,14 +338,53 @@ const execution = {
   updated_at: '2026-08-10T00:12:00Z',
 }
 
+const executionIntent = {
+  id: 'intent-1',
+  approval_id: 'approval-1',
+  nonce: `ei1_${'n'.repeat(32)}`,
+  status: 'ACTIVE' as const,
+  approval_snapshot_hash: 'a'.repeat(64),
+  plan_hash: 'c'.repeat(64),
+  qb_target_fingerprint: 'd'.repeat(64),
+  launch_mode: 'ADD_PAUSED' as const,
+  expires_at: '2026-08-10T00:20:00Z',
+  created_at: '2026-08-10T00:12:00Z',
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  routeState.params = { id: 'media-1' }
   mocks.ptSiteCatalog.mockResolvedValue(ptSiteCatalog)
+  mocks.torrentList.mockResolvedValue([])
+  mocks.executionForApproval.mockRejectedValue(
+    Object.assign(new Error('审批尚未创建下载执行记录'), {
+      status: 404,
+      errorCode: 'DOWNLOAD_EXECUTION_NOT_FOUND',
+    }),
+  )
   const auth = useAuthStore()
   auth.principal = { username: 'admin-user', role: 'admin' }
   auth.initialized = true
 })
+
+function mockApprovedApprovalRoute(routeKind: 'detail' | 'candidate'): void {
+  if (routeKind === 'detail') {
+    routeState.params = { id: 'approval-1' }
+    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    return
+  }
+  routeState.params = {
+    mediaId: 'media-1',
+    searchId: 'search-1',
+    candidateId: 'candidate-1',
+  }
+  mocks.mediaGet.mockResolvedValueOnce(mediaItem)
+  mocks.torrentCandidates.mockResolvedValueOnce([torrentCandidateResult])
+  mocks.approvalList.mockResolvedValueOnce([{ ...approval, status: 'APPROVED' }])
+  mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+}
 
 describe('MediaView', () => {
   it('shows loading, the missing-media list and pagination', async () => {
@@ -427,43 +513,66 @@ describe('SystemView', () => {
 })
 
 describe('IdentityView', () => {
+  it('keeps metadata resolution disabled while the current media is loading', async () => {
+    let resolveMedia: (value: typeof mediaItem) => void = () => undefined
+    mocks.mediaGet.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveMedia = resolve
+      }),
+    )
+    mocks.metadataCandidates.mockResolvedValueOnce([])
+    const wrapper = mount(IdentityView)
+    await nextTick()
+
+    const resolveButton = wrapper
+      .findAll('.header-actions button')
+      .find((button) => button.text().includes('重新解析'))
+    expect(resolveButton?.attributes('disabled')).toBeDefined()
+    await resolveButton?.trigger('click')
+    expect(mocks.mediaResolve).not.toHaveBeenCalled()
+
+    resolveMedia(mediaItem)
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('当前影视身份已变更')
+  })
+
   it('shows source data, TMDB candidates, conflicts and manual confirmation', async () => {
     mocks.mediaGet.mockResolvedValue(mediaItem)
-    mocks.metadataCandidates.mockResolvedValue([
-      {
-        id: 'match-1',
-        media_id: 'media-1',
+    const candidateWithUnknownEpisodeMatrix = {
+      id: 'match-1',
+      media_id: 'media-1',
+      tmdb_id: 42,
+      rank: 1,
+      score: 0.92,
+      match_reasons: ['TMDB_ID_EXACT', 'YEAR_MATCH'],
+      conflicts: ['MEDIA_TYPE_CONFLICT'],
+      created_at: '2026-08-10T00:00:00Z',
+      candidate: {
         tmdb_id: 42,
-        rank: 1,
-        score: 0.92,
-        match_reasons: ['TMDB_ID_EXACT', 'YEAR_MATCH'],
-        conflicts: ['MEDIA_TYPE_CONFLICT'],
-        created_at: '2026-08-10T00:00:00Z',
-        candidate: {
-          tmdb_id: 42,
-          imdb_id: 'tt0042',
-          media_type: 'tv',
-          title: '测试剧集',
-          chinese_title: '测试剧集',
-          english_title: 'Test Series',
-          original_title: 'Original Series',
-          original_language: 'ja',
-          aliases: [],
-          year: 2026,
-          number_of_seasons: 1,
-          number_of_episodes: 8,
-          episode_matrix: { 1: [1, 2, 3] },
-          poster_path: '/poster.jpg',
-          backdrop_path: null,
-          status: 'Returning Series',
-          confidence: 1,
-          external_ids: { imdb_id: 'tt0042' },
-        },
+        imdb_id: 'tt0042',
+        media_type: 'tv',
+        title: '测试剧集',
+        chinese_title: '测试剧集',
+        english_title: 'Test Series',
+        original_title: 'Original Series',
+        original_language: 'ja',
+        aliases: [],
+        year: 2026,
+        number_of_seasons: 1,
+        number_of_episodes: 8,
+        episode_matrix: null,
+        poster_path: '/poster.jpg',
+        backdrop_path: null,
+        status: 'Returning Series',
+        confidence: 1,
+        external_ids: { imdb_id: 'tt0042' },
       },
-    ])
+    } satisfies MetadataMatch
+    mocks.metadataCandidates.mockResolvedValue([candidateWithUnknownEpisodeMatrix])
     mocks.confirmIdentity.mockResolvedValue({ status: 'CONFIRMED' })
     const wrapper = mount(IdentityView)
     await flushPromises()
+    expect(useIdentityStore().candidates[0]?.candidate.episode_matrix).toBeNull()
     expect(wrapper.text()).toContain('刷新候选')
     expect(wrapper.text()).toContain('NextFind 标题')
     expect(wrapper.text()).toContain('Test Series')
@@ -722,6 +831,91 @@ describe('QbittorrentView', () => {
 })
 
 describe('Approval views', () => {
+  beforeEach(() => {
+    routeState.params = { id: 'approval-1' }
+  })
+
+  it('loads an existing execution from the candidate approval deep link', async () => {
+    mockApprovedApprovalRoute('candidate')
+    const auth = useAuthStore()
+    auth.principal = { username: 'viewer-user', role: 'viewer' }
+    mocks.executionForApproval.mockResolvedValueOnce(execution)
+
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    expect(mocks.torrentCandidates).toHaveBeenCalledWith('search-1')
+    expect(mocks.approvalList).toHaveBeenCalledWith('candidate-1')
+    expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
+    expect(wrapper.text()).toContain('已存在下载执行记录，不会重复创建')
+    expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+    expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['审批详情', 'detail'],
+    ['候选审批深链', 'candidate'],
+  ] as const)('keeps the manual flow closed while the %s execution lookup is pending', async (_label, routeKind) => {
+    mockApprovedApprovalRoute(routeKind)
+    let resolveLookup: (value: typeof execution) => void = () => undefined
+    mocks.executionForApproval.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveLookup = resolve
+      }),
+    )
+
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
+    expect(wrapper.get('.execution-lookup-guard').text()).toContain('正在确认')
+    expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+
+    resolveLookup(execution)
+    await flushPromises()
+    expect(wrapper.text()).toContain('已存在下载执行记录，不会重复创建')
+  })
+
+  it.each([
+    ['审批详情', 'detail'],
+    ['候选审批深链', 'candidate'],
+  ] as const)('opens the %s manual flow only for DOWNLOAD_EXECUTION_NOT_FOUND', async (_label, routeKind) => {
+    mockApprovedApprovalRoute(routeKind)
+
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
+    expect(wrapper.text()).not.toContain('审批尚未创建下载执行记录')
+    expect(wrapper.find('.execution-lookup-guard').exists()).toBe(false)
+    expect(wrapper.text()).toContain('第一步：创建执行意图')
+  })
+
+  it.each([
+    ['审批详情', 'detail', 404, 'APPROVAL_REQUEST_NOT_FOUND', '审批请求不存在'],
+    ['候选审批深链', 'candidate', 404, 'APPROVAL_REQUEST_NOT_FOUND', '审批请求不存在'],
+    ['审批详情', 'detail', 500, 'INTERNAL_ERROR', '执行查询暂时失败'],
+    ['候选审批深链', 'candidate', 500, 'INTERNAL_ERROR', '执行查询暂时失败'],
+  ] as const)(
+    'fails the %s manual flow closed for HTTP %s %s',
+    async (_label, routeKind, status, errorCode, message) => {
+      mockApprovedApprovalRoute(routeKind)
+      mocks.executionForApproval.mockRejectedValueOnce(
+        Object.assign(new Error(message), { status, errorCode }),
+      )
+
+      const wrapper = mount(ApprovalView)
+      await flushPromises()
+
+      expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
+      expect(wrapper.text()).toContain(message)
+      expect(wrapper.get('.execution-lookup-guard').text()).toContain('安全禁用')
+      expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+      expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
+    },
+  )
+
   it('lists immutable approvals and their preflight state', async () => {
     mocks.approvalList.mockResolvedValueOnce([approval])
     const wrapper = mount(ApprovalListView)
@@ -796,18 +990,7 @@ describe('Approval views', () => {
   it('uses a private one-time intent for the two-step paused execution flow', async () => {
     mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
     mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
-    mocks.executionCreateIntent.mockResolvedValueOnce({
-      id: 'intent-1',
-      approval_id: 'approval-1',
-      nonce: `ei1_${'n'.repeat(32)}`,
-      status: 'ACTIVE',
-      approval_snapshot_hash: 'a'.repeat(64),
-      plan_hash: 'c'.repeat(64),
-      qb_target_fingerprint: 'd'.repeat(64),
-      launch_mode: 'ADD_PAUSED',
-      expires_at: '2026-08-10T00:20:00Z',
-      created_at: '2026-08-10T00:12:00Z',
-    })
+    mocks.executionCreateIntent.mockResolvedValueOnce(executionIntent)
     mocks.executionExecute.mockResolvedValueOnce(execution)
     const wrapper = mount(ApprovalView)
     await flushPromises()
@@ -838,6 +1021,28 @@ describe('Approval views', () => {
     expect(wrapper.text()).toContain('执行记录已创建')
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
+  })
+
+  it('keeps execution closed after an uncertain execute response', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    mocks.executionCreateIntent.mockResolvedValueOnce(executionIntent)
+    mocks.executionExecute.mockRejectedValueOnce(new Error('网络响应未知'))
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+    const control = wrapper.get('.execution-control-section')
+
+    await control.get('.execution-checks input[type="checkbox"]').setValue(true)
+    await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
+    await flushPromises()
+    await control.get('.final-step input[type="checkbox"]').setValue(true)
+    await control.findAll('button').find((item) => item.text().includes('第二步'))?.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('网络响应未知')
+    expect(wrapper.get('.execution-lookup-guard').text()).toContain('安全禁用')
+    expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+    expect(wrapper.text()).not.toContain('尚未提交')
   })
 
   it('requires an extra explicit confirmation for immediate start', async () => {
@@ -872,16 +1077,33 @@ describe('Approval views', () => {
     expect(mocks.executionExecute).not.toHaveBeenCalled()
   })
 
-  it('resumes an existing execution from an EXECUTING approval without requesting a new intent', async () => {
-    mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'EXECUTING' })
-    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
-    mocks.executionForApproval.mockResolvedValueOnce({ ...execution, status: 'SUBMITTED' })
-    const wrapper = mount(ApprovalView)
-    await flushPromises()
+  it.each([
+    ['APPROVED', 'PENDING', null],
+    ['APPROVED', 'FAILED', '执行器校验失败'],
+    ['APPROVED', 'CANCELLED', null],
+    ['EXECUTING', 'RECONCILIATION_PENDING', '等待人工对账'],
+  ] as const)(
+    'shows an existing %s approval execution in %s without offering a duplicate intent',
+    async (approvalStatus, executionStatus, errorMessage) => {
+      mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: approvalStatus })
+      mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+      mocks.executionForApproval.mockResolvedValueOnce({
+        ...execution,
+        status: executionStatus,
+        requires_reconciliation: executionStatus === 'RECONCILIATION_PENDING',
+        error_code: errorMessage ? 'EXECUTION_REQUIRES_ATTENTION' : null,
+        error_message: errorMessage,
+      })
+      const wrapper = mount(ApprovalView)
+      await flushPromises()
 
-    expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
-    expect(wrapper.text()).toContain('执行记录已创建，后台结果仍需继续观察')
-    expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
-    expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
-  })
+      expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
+      expect(wrapper.text()).toContain('已存在下载执行记录，不会重复创建')
+      if (errorMessage) expect(wrapper.text()).toContain(errorMessage)
+      expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
+      expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+      expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
+    },
+  )
+
 })

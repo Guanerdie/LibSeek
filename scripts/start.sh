@@ -1,31 +1,94 @@
 #!/usr/bin/env sh
 set -eu
 
+usage() {
+  echo '用法：scripts/start.sh --docker-context <名称> [--validate-only]' >&2
+}
+
+docker_context=''
+docker_context_set=false
 validate_only=false
-case "${1-}" in
-  '') ;;
-  --validate-only)
-    validate_only=true
-    shift
-    ;;
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --docker-context)
+      shift
+      if [ "$#" -eq 0 ] || [ "$docker_context_set" = true ]; then
+        usage
+        exit 2
+      fi
+      docker_context=$1
+      docker_context_set=true
+      ;;
+    --validate-only)
+      validate_only=true
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
+if [ "$docker_context_set" != true ] || [ -z "$docker_context" ] || [ "${#docker_context}" -gt 128 ]; then
+  echo 'Docker 启动必须通过 --docker-context 显式选择安全格式的 context 名称。' >&2
+  exit 2
+fi
+case "$docker_context" in
+  [A-Za-z0-9]*) ;;
   *)
-    echo '用法：scripts/start.sh [--validate-only]' >&2
+    echo 'Docker context 名称格式无效。' >&2
     exit 2
     ;;
 esac
-if [ "$#" -ne 0 ]; then
-  echo '用法：scripts/start.sh [--validate-only]' >&2
-  exit 2
-fi
+case "$docker_context" in
+  *[!A-Za-z0-9_.-]*)
+    echo 'Docker context 名称格式无效。' >&2
+    exit 2
+    ;;
+esac
 
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 env_file="$project_root/.env"
 example_file="$project_root/.env.example"
 compose_file="$project_root/compose.yaml"
 
+process_override_names=$(
+  env | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*$/\1/p' | while IFS= read -r name; do
+    case "$name" in
+      COMPOSE_*) printf '%s\n' "$name" ;;
+      DOCKER_HOST|DOCKER_CONTEXT|DOCKER_TLS_VERIFY|DOCKER_CERT_PATH|DOCKER_CONFIG)
+        printf '%s\n' "$name"
+        ;;
+      *)
+        if grep -q "^${name}=" "$example_file" || grep -Eq "\\\$\\{${name}([}:])" "$compose_file"; then
+          printf '%s\n' "$name"
+        fi
+        ;;
+    esac
+  done | LC_ALL=C sort -u
+)
+if [ -n "$process_override_names" ]; then
+  echo '拒绝父进程覆盖启动配置。请清除以下环境变量，并只在 .env 中配置：' >&2
+  printf '%s\n' "$process_override_names" | sed 's/^/  - /' >&2
+  exit 1
+fi
+
 if [ ! -f "$env_file" ]; then
   cp "$example_file" "$env_file"
   echo '已创建 .env。请先修改 PostgreSQL 密码并填写本地认证配置。' >&2
+  exit 1
+fi
+
+unsupported_dotenv_line_numbers=$(
+  LC_ALL=C awk '
+    /^[[:space:]]*$/ || /^[[:space:]]*#/ { next }
+    /^[A-Z][A-Z0-9_]*=/ { next }
+    { print NR }
+  ' "$env_file"
+)
+if [ -n "$unsupported_dotenv_line_numbers" ]; then
+  echo '拒绝 .env 中不受支持的语法；只允许空行、注释和严格的大写 KEY=VALUE，违规行号：' >&2
+  printf '%s\n' "$unsupported_dotenv_line_numbers" | sed 's/^/  - /' >&2
   exit 1
 fi
 
@@ -47,24 +110,6 @@ dotenv_interpolation_names=$(
 if [ -n "$dotenv_interpolation_names" ]; then
   echo '拒绝 .env 中的变量插值；以下键必须直接填写字面值：' >&2
   printf '%s\n' "$dotenv_interpolation_names" | sed 's/^/  - /' >&2
-  exit 1
-fi
-
-process_override_names=$(
-  env | sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*$/\1/p' | while IFS= read -r name; do
-    case "$name" in
-      COMPOSE_*) printf '%s\n' "$name" ;;
-      *)
-        if grep -q "^${name}=" "$example_file" || grep -Eq "\\\$\\{${name}([}:])" "$compose_file"; then
-          printf '%s\n' "$name"
-        fi
-        ;;
-    esac
-  done | sort -u
-)
-if [ -n "$process_override_names" ]; then
-  echo '拒绝父进程覆盖启动配置。请清除以下环境变量，并只在 .env 中配置：' >&2
-  printf '%s\n' "$process_override_names" | sed 's/^/  - /' >&2
   exit 1
 fi
 
@@ -96,12 +141,12 @@ if [ -z "$auth_username" ] || [ -z "$auth_password" ] || [ "${#auth_signing_key}
   exit 1
 fi
 
-docker compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" config --quiet
+docker --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" config --quiet
 if [ "$validate_only" = true ]; then
   echo 'Docker Compose 配置有效；未启动任何容器。'
   exit 0
 fi
 
-docker compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" up -d --build --wait --wait-timeout 180
-docker compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" ps
+docker --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" up -d --build --wait --wait-timeout 180
+docker --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" ps
 echo '前端：http://127.0.0.1:8080  API：http://127.0.0.1:8000/api/docs'

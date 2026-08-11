@@ -13,6 +13,15 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/api/client', () => ({
+  ApiError: class MockApiError extends Error {
+    constructor(
+      public readonly errorCode: string,
+      message: string,
+      public readonly status: number,
+    ) {
+      super(message)
+    }
+  },
   executionApi: {
     createIntent: mocks.createIntent,
     execute: mocks.execute,
@@ -69,6 +78,14 @@ const execution = {
   updated_at: '2026-08-11T00:55:00Z',
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => undefined
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve
+  })
+  return { promise, resolve }
+}
+
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
@@ -107,9 +124,60 @@ describe('execution store', () => {
 
     await expect(store.executeIntent('approval-1')).resolves.toBe(false)
     expect(store.error).toContain('网络响应未知')
+    expect(store.approvalLookupStatus).toBe('error')
+    expect(store.selected).toBeNull()
     await expect(store.executeIntent('approval-1')).resolves.toBe(false)
     expect(mocks.execute).toHaveBeenCalledTimes(1)
     expect(store.error).toContain('已使用')
+  })
+
+  it('invalidates a late execute response when the approval control is reset', async () => {
+    const lateExecution = deferred<typeof execution>()
+    mocks.createIntent.mockResolvedValueOnce(intent)
+    mocks.execute.mockReturnValueOnce(lateExecution.promise)
+    const store = useExecutionStore()
+    await store.createIntent('approval-1', 'ADD_PAUSED')
+
+    const pending = store.executeIntent('approval-1')
+    store.resetControl()
+    lateExecution.resolve(execution)
+
+    await expect(pending).resolves.toBe(false)
+    expect(store.selected).toBeNull()
+    expect(store.intent).toBeNull()
+    expect(store.approvalLookupStatus).toBe('idle')
+    expect(store.error).toBeNull()
+    expect(store.notice).toBeNull()
+    expect(store.working).toBe(false)
+    expect(store.executions).toEqual([])
+  })
+
+  it('rejects an execution intent response bound to another approval', async () => {
+    mocks.createIntent.mockResolvedValueOnce({ ...intent, approval_id: 'approval-2' })
+    const store = useExecutionStore()
+
+    await expect(store.createIntent('approval-1', 'ADD_PAUSED')).resolves.toBe(false)
+
+    expect(store.intent).toBeNull()
+    expect(store.approvalLookupStatus).toBe('error')
+    expect(store.error).toContain('响应与当前审批')
+  })
+
+  it.each([
+    ['approval', { ...execution, approval_id: 'approval-2' }],
+    ['intent', { ...execution, intent_id: 'intent-2' }],
+  ])('rejects an execute response bound to another %s', async (_binding, response) => {
+    mocks.createIntent.mockResolvedValueOnce(intent)
+    mocks.execute.mockResolvedValueOnce(response)
+    const store = useExecutionStore()
+    await store.createIntent('approval-1', 'ADD_PAUSED')
+
+    await expect(store.executeIntent('approval-1')).resolves.toBe(false)
+
+    expect(store.selected).toBeNull()
+    expect(store.executions).toEqual([])
+    expect(store.approvalLookupStatus).toBe('error')
+    expect(store.error).toContain('响应与当前审批或执行意图不一致')
   })
 
   it('loads stable pages and updates detail after reconciliation', async () => {
@@ -147,6 +215,41 @@ describe('execution store', () => {
     expect(mocks.forApproval).toHaveBeenCalledWith('approval-1')
     expect(store.selected?.id).toBe('execution-1')
     expect(store.error).toBeNull()
+  })
+
+  it('only treats the stable no-execution error code as an empty approval lookup', async () => {
+    const { ApiError } = await import('../src/api/client')
+    mocks.forApproval
+      .mockRejectedValueOnce(
+        new ApiError(
+          'DOWNLOAD_EXECUTION_NOT_FOUND',
+          '审批尚未创建下载执行记录',
+          404,
+        ),
+      )
+      .mockRejectedValueOnce(
+        new ApiError('APPROVAL_REQUEST_NOT_FOUND', '审批请求不存在', 404),
+      )
+    const store = useExecutionStore()
+
+    await store.loadForApproval('approval-1')
+    expect(store.approvalLookupStatus).toBe('not_found')
+    expect(store.error).toBeNull()
+
+    await store.loadForApproval('approval-1')
+    expect(store.approvalLookupStatus).toBe('error')
+    expect(store.error).toBe('审批请求不存在')
+  })
+
+  it('fails closed when an approval lookup returns another approval execution', async () => {
+    mocks.forApproval.mockResolvedValueOnce({ ...execution, approval_id: 'approval-2' })
+    const store = useExecutionStore()
+
+    await store.loadForApproval('approval-1')
+
+    expect(store.selected).toBeNull()
+    expect(store.approvalLookupStatus).toBe('error')
+    expect(store.error).toContain('响应与当前审批不一致')
   })
 
   it('surfaces a disabled-control error without creating local success state', async () => {

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import { mediaApi, ptSiteApi, torrentApi } from '../api/client'
 import type {
@@ -10,6 +10,7 @@ import type {
   TorrentSearchCreateRequest,
   TorrentSearchRun,
 } from '../types'
+import { hasConfirmedIdentityEvidence } from '../utils/identity'
 
 export const useTorrentStore = defineStore('torrents', () => {
   const media = ref<MediaItem | null>(null)
@@ -35,6 +36,9 @@ export const useTorrentStore = defineStore('torrents', () => {
   let selectionGeneration = 0
   let actionGeneration = 0
   let selectionController: AbortController | null = null
+  const identityGatePassed = computed(() =>
+    hasConfirmedIdentityEvidence(media.value, runs.value),
+  )
 
   function cancelSelection(): void {
     selectionGeneration += 1
@@ -210,6 +214,9 @@ export const useTorrentStore = defineStore('torrents', () => {
     actionError.value = null
     notice.value = null
     try {
+      if (!identityGatePassed.value) {
+        throw new Error('必须先确认影视身份，才能创建 PT 搜索')
+      }
       if (
         activeMediaId !== mediaId ||
         media.value?.id !== mediaId ||
@@ -268,6 +275,7 @@ export const useTorrentStore = defineStore('torrents', () => {
     selectionError,
     actionError,
     notice,
+    identityGatePassed,
     loadCatalog,
     load,
     selectRun,

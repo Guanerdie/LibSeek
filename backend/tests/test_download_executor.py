@@ -69,6 +69,7 @@ from app.services.approvals import download_plan_hash, snapshot_hash
 from app.services.automation import add_decision_once, build_automation_decision
 from app.services.automation_policy import get_current_policy, publish_policy_revision
 from app.services.executions import create_execution_intent, execute_approved_plan
+from app.services.preflight import preflight_policy_fingerprint
 from app.workers import download_executor as download_executor_module
 from app.workers.download_executor import (
     DownloadExecutor,
@@ -467,7 +468,7 @@ async def seed_pending_execution(
                 )
             ],
             checked_at=now,
-            policy_fingerprint="a" * 64,
+            policy_fingerprint=preflight_policy_fingerprint(settings),
         )
         approval = ApprovalRequest(
             media_item_id=media.id,
@@ -590,6 +591,98 @@ async def test_executor_requires_all_three_write_gates_before_claim_or_factory(
     assert caught.value.error_code == "DOWNLOAD_EXECUTOR_DISABLED"
     assert caught.value.details == {"missing_flags": ["ENABLE_QB_WRITE"]}
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_preflight_policy_drift_before_external_factories(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    del payload
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    pt_factory_calls = 0
+    qb_factory_calls = 0
+
+    def forbidden_pt_factory() -> NoReturn:
+        nonlocal pt_factory_calls
+        pt_factory_calls += 1
+        raise AssertionError("PT factory must not run after preflight policy drift")
+
+    def forbidden_qb_factory() -> NoReturn:
+        nonlocal qb_factory_calls
+        qb_factory_calls += 1
+        raise AssertionError("qB factory must not run after preflight policy drift")
+
+    drifted = executor_settings(max_candidate_size_bytes=512)
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-policy-drift",
+        execution_registry(forbidden_pt_factory),
+        forbidden_qb_factory,
+        drifted,
+    )
+
+    assert await executor.run_once() is True
+    assert pt_factory_calls == 0
+    assert qb_factory_calls == 0
+
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.error_code == "PREFLIGHT_CONFIG_CHANGED"
+        assert (
+            await session.scalar(
+                select(DownloadExecutionEvent)
+                .where(
+                    DownloadExecutionEvent.download_execution_id == execution_id,
+                    DownloadExecutionEvent.event_type == "VALIDATION_FAILED",
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
+
+@pytest.mark.asyncio
+async def test_executor_request_guard_rechecks_policy_changed_after_binding_load(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    pt = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    qb_factory_calls = 0
+
+    def drifting_pt_factory() -> FakeAvistaZ:
+        settings.max_candidate_size_bytes = 512
+        return pt
+
+    def forbidden_qb_factory() -> NoReturn:
+        nonlocal qb_factory_calls
+        qb_factory_calls += 1
+        raise AssertionError("qB factory must not run after in-flight policy drift")
+
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-in-flight-policy-drift",
+        execution_registry(drifting_pt_factory),
+        forbidden_qb_factory,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    assert pt.search_calls == []
+    assert pt.fetch_calls == []
+    assert pt.closed is True
+    assert qb_factory_calls == 0
+
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.error_code == "PREFLIGHT_CONFIG_CHANGED"
 
 
 @pytest.mark.asyncio

@@ -57,7 +57,10 @@ from app.services.executions import (
     update_download_job_observation,
     verify_download_execution,
 )
-from app.services.preflight import is_allowed_save_path
+from app.services.preflight import (
+    is_allowed_save_path,
+    require_preflight_policy_current,
+)
 from app.services.torrent_validation import ValidatedTorrent, validate_torrent
 
 _ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
@@ -439,6 +442,10 @@ class DownloadExecutor:
                     "DOWNLOAD_PLAN_NOT_FOUND", "审批没有对应下载计划", status_code=409
                 )
             verify_download_plan(plan, approval)
+            require_preflight_policy_current(
+                plan.preflight_policy_fingerprint,
+                self.settings,
+            )
             if qb_target_fingerprint(self.settings, plan, execution.launch_mode) != (
                 execution.qb_target_fingerprint
             ):
@@ -523,6 +530,23 @@ class DownloadExecutor:
             )
             approval = await session.get(
                 ApprovalRequest, execution.approval_id, with_for_update=True
+            )
+            plan = await session.scalar(
+                select(DownloadPlan)
+                .where(DownloadPlan.approval_id == execution.approval_id)
+                .limit(1)
+            )
+            if plan is None:
+                raise AppError(
+                    "DOWNLOAD_PLAN_NOT_FOUND",
+                    "审批没有对应下载计划",
+                    status_code=409,
+                )
+            if approval is not None:
+                verify_download_plan(plan, approval)
+            require_preflight_policy_current(
+                plan.preflight_policy_fingerprint,
+                self.settings,
             )
             automation_error = await self._automation_fence_error(
                 session, execution, approval

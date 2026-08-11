@@ -62,6 +62,7 @@ $DangerousFlags = @(
 )
 
 $DeterministicEnvironmentKeys = @(
+    'NEXTFIND_ALLOWED_HOSTS',
     'MEDIA_IMPORT_TARGET_ROOT_REFS',
     'MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS',
     'QB_TARGET_SAVE_PATH',
@@ -505,6 +506,18 @@ try {
         $renderings[$definition.Label] = $config
         Assert-DangerousFlagsDisabled $config $definition.Label
         Assert-SecretContract $config $definition.Layers $definition.Label
+        Assert-EnvironmentValue `
+            $config `
+            'api' `
+            'NEXTFIND_ALLOWED_HOSTS' `
+            'nextfind.example' `
+            $definition.Label
+        Assert-EnvironmentValue `
+            $config `
+            'worker' `
+            'NEXTFIND_ALLOWED_HOSTS' `
+            'nextfind.example' `
+            $definition.Label
         Assert-EnvironmentValue `
             $config `
             'api' `

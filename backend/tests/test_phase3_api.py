@@ -183,6 +183,8 @@ def api_settings() -> Settings:
     return Settings(
         _env_file=None,
         avistaz_forbidden_qb_versions=("4.3.*",),
+        qb_base_url="https://qb.internal.test",
+        qb_allowed_hosts=("qb.internal.test",),
         qb_target_category="movies",
         qb_target_save_path="/downloads/movies/incoming",
         qb_allowed_save_paths=("/downloads/movies",),

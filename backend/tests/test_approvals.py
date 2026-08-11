@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -89,19 +90,24 @@ class FakeReadOnlyQb(ReadOnlyDownloaderAdapter):
         return {"movies": QbCategory(name="movies", savePath="/downloads/movies")}
 
 
-def safe_settings() -> Settings:
-    return Settings(
-        _env_file=None,
-        avistaz_forbidden_qb_versions=("4.3.*",),
-        qb_target_category="movies",
-        qb_target_save_path="/downloads/movies/incoming",
-        qb_allowed_save_paths=("/downloads/movies",),
-        qb_save_path_ref="movies-root",
-        qb_plan_tags=("unin-plan",),
-        max_candidate_size_bytes=10_000,
-        approval_default_ttl_minutes=60,
-        approval_preflight_max_age_seconds=300,
-    )
+def safe_settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "_env_file": None,
+        "avistaz_forbidden_qb_versions": ("4.3.*",),
+        "qb_base_url": "https://qb.internal.test",
+        "qb_allowed_hosts": ("qb.internal.test",),
+        "qb_target_category": "movies",
+        "qb_target_save_path": "/downloads/movies/incoming",
+        "qb_allowed_save_paths": ("/downloads/movies",),
+        "qb_save_path_ref": "movies-root",
+        "qb_plan_tags": ("unin-plan",),
+        "qb_target_instance_ref": "qb-primary",
+        "max_candidate_size_bytes": 10_000,
+        "approval_default_ttl_minutes": 60,
+        "approval_preflight_max_age_seconds": 300,
+    }
+    values.update(overrides)
+    return Settings(**values)  # type: ignore[arg-type]
 
 
 def qb_torrent(*, info_hash: str = INFO_HASH, name: str = "Existing", size: int = 1) -> QbTorrent:
@@ -135,6 +141,96 @@ def preflight_result(
         policy_fingerprint=preflight_policy_fingerprint(settings),
         checks=checks,
     )
+
+
+def test_preflight_policy_fingerprint_binds_normalized_qb_target_without_leaks() -> None:
+    baseline = safe_settings(
+        qb_base_url="HTTPS://QB-A.INTERNAL.TEST:443/api///",
+        qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+        qb_username="private-user",
+        qb_password="private-password",
+    )
+    equivalent = safe_settings(
+        qb_base_url="https://qb-a.internal.test/api",
+        qb_allowed_hosts=("QB-B.INTERNAL.TEST", "QB-A.INTERNAL.TEST"),
+        qb_username="rotated-user",
+        qb_password="rotated-password",
+    )
+    fingerprint = preflight_policy_fingerprint(baseline)
+
+    assert fingerprint == preflight_policy_fingerprint(equivalent)
+    assert len(fingerprint) == 64
+    assert set(fingerprint) <= set("0123456789abcdef")
+    assert all(
+        secret not in fingerprint
+        for secret in (
+            "qb-a.internal.test",
+            "/api",
+            "private-user",
+            "private-password",
+        )
+    )
+
+    changed_targets = (
+        safe_settings(
+            qb_base_url="https://qb-b.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+        ),
+        safe_settings(
+            qb_base_url="https://qb-a.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+            qb_target_instance_ref="qb-secondary",
+        ),
+        safe_settings(
+            qb_base_url="https://qb-a.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test",),
+        ),
+        safe_settings(
+            qb_base_url="https://qb-a.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+            qb_allow_insecure_http=True,
+        ),
+        safe_settings(
+            qb_base_url="https://qb-a.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+            qb_target_save_path="/downloads/movies/other",
+        ),
+        safe_settings(
+            qb_base_url="https://qb-a.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+            qb_target_category="tv",
+        ),
+        safe_settings(
+            qb_base_url="https://qb-a.internal.test/api",
+            qb_allowed_hosts=("qb-a.internal.test", "qb-b.internal.test"),
+            qb_plan_tags=("different-tag",),
+        ),
+    )
+    assert all(
+        preflight_policy_fingerprint(changed) != fingerprint
+        for changed in changed_targets
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("secret_path_kind", ("missing", "unreadable"))
+async def test_preflight_base_url_secret_failure_is_closed_before_adapter_use(
+    secret_path_kind: str,
+) -> None:
+    tests_directory = Path(__file__).parent
+    secret_path = tests_directory / "missing-qb-base-url.txt"
+    if secret_path_kind == "unreadable":
+        secret_path = tests_directory
+    settings = safe_settings(qb_base_url=None, qb_base_url_file=secret_path)
+    adapter = FakeReadOnlyQb()
+
+    with pytest.raises(AppError) as caught:
+        await evaluate_preflight(adapter, object(), settings)  # type: ignore[arg-type]
+
+    assert caught.value.error_code == "PREFLIGHT_TARGET_CONFIG_UNAVAILABLE"
+    assert caught.value.status_code == 409
+    assert str(secret_path) not in caught.value.message
+    assert adapter.auth_calls == 0
 
 
 async def seed_candidate(

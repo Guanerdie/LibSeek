@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -67,24 +67,65 @@ const preflightPassable = computed(() => {
 })
 const canOperate = computed(() => auth.hasRole('operator'))
 const canAdmin = computed(() => auth.hasRole('admin'))
-
-onMounted(async () => {
-  executionStore.resetControl()
-  const approvalId = route.params.id
-  if (approvalId) {
-    await store.loadApproval(String(approvalId))
-    if (store.approval?.status === 'EXECUTING' || store.approval?.status === 'CONSUMED') {
-      await executionStore.loadForApproval(store.approval.id)
-    }
-    return
-  }
-  void store.loadCandidate(
+const selectedExecution = computed(() => {
+  if (!store.approval || executionStore.selected?.approval_id !== store.approval.id) return null
+  return executionStore.selected
+})
+const routeTarget = computed(() => {
+  if (route.params.id) return `approval:${String(route.params.id)}`
+  return [
+    'candidate',
     String(route.params.mediaId),
     String(route.params.searchId),
     String(route.params.candidateId),
-  )
+  ].join(':')
 })
-onBeforeUnmount(() => executionStore.discardIntent())
+let routeGeneration = 0
+
+function resetLocalConfirmations(): void {
+  reason.value = ''
+  acknowledgesHnr.value = false
+  acknowledgesSeeding.value = false
+  acknowledgesPlanOnly.value = false
+  launchMode.value = 'ADD_PAUSED'
+  executionPlanConfirmed.value = false
+  immediateStartConfirmed.value = false
+  finalExecutionConfirmed.value = false
+}
+
+async function loadRouteTarget(): Promise<void> {
+  const current = ++routeGeneration
+  resetLocalConfirmations()
+  executionStore.resetControl()
+  const approvalId = route.params.id
+  if (approvalId) {
+    const expectedApprovalId = String(approvalId)
+    await store.loadApproval(expectedApprovalId)
+    if (current !== routeGeneration) return
+    if (store.approval?.id === expectedApprovalId) {
+      await executionStore.loadForApproval(expectedApprovalId)
+    }
+    return
+  }
+  const mediaId = String(route.params.mediaId)
+  const searchId = String(route.params.searchId)
+  const candidateId = String(route.params.candidateId)
+  await store.loadCandidate(
+    mediaId,
+    searchId,
+    candidateId,
+  )
+  if (current !== routeGeneration) return
+  if (store.approval?.torrent_candidate_id === candidateId) {
+    await executionStore.loadForApproval(store.approval.id)
+  }
+}
+
+watch(routeTarget, () => void loadRouteTarget(), { immediate: true })
+onBeforeUnmount(() => {
+  routeGeneration += 1
+  executionStore.resetControl()
+})
 
 function formatBytes(value: number | null): string {
   if (value === null) return '未知'
@@ -129,6 +170,15 @@ async function executeApprovedPlan(): Promise<void> {
   executionPlanConfirmed.value = false
   immediateStartConfirmed.value = false
   finalExecutionConfirmed.value = false
+}
+
+async function approvePlan(): Promise<void> {
+  if (!store.approval) return
+  const approvalId = store.approval.id
+  await store.approve(approvalId)
+  if (store.approval?.id === approvalId) {
+    await executionStore.loadForApproval(approvalId)
+  }
 }
 </script>
 
@@ -195,12 +245,12 @@ async function executeApprovedPlan(): Promise<void> {
               <div><dt>预计大小</dt><dd>{{ formatBytes(store.plan.estimated_size_bytes) }}</dd></div>
               <div><dt>模式</dt><dd>APPROVED_IMMUTABLE_PLAN</dd></div>
             </dl>
-            <div v-if="!executionStore.selected" class="phase-banner inline-banner"><span>尚未提交</span>本次审批仅生成不可执行计划；后续仍须进入独立执行流程，经过管理员两步确认，或显式启用并满足自动执行策略，且默认关闭的服务端执行总闸必须开启，才可能写入 qBittorrent。</div>
+            <div v-if="!selectedExecution && executionStore.approvalLookupStatus === 'not_found'" class="phase-banner inline-banner"><span>尚未提交</span>本次审批仅生成不可执行计划；后续仍须进入独立执行流程，经过管理员两步确认，或显式启用并满足自动执行策略，且默认关闭的服务端执行总闸必须开启，才可能写入 qBittorrent。</div>
           </div>
 
-          <div v-if="(store.approval?.status === 'APPROVED' && store.plan) || executionStore.selected?.approval_id === store.approval?.id" class="approval-section execution-control-section">
+          <div v-if="(store.approval?.status === 'APPROVED' && store.plan) || selectedExecution" class="approval-section execution-control-section">
             <span class="eyebrow">TWO-STEP EXECUTION</span><h2>下载执行确认</h2>
-            <template v-if="!executionStore.selected">
+            <template v-if="!selectedExecution && executionStore.approvalLookupStatus === 'not_found'">
               <div class="execution-step">
                 <div class="execution-step-heading"><strong>1</strong><div><h3>创建短期执行意图</h3><p>核对启动模式与批准计划。此步骤尚不会向下载器添加种子。</p></div></div>
                 <div class="segmented-control" role="group" aria-label="下载启动模式">
@@ -242,11 +292,26 @@ async function executeApprovedPlan(): Promise<void> {
               <p v-if="!canAdmin" class="permission-hint">当前角色仅可查看；执行写操作需要管理员权限。</p>
             </template>
 
-            <div v-else class="execution-created">
-              <div><span class="eyebrow">EXECUTION CREATED</span><StatusPill :status="executionStore.selected.status" /></div>
-              <h3>执行记录已创建，后台结果仍需继续观察</h3>
-              <p>创建记录不等同于下载成功。请进入执行详情查看校验、提交、错误和对账状态。</p>
-              <a class="button secondary" :href="`/executions/${executionStore.selected.id}`">查看执行详情</a>
+            <div v-else-if="selectedExecution" class="execution-created">
+              <div><span class="eyebrow">EXECUTION CREATED</span><StatusPill :status="selectedExecution.status" /></div>
+              <h3>已存在下载执行记录，不会重复创建</h3>
+              <dl class="approval-facts">
+                <div><dt>启动模式</dt><dd>{{ selectedExecution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : '立即开始' }}</dd></div>
+                <div><dt>请求时间</dt><dd>{{ formatShanghai(selectedExecution.requested_at) }}</dd></div>
+                <div><dt>尝试次数</dt><dd>{{ selectedExecution.attempts }} / {{ selectedExecution.max_attempts }}</dd></div>
+                <div><dt>执行错误</dt><dd>{{ selectedExecution.error_code ?? '无' }}</dd></div>
+              </dl>
+              <p v-if="selectedExecution.error_message" class="risk-text">{{ selectedExecution.error_message }}</p>
+              <p v-else-if="selectedExecution.requires_reconciliation" class="risk-text">该执行需要人工对账，请进入执行详情处理。</p>
+              <p v-else>创建记录不等同于下载成功。请进入执行详情查看校验、提交和最终状态。</p>
+              <a class="button secondary" :href="`/executions/${selectedExecution.id}`">查看执行详情</a>
+            </div>
+            <div v-else class="notice-state warning-state execution-lookup-guard" role="status">
+              {{ executionStore.approvalLookupStatus === 'loading'
+                ? '正在确认该审批是否已有下载执行记录，确认完成前不会开放重复执行入口。'
+                : executionStore.approvalLookupStatus === 'error'
+                  ? '无法确认该审批是否已有下载执行记录，手工执行入口已安全禁用；请刷新后重试。'
+                  : '尚未完成关联执行检查，手工执行入口暂不开放。' }}
             </div>
           </div>
         </div>
@@ -273,7 +338,7 @@ async function executeApprovedPlan(): Promise<void> {
               v-if="store.approval.status === 'PENDING'"
               class="button primary"
               :disabled="store.working || !canAdmin || !acknowledgementsComplete || !preflightPassable"
-              @click="store.approve(store.approval.id)"
+              @click="approvePlan"
             >
               批准计划并评估执行策略
             </button>

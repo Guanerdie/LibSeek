@@ -6,6 +6,7 @@ import math
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -48,10 +49,21 @@ from app.services.automation import (
 )
 from app.services.matching import MatchPreferences, score_metadata_match, score_torrent_candidate
 from app.services.workflow import (
+    cancel_metadata_resolution_job,
+    identity_finalization_evidence,
     metadata_resolution_input_fingerprint,
     refresh_media_search_workflow_status,
     torrent_search_input_fingerprint,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataResolutionInput:
+    media_id: str
+    media_type: MediaType
+    tmdb_id: int | None
+    title: str
+    year: int | None
 
 
 class JobProcessor:
@@ -144,14 +156,12 @@ class JobProcessor:
                 )
             media_id = job.payload.get("media_id")
             media: MediaItem | None = None
-            if isinstance(media_id, str):
+            if isinstance(media_id, str) and job.job_type.startswith("TORRENT_SEARCH:"):
                 media = await session.get(
                     MediaItem,
                     media_id,
-                    with_for_update=job.job_type.startswith("TORRENT_SEARCH:"),
+                    with_for_update=True,
                 )
-                if media is not None and job.job_type.startswith("RESOLVE_METADATA:"):
-                    media.workflow_status = WorkflowStatus.METADATA_PENDING
             search_run_id = job.payload.get("search_run_id")
             if isinstance(search_run_id, str):
                 search_run = await session.get(TorrentSearchRun, search_run_id)
@@ -267,15 +277,18 @@ class JobProcessor:
     async def _run_metadata_resolution(self, job: Job) -> None:
         provider: MetadataProvider | None = None
         try:
-            if self.metadata_provider_factory is None:
-                raise AppError("TMDB_LIVE_DISABLED", "TMDB 真实只读 Provider 未启用")
             media_id = job.payload.get("media_id")
             if not isinstance(media_id, str):
                 raise AppError("INVALID_JOB_PAYLOAD", "元数据任务参数无效")
-            async with self.session_factory() as session:
-                media = await session.get(MediaItem, media_id)
-                if media is None:
-                    raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+            media = await self._prepare_metadata_resolution(
+                job.id,
+                media_id,
+                lease_token=job.lease_token,
+            )
+            if media is None:
+                return
+            if self.metadata_provider_factory is None:
+                raise AppError("TMDB_LIVE_DISABLED", "TMDB 真实只读 Provider 未启用")
             provider = self.metadata_provider_factory()
             candidates: list[MetadataRecord]
             if media.tmdb_id is not None:
@@ -298,7 +311,7 @@ class JobProcessor:
             else:
                 candidates = await provider.search(media.media_type, media.title, media.year)
             await self._complete_metadata_resolution(
-                job.id, media.id, candidates, lease_token=job.lease_token
+                job.id, media.media_id, candidates, lease_token=job.lease_token
             )
         except AppError as exc:
             await self._fail(job.id, exc, lease_token=job.lease_token)
@@ -312,6 +325,40 @@ class JobProcessor:
         finally:
             await self._close_adapter(provider)
 
+    async def _prepare_metadata_resolution(
+        self,
+        job_id: str,
+        media_id: str,
+        *,
+        lease_token: str | None,
+    ) -> MetadataResolutionInput | None:
+        async with self.session_factory() as session:
+            media = await session.get(MediaItem, media_id, with_for_update=True)
+            if media is None:
+                raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+            job = await session.scalar(
+                select(Job).where(Job.id == job_id).with_for_update().limit(1)
+            )
+            if job is None or not self._owns_lease(job, lease_token):
+                return None
+            evidence = await identity_finalization_evidence(session, media)
+            if evidence is not None:
+                cancel_metadata_resolution_job(
+                    session,
+                    job,
+                    media_id=media.id,
+                    evidence=evidence,
+                )
+                await session.commit()
+                return None
+            return MetadataResolutionInput(
+                media_id=media.id,
+                media_type=media.media_type,
+                tmdb_id=media.tmdb_id,
+                title=media.title,
+                year=media.year,
+            )
+
     async def _complete_metadata_resolution(
         self,
         job_id: str,
@@ -321,9 +368,21 @@ class JobProcessor:
         lease_token: str | None,
     ) -> None:
         async with self.session_factory() as session:
-            job = await session.get(Job, job_id, with_for_update=True)
             media = await session.get(MediaItem, media_id, with_for_update=True)
-            if job is None or not self._owns_lease(job, lease_token) or media is None:
+            if media is None:
+                return
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None or not self._owns_lease(job, lease_token):
+                return
+            evidence = await identity_finalization_evidence(session, media)
+            if evidence is not None:
+                cancel_metadata_resolution_job(
+                    session,
+                    job,
+                    media_id=media.id,
+                    evidence=evidence,
+                )
+                await session.commit()
                 return
             expected_fingerprint = job.payload.get("input_fingerprint")
             if (
@@ -962,9 +1021,34 @@ class JobProcessor:
         self, job_id: str, error: AppError, *, lease_token: str | None
     ) -> None:
         async with self.session_factory() as session:
-            job = await session.get(Job, job_id, with_for_update=True)
+            unlocked_job = await session.get(Job, job_id)
+            media_id = unlocked_job.payload.get("media_id") if unlocked_job is not None else None
+            metadata_job = bool(
+                unlocked_job is not None
+                and unlocked_job.job_type.startswith("RESOLVE_METADATA:")
+                and isinstance(media_id, str)
+            )
+            media = (
+                await session.get(MediaItem, media_id, with_for_update=True)
+                if metadata_job
+                else None
+            )
+            job = await session.scalar(
+                select(Job).where(Job.id == job_id).with_for_update().limit(1)
+            )
             if job is None or not self._owns_lease(job, lease_token):
                 return
+            if metadata_job and media is not None:
+                evidence = await identity_finalization_evidence(session, media)
+                if evidence is not None:
+                    cancel_metadata_resolution_job(
+                        session,
+                        job,
+                        media_id=media.id,
+                        evidence=evidence,
+                    )
+                    await session.commit()
+                    return
             retry = error.retryable and job.attempts < job.max_attempts
             retry_delay = self._retry_delay_seconds(error, job.attempts) if retry else None
             status = JobStatus.RETRY_WAIT if retry else JobStatus.FAILED
@@ -1003,15 +1087,12 @@ class JobProcessor:
                     )
                 )
             media_id = job.payload.get("media_id")
-            media = (
-                await session.get(
+            if media is None and isinstance(media_id, str):
+                media = await session.get(
                     MediaItem,
                     media_id,
                     with_for_update=job.job_type.startswith("TORRENT_SEARCH:"),
                 )
-                if isinstance(media_id, str)
-                else None
-            )
             search_run_id = job.payload.get("search_run_id")
             search_run = (
                 await session.get(TorrentSearchRun, search_run_id)

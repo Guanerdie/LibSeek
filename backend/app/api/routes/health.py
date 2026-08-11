@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.time import utc_now
 from app.models.entities import WorkerHeartbeat
 from app.schemas.entities import ComponentStatus, SystemStatusResponse
+from app.workers.identity import JOB_WORKER_HEARTBEAT_PREFIX
 
 router = APIRouter(tags=["system"])
 
@@ -35,7 +36,13 @@ async def system_status(session: DbSession) -> SystemStatusResponse:
     worker_message = "尚未收到 Worker 心跳"
     if postgres_healthy:
         try:
-            latest = await session.scalar(select(func.max(WorkerHeartbeat.last_seen_at)))
+            latest = await session.scalar(
+                select(func.max(WorkerHeartbeat.last_seen_at)).where(
+                    WorkerHeartbeat.worker_id.like(
+                        f"{JOB_WORKER_HEARTBEAT_PREFIX}%"
+                    )
+                )
+            )
             if latest is not None:
                 if latest.tzinfo is None:
                     latest = latest.replace(tzinfo=now.tzinfo)

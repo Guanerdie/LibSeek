@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     external_max_response_bytes: int = 10 * 1024 * 1024
     external_max_ndjson_line_bytes: int = 1024 * 1024
     nextfind_base_url: str = "https://nextfind.example"
+    nextfind_allowed_hosts: tuple[str, ...] = ("nextfind.example",)
     nextfind_username: SecretStr | None = None
     nextfind_password: SecretStr | None = None
     nextfind_username_file: Path | None = None
@@ -151,6 +152,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "allowed_external_hosts",
+        "nextfind_allowed_hosts",
         "preferred_resolutions",
         "preferred_sources",
         "preferred_audio",

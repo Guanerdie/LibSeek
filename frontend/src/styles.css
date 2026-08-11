@@ -586,7 +586,8 @@ td small { max-width: 220px; margin-top: 4px; overflow: hidden; color: var(--mut
   .table-panel { overflow-x: auto; }
   table { min-width: 900px; }
   .split-layout { grid-template-columns: 1fr; }
-  .page-header .header-actions { width: 100%; }
+  .page-header .header-actions { width: 100%; flex-wrap: wrap; }
+  .page-header .header-actions .button { min-width: 0; flex: 1 1 120px; text-align: center; white-space: normal; }
   .source-strip { grid-template-columns: 1fr; }
   .source-strip div { border-right: 0; }
   .identity-candidate { grid-template-columns: 90px minmax(0, 1fr); }

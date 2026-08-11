@@ -18,6 +18,8 @@ def _settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "enable_automation_engine": True,
         "enable_qb_read_only": True,
+        "qb_base_url": "https://qb.internal",
+        "qb_allowed_hosts": ("qb.internal",),
         "qb_target_category": "movies",
         "qb_target_save_path": "/downloads/movies",
         "qb_allowed_save_paths": ("/downloads",),
