@@ -38,9 +38,12 @@ from app.models.enums import (
     HnrStatus,
     IdentityConfidence,
     JobStatus,
+    MediaImportOperation,
+    MediaImportStatus,
     MediaType,
     MetadataStatus,
     Origin,
+    PreflightStatus,
     WorkflowStatus,
 )
 
@@ -747,6 +750,236 @@ class DownloadJobEvent(Base):
     )
 
 
+class MediaImportRequest(Base):
+    __tablename__ = "media_import_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "((status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED') "
+            "AND approved_by IS NULL AND approved_at IS NULL "
+            "AND rejected_by IS NULL AND rejected_at IS NULL "
+            "AND rejection_reason IS NULL AND revoked_by IS NULL "
+            "AND revoked_at IS NULL AND revocation_reason IS NULL "
+            "AND decision_acknowledgements IS NULL) OR "
+            "(status = 'APPROVED_PLAN_ONLY' AND approved_by IS NOT NULL "
+            "AND approved_at IS NOT NULL AND rejected_by IS NULL "
+            "AND rejected_at IS NULL AND rejection_reason IS NULL "
+            "AND revoked_by IS NULL AND revoked_at IS NULL "
+            "AND revocation_reason IS NULL AND decision_acknowledgements IS NOT NULL) OR "
+            "(status = 'REJECTED' AND approved_by IS NULL AND approved_at IS NULL "
+            "AND rejected_by IS NOT NULL AND rejected_at IS NOT NULL "
+            "AND revoked_by IS NULL AND revoked_at IS NULL "
+            "AND revocation_reason IS NULL AND decision_acknowledgements IS NULL) OR "
+            "(status = 'REVOKED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL "
+            "AND rejected_by IS NULL AND rejected_at IS NULL "
+            "AND rejection_reason IS NULL AND revoked_by IS NOT NULL "
+            "AND revoked_at IS NOT NULL AND decision_acknowledgements IS NOT NULL))",
+            name="ck_media_import_requests_decision_shape",
+        ),
+        Index(
+            "uq_media_import_active_download_job",
+            "download_job_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED', "
+                "'APPROVED_PLAN_ONLY')"
+            ),
+            sqlite_where=text(
+                "status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED', "
+                "'APPROVED_PLAN_ONLY')"
+            ),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    download_job_id: Mapped[str] = mapped_column(
+        ForeignKey("download_jobs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    media_item_id: Mapped[str] = mapped_column(
+        ForeignKey("media_items.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("download_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[MediaImportStatus] = mapped_column(
+        Enum(MediaImportStatus, native_enum=False, length=30),
+        default=MediaImportStatus.PREFLIGHT_REQUIRED,
+        nullable=False,
+        index=True,
+    )
+    requested_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(120))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_by: Mapped[str | None] = mapped_column(String(120))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_reason: Mapped[str | None] = mapped_column(String(500))
+    revoked_by: Mapped[str | None] = mapped_column(String(120))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revocation_reason: Mapped[str | None] = mapped_column(String(500))
+    decision_acknowledgements: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class MediaImportPlan(Base):
+    __tablename__ = "media_import_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "mode = 'PLAN_ONLY_NO_FILE_OPERATION'",
+            name="ck_media_import_plans_mode",
+        ),
+        CheckConstraint(
+            "source_retention = true AND overwrite_allowed = false",
+            name="ck_media_import_plans_non_destructive",
+        ),
+        CheckConstraint(
+            portable_hex_check("source_manifest_hash", (64,)),
+            name="ck_media_import_plans_manifest_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("target_mapping_hash", (64,)),
+            name="ck_media_import_plans_target_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("summary_snapshot_hash", (64,)),
+            name="ck_media_import_plans_summary_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("config_fingerprint", (64,)),
+            name="ck_media_import_plans_config_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("plan_hash", (64,)),
+            name="ck_media_import_plans_plan_hash",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("media_import_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    download_job_id: Mapped[str] = mapped_column(
+        ForeignKey("download_jobs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    media_item_id: Mapped[str] = mapped_column(
+        ForeignKey("media_items.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("download_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mode: Mapped[str] = mapped_column(String(40), nullable=False)
+    proposed_operation: Mapped[MediaImportOperation] = mapped_column(
+        Enum(
+            MediaImportOperation,
+            name="ck_media_import_plans_operation_closed",
+            native_enum=False,
+            create_constraint=True,
+            length=20,
+        ),
+        nullable=False,
+    )
+    source_manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_mapping: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    target_mapping_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    job_summary_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    summary_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    source_retention: Mapped[bool] = mapped_column(default=True, nullable=False)
+    overwrite_allowed: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class MediaImportPreflight(Base):
+    __tablename__ = "media_import_preflights"
+    __table_args__ = (
+        CheckConstraint(
+            portable_hex_check("inspection_hash", (64,)),
+            name="ck_media_import_preflights_inspection_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("result_hash", (64,)),
+            name="ck_media_import_preflights_result_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("preflight_hash", (64,)),
+            name="ck_media_import_preflights_preflight_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("config_fingerprint", (64,)),
+            name="ck_media_import_preflights_config_hash",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("media_import_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("media_import_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    overall_status: Mapped[PreflightStatus] = mapped_column(
+        Enum(
+            PreflightStatus,
+            name="ck_media_import_preflights_status_closed",
+            native_enum=False,
+            create_constraint=True,
+            length=20,
+        ),
+        nullable=False,
+        index=True,
+    )
+    inspection_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    inspection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    result_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    preflight_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    checked_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class MediaImportEvent(Base):
+    __tablename__ = "media_import_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    request_id: Mapped[str] = mapped_column(
+        ForeignKey("media_import_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(30))
+    to_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    actor: Mapped[str] = mapped_column(String(120), nullable=False)
+    sanitized_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
 class AutomationPolicyRevision(Base):
     __tablename__ = "automation_policy_revisions"
     __table_args__ = (
@@ -922,6 +1155,64 @@ _DOWNLOAD_JOB_IMMUTABLE_FIELDS = (
     "created_at",
 )
 
+_MEDIA_IMPORT_REQUEST_IMMUTABLE_FIELDS = (
+    "download_job_id",
+    "media_item_id",
+    "execution_id",
+    "requested_by",
+    "requested_at",
+    "created_at",
+)
+
+_MEDIA_IMPORT_DECISION_FIELDS = (
+    "approved_by",
+    "approved_at",
+    "rejected_by",
+    "rejected_at",
+    "rejection_reason",
+    "revoked_by",
+    "revoked_at",
+    "revocation_reason",
+    "decision_acknowledgements",
+)
+
+_MEDIA_IMPORT_TRANSITIONS = {
+    MediaImportStatus.PREFLIGHT_REQUIRED: {
+        MediaImportStatus.REVIEW_REQUIRED,
+        MediaImportStatus.REJECTED,
+    },
+    MediaImportStatus.REVIEW_REQUIRED: {
+        MediaImportStatus.PREFLIGHT_REQUIRED,
+        MediaImportStatus.APPROVED_PLAN_ONLY,
+        MediaImportStatus.REJECTED,
+    },
+    MediaImportStatus.APPROVED_PLAN_ONLY: {MediaImportStatus.REVOKED},
+}
+
+_MEDIA_IMPORT_TERMINAL_STATUSES = {
+    MediaImportStatus.APPROVED_PLAN_ONLY,
+    MediaImportStatus.REJECTED,
+    MediaImportStatus.REVOKED,
+}
+
+_MEDIA_IMPORT_TRANSITION_DECISION_FIELDS = {
+    MediaImportStatus.APPROVED_PLAN_ONLY: {
+        "approved_by",
+        "approved_at",
+        "decision_acknowledgements",
+    },
+    MediaImportStatus.REJECTED: {
+        "rejected_by",
+        "rejected_at",
+        "rejection_reason",
+    },
+    MediaImportStatus.REVOKED: {
+        "revoked_by",
+        "revoked_at",
+        "revocation_reason",
+    },
+}
+
 
 @event.listens_for(ApprovalRequest, "before_update")
 def reject_approval_identity_update(
@@ -1006,6 +1297,46 @@ def reject_download_job_identity_update(
         raise ValueError(f"download job immutable fields cannot change: {', '.join(changed)}")
 
 
+@event.listens_for(MediaImportRequest, "before_update")
+def guard_media_import_request_update(
+    _mapper: Mapper[MediaImportRequest],
+    _connection: Connection,
+    target: MediaImportRequest,
+) -> None:
+    state = inspect(target)
+    changed = [
+        field
+        for field in _MEDIA_IMPORT_REQUEST_IMMUTABLE_FIELDS
+        if state.attrs[field].history.has_changes()
+    ]
+    if changed:
+        raise ValueError(f"media import immutable fields cannot change: {', '.join(changed)}")
+    status_history = state.attrs.status.history
+    allowed_decision_fields: set[str] = set()
+    if status_history.has_changes():
+        if not status_history.deleted:
+            raise ValueError("media import previous status is unavailable")
+        previous = status_history.deleted[0]
+        if target.status not in _MEDIA_IMPORT_TRANSITIONS.get(previous, set()):
+            raise ValueError(
+                f"invalid media import transition: {previous.value} -> {target.status.value}"
+            )
+        allowed_decision_fields = _MEDIA_IMPORT_TRANSITION_DECISION_FIELDS.get(
+            target.status, set()
+        )
+    elif target.status in _MEDIA_IMPORT_TERMINAL_STATUSES:
+        raise ValueError("terminal media import requests are immutable")
+    for field in _MEDIA_IMPORT_DECISION_FIELDS:
+        history = state.attrs[field].history
+        if not history.has_changes():
+            continue
+        if (
+            field not in allowed_decision_fields
+            or (history.deleted and history.deleted[0] is not None)
+        ):
+            raise ValueError(f"media import decision field cannot change: {field}")
+
+
 @event.listens_for(AutomationPolicyRevision, "before_update")
 @event.listens_for(AutomationDecision, "before_update")
 def reject_automation_audit_update(
@@ -1069,3 +1400,18 @@ def reject_immutable_audit_mutation(
     _target: object,
 ) -> None:
     raise ValueError("immutable approval audit records cannot be updated or deleted")
+
+
+@event.listens_for(MediaImportRequest, "before_delete")
+@event.listens_for(MediaImportPlan, "before_update")
+@event.listens_for(MediaImportPlan, "before_delete")
+@event.listens_for(MediaImportPreflight, "before_update")
+@event.listens_for(MediaImportPreflight, "before_delete")
+@event.listens_for(MediaImportEvent, "before_update")
+@event.listens_for(MediaImportEvent, "before_delete")
+def reject_media_import_audit_mutation(
+    _mapper: Mapper[object],
+    _connection: Connection,
+    _target: object,
+) -> None:
+    raise ValueError("media import plan, preflight, and events are immutable")

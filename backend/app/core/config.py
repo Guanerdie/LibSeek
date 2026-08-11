@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        enable_decoding=False,
         extra="ignore",
         case_sensitive=False,
     )
@@ -85,6 +86,9 @@ class Settings(BaseSettings):
     enable_qb_write: bool = False
     enable_download_monitor: bool = False
     enable_automation_engine: bool = False
+    enable_media_import_control_plane: bool = False
+    media_import_target_root_refs: tuple[str, ...] = ()
+    media_import_preflight_max_age_seconds: int = Field(default=300, ge=30, le=3600)
     execution_intent_default_ttl_seconds: int = Field(default=300, ge=30, le=3600)
     execution_intent_max_ttl_seconds: int = Field(default=900, ge=30, le=3600)
     download_execution_lease_seconds: int = Field(default=300, ge=30, le=3600)
@@ -164,12 +168,20 @@ class Settings(BaseSettings):
         "qb_allowed_save_paths",
         "qb_plan_tags",
         "avistaz_forbidden_qb_versions",
+        "media_import_target_root_refs",
         mode="before",
     )
     @classmethod
     def parse_string_tuple(cls, value: object) -> object:
         if isinstance(value, str):
             return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("max_candidate_size_bytes", mode="before")
+    @classmethod
+    def parse_optional_integer(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @staticmethod

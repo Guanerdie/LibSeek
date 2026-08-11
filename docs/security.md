@@ -3,6 +3,7 @@
 ## 当前阶段硬限制
 
 - `ENABLE_TMDB_LIVE=false`、`ENABLE_AVISTAZ_LIVE_SEARCH=false` 与 `ENABLE_QB_READ_ONLY=false` 默认禁止三个真实只读边界。
+- `ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false` 默认关闭阶段 7A；即使显式开启也只允许数据库规划状态，不挂载媒体目录、不扫描文件且没有文件执行器。
 - `ENABLE_AUTOMATION_ENGINE=false` 默认关闭自动化总闸；身份确认、种子选择、审批、执行四阶段的初始策略还分别固定为 `MANUAL`。只有某阶段设为 `AUTO_IF_ELIGIBLE`、总闸开启且该动作依赖的所有原有能力开关与资格硬条件同时通过时，才可能创建自动正向动作。
 - 自动审批预检位于默认不启动的 `automation-preflight` profile，额外要求 `ENABLE_QB_READ_ONLY=true`。它只有 qB 三项 Secret，只允许 SID 登录和只读 GET；普通 Worker 不 claim 自动预检任务，也没有 qB Secret。
 - AvistaZ 上游响应中的 `download`、announce、tracker、passkey 等字段在标准化时直接丢弃；`details_ref` 仅为 SHA256 派生的不可逆内部引用。
@@ -10,7 +11,7 @@
 - 阶段 5 执行器位于独立 `download-execution` profile。`ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 默认全部为 `false` 且必须同时为真；缺一即拒绝启动。启用意味着会访问已批准候选的 AvistaZ download URL，并可能向指定 qBittorrent 执行一次受控 add，因此必须逐次获得用户明确授权。
 - qBittorrent 公开 API 仍只允许 SID 登录及版本、任务、任务文件和分类读取；不存在直接 add/start/resume/pause/delete/recheck/download 业务路由。内部写适配器只允许执行器使用 add，且在真正 POST 前执行数据库 write guard。
 - 独立监控器由 `ENABLE_DOWNLOAD_MONITOR=false` 默认关闭，并额外要求 `ENABLE_QB_READ_ONLY=true`；它只读 qB，不调用任何 mutation，也不推断或覆盖 H&R 结论。
-- 没有文件移动、复制、硬链接、删除或媒体库写入代码。
+- 没有文件扫描、移动、复制、硬链接、覆盖、删除或媒体库写入代码；`HARDLINK`/`COPY` 只是不受信计划中的建议操作类型。
 - 自动化策略不追溯 `effective_from` 之前的积压条目；任何低分、并列、冲突、旧解析、站点/实体绑定不一致、IMDb-only、候选警告、季集覆盖不足、H&R `UNKNOWN`、预检非完整 `PASS` 或能力开关缺失都回退人工。自动选种只接受候选 TMDB ID 与已确认影视 TMDB ID 精确一致；自动执行只能 `ADD_PAUSED`，不能自动立即启动。
 - 默认注册表没有任何 NexusPHP 真实站点；声明式 NexusPHP 骨架默认关闭，只按经过审查的本地 HTML fixture 解析，且明确拒绝验证码和浏览器挑战，不提供任何绕过能力。
 
@@ -18,7 +19,7 @@
 
 - 系统使用一个本地账号；用户名、密码和会话签名密钥只由 API 从运行时配置读取。推荐使用仅挂载给 API 的 `auth_local_username`、`auth_local_password`、`auth_session_signing_key` Docker Secret，Worker 和前端不可见。
 - 三项认证材料必须同时存在，签名密钥至少 32 个字符。缺失、文件不可读或密钥过短时，认证接口和所有受保护 API 返回 `AUTH_NOT_CONFIGURED`，不会退回匿名模式；健康检查、系统状态和适配器能力信息保持公开且不返回用户数据。
-- `AUTH_LOCAL_ROLE` 只能为 `viewer`、`operator`、`admin`，权限逐级继承。`viewer` 只读；`operator` 还可执行发现、身份解析/确认、PT 搜索、审批申请、预检和拒绝；批准与撤销仅允许 `admin`。审计 actor 来自服务端会话中的用户名，客户端字段不能覆盖。
+- `AUTH_LOCAL_ROLE` 只能为 `viewer`、`operator`、`admin`，权限逐级继承。`viewer` 只读；`operator` 还可执行发现、身份解析/确认、PT 搜索、下载审批申请/预检/拒绝及创建媒体入库规划请求；下载审批的批准/撤销以及媒体入库规划的批准/拒绝/撤销仅允许 `admin`。审计 actor 来自服务端会话中的用户名，客户端字段不能覆盖。
 - 登录前先请求 `GET /api/auth/csrf` 获取有时限的 bootstrap token。`POST /api/auth/login` 必须同时提交 `unin_csrf` Cookie 与同值的 `X-CSRF-Token`；登录后所有状态变更和注销使用会话绑定的 CSRF token，同样执行双提交校验。
 - `unin_session` 使用 HMAC 签名，Cookie 属性为 `HttpOnly`、`SameSite=Strict`、`Path=/api`；`unin_csrf` 必须可由前端读取，但同样使用 `SameSite=Strict` 和 `Path=/api`。认证响应使用 `Cache-Control: no-store`，Nginx 必须原样转发 API 的 `Set-Cookie`。
 - `AUTH_SESSION_TTL_SECONDS` 默认 28800 秒，可配置 300 至 604800 秒；`AUTH_BOOTSTRAP_CSRF_TTL_SECONDS` 默认 600 秒，可配置 60 至 3600 秒。`AUTH_COOKIE_SECURE=false` 仅适合绑定 `127.0.0.1` 的本机 HTTP；生产 HTTPS 必须设为 `true`。
@@ -101,6 +102,16 @@ GET /api/downloaders/qbittorrent/torrents
 - H&R 没有可靠通用 qB 来源。新任务固定为 `UNKNOWN`；监控器不会根据 Ratio、做种时间或状态推断 H&R，也不会覆盖已经存在的 `AT_RISK` 或 `SATISFIED`。
 - summary 固定组合 job/media/approval/execution/warnings；timeline 合并三类追加式事件并再次执行递归脱敏。`HNR_STATUS_UNKNOWN` 作为警告展示，不会被包装成已满足。
 
+## 媒体入库规划边界
+
+- 媒体入库规划总闸默认关闭。`MEDIA_IMPORT_TARGET_ROOT_REFS` 只接受逗号分隔的不透明内部引用，不是路径映射；为空、重复、大小写碰撞或格式无效时失败关闭。`MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS` 默认 300 秒，范围固定为 30 至 3600 秒。
+- 只有进度为 100% 且状态为 `SEEDING`、`COMPLETED` 或 `PAUSED` 的 `DownloadJob` 可创建请求；绑定的 execution 必须为已核验的 `SUBMITTED`/`ALREADY_PRESENT` 终态、无需对账，原下载审批必须已消费。旧下载审批、执行意图和 qB add 授权不授予媒体文件操作权限。
+- 客户端源清单、目标映射、根引用及建议的 `HARDLINK`/`COPY` 都是不受信提案。请求边界禁止绝对/UNC/盘符路径、反斜杠、空/点/父目录段、控制字符、Windows 保留设备名、非规范 Unicode、大小写/Unicode 碰撞、源/目标重复和目标文件/目录前缀碰撞，并限制单条路径、文件数和累计路径文本量。
+- `MediaImportPlan` 固定为 `PLAN_ONLY_NO_FILE_OPERATION`、`source_retention=true`、`overwrite_allowed=false`。源清单、目标映射、下载/媒体/执行摘要、配置指纹和计划自身分别使用规范 JSON SHA-256 绑定；ORM 与 PostgreSQL trigger 禁止更新/删除固定计划。
+- inspection 只能来自内部受信只读边界，客户端没有提交 inspection 或 preflight 的公开端点。结果必须与提案的任务、info hash、根引用、每个源文件路径/大小及每个目标路径逐项一致，并检查源存在/普通文件/非符号链接/完成状态、目标不存在，以及硬链接同文件系统或复制空间充足。`BLOCKED`/`UNKNOWN` 不得批准。
+- preflight 是追加式记录；过期后允许重新检查，读取和批准只使用最新记录。配置指纹或计划绑定漂移时旧结果不可复用。批准只接受新鲜 `PASS`/`WARNING`，要求管理员分别确认仅规划、源保留和禁止覆盖；H&R 非 `SATISFIED` 时还要额外确认。
+- 公共命名空间只有 create/list/get/approve/reject/revoke，不存在 execute、scan、move、copy、hardlink、delete 或媒体库 writeback 路由。当前 Compose 没有媒体路径 volume、inspection Worker 或文件执行器，因此获批状态也不会操作文件。
+
 SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写入路径的完整性保护，不是外部签名或 WORM 存储。生产数据库仍必须最小化写权限、限制管理员访问并备份 `approval_events`；能够禁用 trigger 并同时改写记录和哈希的数据库超级管理员超出当前应用层威胁模型。若需覆盖该威胁，应引入运行时 HMAC 密钥或外部追加式审计锚点。
 
 ## 凭据与 12 个 Docker Secret
@@ -139,5 +150,6 @@ SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写�
 - 启动 `automation-preflight` profile 会让专用 Worker 在出现合格审批时主动登录目标 qB、执行只读 GET，并可能在完整 `PASS` 后自动批准和生成计划；必须在启动前单独确认这一动作。该授权不包含 AvistaZ download URL、`.torrent` 获取或 qB add。
 - 上述只读授权不包含 AvistaZ download URL、`.torrent` 获取或 qB add。若要验证执行器，必须另行列出已批准候选、将访问的 AvistaZ download URL 类型、目标 qB 实例引用、分类、保存路径引用和启动模式，并明确说明会新增真实 qB 任务；获得单独确认后才可启用三开关和 `download-execution` profile。
 - 监控器也需单独确认目标 qB 实例，但只执行登录与只读 GET。任何授权都不包含暂停、恢复、删除、重校验、媒体文件操作或媒体库写入。
+- 媒体入库规划真实数据验证应拆分授权：用户在本地选择一个具体 `DownloadJob` 并提交相对路径/大小/目标引用提案，只授权数据库记录；真实 inspection 需要另行列出将读取的实际源/目标根、只读挂载和检查范围；任何复制、硬链接或媒体库写回还需要后续阶段的独立写入授权。阶段 7A 不请求真实根路径，也不执行这两类后续验证。
 
-Mock/fixture 验收通过不代表已验证真实账号、真实站点或真实 qB 实例响应。真实开关应在冒烟测试结束后恢复为 `false`。当前未执行任何真实 TMDB、AvistaZ、qBittorrent 或 NexusPHP 连接，也没有真实 NexusPHP Profile 可用。
+Mock/fixture 验收通过不代表已验证真实账号、真实站点、真实 qB 实例响应或真实媒体文件。真实开关应在冒烟测试结束后恢复为 `false`。当前未执行任何真实 TMDB、AvistaZ、qBittorrent 或 NexusPHP 连接，没有真实 NexusPHP Profile 可用，也没有挂载或检查任何真实媒体路径。

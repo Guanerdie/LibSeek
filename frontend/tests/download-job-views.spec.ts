@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DownloadJobDetailView from '../src/views/DownloadJobDetailView.vue'
 import DownloadJobListView from '../src/views/DownloadJobListView.vue'
+import { useAuthStore } from '../src/stores/auth'
 import type { DownloadJob, DownloadJobSummary, DownloadJobTimeline } from '../src/types'
 
 const mocks = vi.hoisted(() => ({
@@ -15,6 +16,9 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/api/client', () => ({
+  ApiError: class MockApiError extends Error {},
+  authApi: {},
+  setApiCsrfToken: vi.fn(),
   downloadJobApi: mocks,
 }))
 
@@ -119,6 +123,8 @@ function makeRouter() {
       { path: '/download-jobs/:id', component: DownloadJobDetailView },
       { path: '/approvals/:id', component: { template: '<div />' } },
       { path: '/executions/:id', component: { template: '<div />' } },
+      { path: '/media-imports', component: { template: '<div />' } },
+      { path: '/media-imports/new', component: { template: '<div />' } },
     ],
   })
 }
@@ -126,6 +132,9 @@ function makeRouter() {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  const auth = useAuthStore()
+  auth.initialized = true
+  auth.principal = { username: 'operator-user', role: 'operator' }
 })
 
 describe('download job views', () => {
@@ -179,6 +188,13 @@ describe('download job views', () => {
     expect(wrapper.text()).toContain('"verified": true')
     expect(wrapper.find('a[href="/approvals/approval-1"]').exists()).toBe(true)
     expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
+    expect(wrapper.find('a[href="/media-imports?download_job_id=job-1"]').exists()).toBe(true)
+    expect(
+      wrapper.find(
+        'a[href="/media-imports/new?download_job_id=job-1&source_root_ref=media-library"]',
+      ).exists(),
+    ).toBe(true)
+    expect(wrapper.text()).toContain('仅规划，不操作媒体文件')
     expect(wrapper.findAll('button').map((button) => button.text())).toEqual(['刷新总结'])
   })
 

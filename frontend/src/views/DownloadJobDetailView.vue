@@ -5,11 +5,13 @@ import { RouterLink, useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
+import { useAuthStore } from '../stores/auth'
 import { useDownloadJobStore } from '../stores/downloadJobs'
 import type { DownloadJobTimelineItem, HnrStatus } from '../types'
 import { formatShanghai } from '../utils/format'
 
 const route = useRoute()
+const auth = useAuthStore()
 const store = useDownloadJobStore()
 const job = computed(() => store.summary?.job ?? store.selected)
 const sourceLabels: Record<DownloadJobTimelineItem['source'], string> = {
@@ -105,6 +107,18 @@ function detailsLabel(details: Record<string, unknown>): string {
       <div v-if="job.hnr_status === 'UNKNOWN'" class="notice-state warning-state job-hnr-warning">
         H&amp;R 状态为 UNKNOWN：不能根据下载完成、做种时间或 Ratio 推断站点义务已经满足。
       </div>
+
+      <section class="media-import-entry">
+        <div>
+          <span class="eyebrow">MEDIA IMPORT PLAN</span>
+          <strong>入库规划</strong>
+          <small>仅规划，不操作媒体文件</small>
+        </div>
+        <div class="header-actions">
+          <RouterLink class="button secondary" :to="{ path: '/media-imports', query: { download_job_id: job.id } }">查看关联规划</RouterLink>
+          <RouterLink v-if="auth.hasRole('operator')" class="button primary" :to="{ path: '/media-imports/new', query: { download_job_id: job.id, source_root_ref: job.save_path_ref } }">创建入库规划</RouterLink>
+        </div>
+      </section>
 
       <div class="job-detail-grid">
         <section class="job-detail-section job-monitoring-section">

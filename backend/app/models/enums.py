@@ -91,6 +91,19 @@ class HnrStatus(StrEnum):
     SATISFIED = "SATISFIED"
 
 
+class MediaImportStatus(StrEnum):
+    PREFLIGHT_REQUIRED = "PREFLIGHT_REQUIRED"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    APPROVED_PLAN_ONLY = "APPROVED_PLAN_ONLY"
+    REJECTED = "REJECTED"
+    REVOKED = "REVOKED"
+
+
+class MediaImportOperation(StrEnum):
+    HARDLINK = "HARDLINK"
+    COPY = "COPY"
+
+
 class PreflightStatus(StrEnum):
     PASS = "PASS"
     WARNING = "WARNING"

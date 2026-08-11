@@ -1,6 +1,6 @@
 # 测试与验收
 
-所有自动化测试使用 respx、`httpx.MockTransport`、ASGI transport 或内存数据库替身。默认配置不允许 TMDB、AvistaZ 或 qBittorrent 真实网络请求；测试不得把任何真实连接开关设为 `true`。
+所有自动化测试使用 respx、`httpx.MockTransport`、ASGI transport、内存数据库替身或合成文件 inspection 快照。默认配置不允许 TMDB、AvistaZ、qBittorrent 或媒体文件真实访问；测试不得把任何真实连接或文件执行能力视为已授权。
 
 ## 后端（PowerShell）
 
@@ -54,7 +54,7 @@ npm.cmd run build
 npm.cmd run lint
 ```
 
-覆盖原有列表状态以及身份候选、人工确认、PT 候选、评分理由、警告、固定候选审批、三项批准确认、预检状态和下载计划；还覆盖四阶段自动化策略、总闸只读显示、管理员发布、条件化确认、策略哈希链、决策筛选/分页/脱敏详情，以及两步执行确认、默认 `ADD_PAUSED`、nonce 请求前销毁、执行列表/详情、人工对账、下载任务列表和包含媒体/审批/执行/进度/H&R/警告/三源时间线的总结页。自动化、qB、审批、执行与下载任务 store 在失败时清空陈旧状态，并使用请求 generation 丢弃迟到响应。源码不得使用 `localStorage`、`sessionStorage` 或 Pinia 持久化保存策略、凭据、nonce、SID 或 qB 数据。
+覆盖原有列表状态以及身份候选、人工确认、PT 候选、评分理由、警告、固定候选审批、三项批准确认、预检状态和下载计划；还覆盖四阶段自动化策略、总闸只读显示、管理员发布、条件化确认、策略哈希链、决策筛选/分页/脱敏详情，以及两步执行确认、默认 `ADD_PAUSED`、nonce 请求前销毁、执行列表/详情、人工对账、下载任务列表和包含媒体/审批/执行/进度/H&R/警告/三源时间线的总结页。阶段 7A 另覆盖媒体入库规划列表/筛选、创建清单与映射、详情证据、三项固定及条件式 H&R 确认、viewer 只读权限、下载总结入口、桌面/窄屏布局和始终可见的“仅规划，不操作媒体文件”。相关 store 在请求开始或失败时清空陈旧状态，并使用请求 generation 丢弃迟到响应。源码不得使用 `localStorage`、`sessionStorage` 或 Pinia 持久化保存策略、凭据、nonce、SID、qB 或媒体入库规划数据。
 
 ## Compose（PowerShell）
 
@@ -71,7 +71,7 @@ Secret override 配置结构：
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example config --quiet
 ```
 
-阶段 5/6 可选服务 profile（仍使用全 `false` 的 `.env.example`，只验证 Compose 结构，不会启动容器）：
+阶段 5/6 可选服务 profile（仍使用全部危险开关为 `false` 的 `.env.example`，只验证 Compose 结构，不会启动容器）：
 
 ```powershell
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile automation-preflight config --quiet
@@ -79,7 +79,7 @@ docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-monitor config --quiet
 ```
 
-这些命令只解析服务配置和 Secret 引用。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此成功不代表以下 12 个文件已经就绪，也不代表自动预检或执行开关已获授权：
+这些命令只解析服务配置和 Secret 引用。五种渲染结果中的 API 都必须显式包含 `ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false`、空的 `MEDIA_IMPORT_TARGET_ROOT_REFS` 和 `MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS=300`；任何服务都不得出现媒体目录 volume。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此成功不代表以下 12 个文件已经就绪，也不代表自动预检或执行开关已获授权：
 
 ```text
 auth_local_username.txt
@@ -141,17 +141,18 @@ if ($missingSecrets) {
 
 ## 静态安全验收
 
-在仓库根目录运行以下只读检查，用于确认没有新增 qB 写路由或浏览器持久化：
+在仓库根目录运行以下只读检查，用于确认没有新增 qB 写路由、媒体文件执行路由或浏览器持久化：
 
 ```powershell
 Set-Location D:\project\unin
 rg -n 'localStorage|sessionStorage|pinia-plugin-persist' frontend\src
 rg -n '@router\.(post|put|patch|delete)' backend\app\api\routes\downloaders.py
 rg -n '(/api/v2/torrents/(add|pause|resume|delete|recheck)|download_url|announce|passkey)' backend\app frontend\src
+rg -n '@router\.(post|put|patch|delete).*?(execute|scan|move|copy|hardlink|delete|writeback)' backend\app\api\routes\media_imports.py
 rg -n 'proxy_hide_header\s+Set-Cookie' frontend\nginx.conf
 ```
 
-预期：第一、第二和第四条无匹配；第三条可命中默认关闭的内部 qB 写适配器、安全校验或测试断言，但不得出现在业务路由中，也不得返回真实下载字段。最终还应读取 `/api/openapi.json`，确认认证端点存在、执行 intent/execute/reconcile 端点具有 admin RBAC 与 CSRF，且 `/api/downloaders/qbittorrent/*` 仍只有 `GET`。
+预期：第一、第二、第四和第五条无匹配；第三条可命中默认关闭的内部 qB 写适配器、安全校验或测试断言，但不得出现在业务路由中，也不得返回真实下载字段。最终还应读取 `/api/openapi.json`，确认认证端点存在、执行 intent/execute/reconcile 端点具有 admin RBAC 与 CSRF，`/api/downloaders/qbittorrent/*` 仍只有 `GET`，且 `/api/media-import-requests` 只有 create/list/get/approve/reject/revoke。
 
 阶段 4 控制面定向验收：
 
@@ -205,6 +206,25 @@ npm.cmd test -- automation-store.spec.ts automation-view.spec.ts api-security.sp
 
 以上命令只使用 SQLite/Mock transport、合成模型和本地前端 DOM，不需要真实 TMDB、AvistaZ、qBittorrent、PostgreSQL 或运行时 Secret。阶段 6 的通过数量必须以最终全量复验输出为准，文档不固化中间测试计数。
 
+阶段 7A 媒体入库规划定向验收：
+
+```powershell
+Set-Location D:\project\unin\backend
+uv run pytest tests\test_media_imports.py tests\test_migrations.py -q
+uv run alembic upgrade head --sql
+
+Set-Location D:\project\unin
+docker compose --env-file .env.example config --format json |
+    Select-String 'ENABLE_MEDIA_IMPORT_CONTROL_PLANE|MEDIA_IMPORT_TARGET_ROOT_REFS|MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS'
+
+Set-Location D:\project\unin\frontend
+npm.cmd test -- media-import-store.spec.ts media-import-views.spec.ts
+```
+
+覆盖项包括：默认关闭与空白目标白名单失败关闭、角色权限、下载完成/执行终态/原审批绑定、路径穿越与绝对/UNC/盘符路径、大小写和 Unicode 碰撞、文件/目录前缀碰撞、文件数量与累计路径文本上限；还覆盖客户端提案与内部受信 inspection 的逐项绑定、缺失/符号链接/未完成源文件、已有目标、硬链接跨文件系统、复制空间不足、追加式多次预检、预检过期和配置漂移、H&R 额外确认、ORM/PostgreSQL 不可变保护及 downgrade 有记录时失败关闭。OpenAPI 必须没有文件执行端点。
+
+这些测试只构造相对路径文本和受信 inspection 数据模型，不读取文件系统。阶段 7A 的 Compose 只有 API 接收三个非 Secret 配置变量，默认总闸为 `false`、目标引用为空，并且没有新增媒体目录 volume、inspection Worker 或 executor。版本验收还应确认 `backend/pyproject.toml`、FastAPI OpenAPI metadata、`frontend/package.json`、README 与架构文档一致为 `0.7.0`；锁文件只在对应包管理器确认需要重算时更新，不做机械替换。
+
 ## 验收边界
 
 - 自动化验收不得把真实连接开关设为 `true`。
@@ -212,3 +232,4 @@ npm.cmd test -- automation-store.spec.ts automation-view.spec.ts api-security.sp
 - 不启动真实 API/PostgreSQL 也能完成单元、Mock、静态、构建、Alembic 离线 SQL 与 Compose 解析验收。
 - Mock 中的 AvistaZ download 和 qB add 都由内存 transport/fake adapter 模拟。未取得独立真实执行授权时，验收完成即停止：不访问真实 download URL、不获取真实 `.torrent`、不调用真实 qB 写接口、不开始真实下载。
 - 即使真实执行器另行获准验证，也不执行暂停、恢复、删除、重校验、H&R 推断或媒体文件移动、复制、重命名、硬链接和删除。
+- 阶段 7A 的合成 inspection 通过不等于真实文件已检查。需要真实数据时，先由用户在本地选定一个下载任务并确认相对路径/大小/目标引用提案；这仍不授权读取真实根路径。当前缺少受信 inspection 生产者和文件执行器，因此验收在计划/数据库/API/UI 边界停止。

@@ -1,6 +1,6 @@
 # 架构与状态流
 
-版本 `0.6.0` 在 FastAPI 控制面、普通发现 Worker、可选自动预检 Worker、可选下载执行器、可选只读监控器、PostgreSQL 和 Vue 管理端之间加入保守自动化策略与决策审计。阶段 4 的 intent/execute/reconcile 仍是默认关闭的数据库控制面；阶段 5 的真实 AvistaZ 取种与 qB add 仍位于独立执行器中；阶段 6 只在四阶段策略、总闸、资格硬条件、短 TTL readiness 和原有能力闸门同时允许时推进新条目。媒体文件始终不在系统操作范围内。
+版本 `0.7.0` 在 FastAPI 控制面、普通发现 Worker、可选自动预检 Worker、可选下载执行器、可选只读监控器、PostgreSQL 和 Vue 管理端之间加入默认关闭的媒体入库规划控制面。阶段 4 的 intent/execute/reconcile 仍是默认关闭的数据库控制面；阶段 5 的真实 AvistaZ 取种与 qB add 仍位于独立执行器中；阶段 6 只在四阶段策略、总闸、资格硬条件、短 TTL readiness 和原有能力闸门同时允许时推进新条目；阶段 7A 只保存不可执行的媒体入库计划、只读预检记录和人工决定。媒体文件始终不在系统操作范围内。
 
 ```mermaid
 flowchart LR
@@ -28,6 +28,8 @@ flowchart LR
   Executor -->|执行配置 readiness| DB
   Monitor[download-monitor profile] -->|只读任务观察| QB
   Monitor -->|进度与状态| DB
+  API -->|媒体入库提案与人工决定| ImportPlan[PLAN ONLY]
+  ImportPlan -->|不可变计划、预检与事件| DB
 ```
 
 ## 认证与授权流
@@ -195,6 +197,25 @@ PENDING | 到期的 RETRY_WAIT
 
 监控器不调用任何 qB mutation，也不从 qB 状态、Ratio 或做种时长推断 H&R。新任务初始为 `UNKNOWN`，已有 `AT_RISK`/`SATISFIED` 值不会被监控器覆盖。总结 API 固定返回 `job/media/approval/execution/warnings`，时间线按时间合并 approval、execution、job 三类追加式事件并再次脱敏。
 
+## 媒体入库规划控制面
+
+阶段 7A 由 `ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false` 默认关闭，固定模式为 `PLAN_ONLY_NO_FILE_OPERATION`。它没有独立 Compose profile、媒体目录 volume、真实路径解析器、文件扫描器、inspection Worker 或文件执行器；开启总闸只允许 API/数据库记录规划状态，不增加进程文件权限。
+
+创建请求要求下载任务进度为 100%，状态为 `SEEDING`、`COMPLETED` 或 `PAUSED`，并绑定已消费的下载审批以及 `SUBMITTED`/`ALREADY_PRESENT`、已核验且无需对账的执行终态。客户端提交的源清单、目标映射、`HARDLINK`/`COPY` 选择和根引用都是不受信提案。根引用必须是不透明内部标识，目标引用还必须位于 `MEDIA_IMPORT_TARGET_ROOT_REFS` 白名单；真实绝对路径、盘符、UNC、反斜杠、父目录、控制字符、保留设备名、大小写/Unicode 碰撞和文件/目录前缀碰撞都会在 schema 边界拒绝。单条路径、文件数和累计路径文本量均有上限。
+
+```text
+operator 创建提案
+  -> PREFLIGHT_REQUIRED + 不可变 MediaImportPlan
+  -> 内部受信只读 inspection 与提案逐项绑定
+  -> 最新预检 PASS | WARNING -> REVIEW_REQUIRED
+  -> admin 三项固定确认 + 条件式 H&R 确认 -> APPROVED_PLAN_ONLY
+  -> admin 可 REJECTED，已批准计划可 REVOKED
+```
+
+inspection 只允许从内部服务边界传入，公共 API 不接受客户端声称的文件存在性、符号链接、同文件系统或可用空间结果。每次预检都追加保存并绑定计划、下载/执行摘要、info hash、源清单、目标映射和当前配置指纹；`BLOCKED`/`UNKNOWN` 会让请求回到 `PREFLIGHT_REQUIRED`，过期只要求重新预检，计划或配置绑定漂移则拒绝复用旧计划。当前版本没有 inspection 生产者，因此部署链路不会读取真实文件，也不能仅凭提案进入可批准状态。
+
+人工批准只接受 `MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS` 时间窗内的最新 `PASS`/`WARNING`，并要求分别确认仅规划、保留源文件、禁止覆盖；H&R 不是 `SATISFIED` 时还必须确认风险。旧的种子审批、执行授权或下载完成状态只证明下载链路，不构成任何媒体文件读取或写入授权。API 不提供 execute、scan、move、copy、hardlink、delete 或媒体库 writeback 端点。
+
 ## qBittorrent 只读边界
 
 `QbittorrentReadOnlyAdapter` 由 API 的人工预检/只读查询、`automation-preflight` 和下载监控器按各自职责使用；每个进程维护独立的 SID Cookie 会话，只实现以下上游调用：
@@ -243,10 +264,14 @@ API 对前端只暴露 `/api/downloaders/qbittorrent/status` 和 `/api/downloade
 - `download_execution_events`：不可变的执行状态与对账审计事件。
 - `download_jobs`：提交后经 qB 只读核验创建的唯一任务，保存公开路径引用、进度、流量、Ratio 与 H&R 状态。
 - `download_job_events`：任务创建与状态变化的追加式脱敏事件。
+- `media_import_requests`：绑定已完成下载任务的规划状态与人工决定；同一任务同时最多一个活动请求。
+- `media_import_plans`：每个请求一个不可变 `PLAN_ONLY_NO_FILE_OPERATION` 计划，固定保留源文件并禁止覆盖。
+- `media_import_preflights`：追加式受信只读 inspection 与结果快照；允许过期后产生新记录，查询和批准只使用最新记录。
+- `media_import_events`：创建、预检、批准、拒绝和撤销的追加式脱敏审计事件。
 - `automation_policy_revisions` / `automation_policy_heads`：不可变策略哈希链与只可原子前进的全局当前版本指针。
 - `automation_decisions`：绑定策略、阶段、动作、实体、结果、理由和脱敏证据哈希的不可变自动化审计记录。
 - `worker_heartbeats`：普通 Worker 存活状态，以及自动预检/执行器的短 TTL 非敏感能力指纹；不保存 URL 或凭据。
 - `jobs`：发现、身份解析、PT 搜索和自动只读预检共用的可恢复数据库队列；不同 Worker 按 job type 和权限边界 claim。
 - `audit_events`：关键状态变更与人工操作的脱敏审计记录。
 
-所有数据库时间写 UTC，前端按 `Asia/Shanghai` 展示。候选快照、审批事件、执行响应、下载计划与任务 API 不含 Cookie、Token、PID、密码、真实下载 URL、announce URL、tracker、passkey、lease token、真实 qB URL 或真实保存路径。`torrent_ref` 与 `save_path_ref` 都是内部引用，计划中的 `media_destination_plan.mode` 固定为 `PLAN_ONLY_NO_FILE_OPERATION`；即使下载执行完成，也没有媒体文件操作。
+所有数据库时间写 UTC，前端按 `Asia/Shanghai` 展示。候选快照、审批事件、执行响应、下载计划与任务 API 不含 Cookie、Token、PID、密码、真实下载 URL、announce URL、tracker、passkey、lease token、真实 qB URL 或真实保存路径。`torrent_ref`、`save_path_ref` 和媒体入库根引用都是内部引用；下载计划中的 `media_destination_plan.mode` 与阶段 7A 的 `MediaImportPlan.mode` 都固定为 `PLAN_ONLY_NO_FILE_OPERATION`。即使下载执行完成或媒体入库计划获批，也没有媒体文件操作。

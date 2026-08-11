@@ -1,8 +1,8 @@
 # UNIN 影视缺失资源检索与下载编排系统
 
-UNIN 当前版本为 `0.6.0`。系统已实现从 NextFind 发现未入库影视、TMDB 身份与季集补全、PT 候选搜索和人工/保守自动化决策，到受控 AvistaZ 取种、qBittorrent 提交、只读进度监控与下载总结页的完整代码链路。FastAPI、职责隔离的 Worker、PostgreSQL 和 Vue 管理端共同保存脱敏的状态与审计记录。
+UNIN 当前版本为 `0.7.0`。系统已实现从 NextFind 发现未入库影视、TMDB 身份与季集补全、PT 候选搜索和人工/保守自动化决策，到受控 AvistaZ 取种、qBittorrent 提交、只读进度监控、下载总结和媒体入库规划控制面的完整代码链路。FastAPI、职责隔离的 Worker、PostgreSQL 和 Vue 管理端共同保存脱敏的状态与审计记录。
 
-真实外部能力仍然默认关闭，且当前只完成 Mock、fixture、静态检查和离线迁移验收；尚未使用真实 TMDB、AvistaZ、qBittorrent 或 NexusPHP 站点完成端到端冒烟测试。只有用户明确批准具体动作、目标和影响，并在本机安全录入运行时 Secret 后，才允许启用相应开关。系统不移动、复制、重命名、硬链接或删除媒体文件，也不执行媒体库写入。
+真实外部能力和阶段 7A 媒体入库规划控制面仍然默认关闭，且当前只完成 Mock、fixture、静态检查和离线迁移验收；尚未使用真实 TMDB、AvistaZ、qBittorrent、NexusPHP 站点或媒体文件完成端到端冒烟测试。只有用户明确批准具体动作、目标和影响，并在本机安全录入运行时 Secret 后，才允许启用相应外部开关。阶段 7A 固定为 `PLAN_ONLY_NO_FILE_OPERATION`：系统不扫描、移动、复制、重命名、硬链接、覆盖或删除媒体文件，也不执行媒体库写回。
 
 ## 已实现
 
@@ -21,7 +21,8 @@ UNIN 当前版本为 `0.6.0`。系统已实现从 NextFind 发现未入库影视
 - 阶段 5 独立执行器：租约和 fencing 保护下重新搜索已批准的 AvistaZ torrent ID，校验 `.torrent` 的 v1/v2 hash、大小和文件数，在任何 qB add 前持久化实际摘要；按全部 hash alias 查重，提交后再只读核验并创建唯一 `DownloadJob`。
 - 未知提交结果不会自动重试：写入可能发生时进入 `OUTCOME_UNKNOWN`，已预留但无法验证时进入 `RECONCILIATION_REQUIRED`；人工对账请求只记录为 `RECONCILIATION_PENDING`，不会冒充成功或再次 add。
 - 独立只读监控器：读取 qB 状态并更新任务进度、速度、上传量、Ratio 和完成时间；它不推断 H&R，未知值保持 `UNKNOWN`，已有人工或外部写入的 `AT_RISK`/`SATISFIED` 不会被覆盖。
-- Vue 管理端包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、执行列表/详情、人工对账、下载任务列表和总结页；`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
+- 阶段 7A 媒体入库规划控制面：只允许为进度 100% 且处于 `SEEDING`、`COMPLETED` 或 `PAUSED` 的已核验下载任务创建 `HARDLINK`/`COPY` 提案。客户端清单和目标映射始终是不受信提案；不可变计划、追加式只读预检和人工决定以 SHA-256 绑定，固定保留源文件并禁止覆盖目标。当前没有真实媒体路径挂载、文件检查 Worker 或文件执行器。
+- Vue 管理端包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、执行列表/详情、人工对账、下载任务列表/总结，以及媒体入库规划列表、创建和详情页；各页面始终显示“仅规划，不操作媒体文件”，`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
 - Docker Compose 默认启动 API、普通 Worker、前端和 PostgreSQL；`automation-preflight`、`download-execution` 与 `download-monitor` profile 分别启用独立自动预检 Worker、下载执行器和只读监控器。API 与前端端口只绑定 `127.0.0.1`。
 
 架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)，PT Profile 接入约束见 [docs/pt-site-profiles.md](docs/pt-site-profiles.md)。
@@ -30,12 +31,12 @@ UNIN 当前版本为 `0.6.0`。系统已实现从 NextFind 发现未入库影视
 
 ```text
 backend/                 FastAPI、适配器、数据库、普通/自动预检/执行/监控 Worker、Alembic、测试
-frontend/                Vue 3、Pinia、Router、审批、执行与下载总结页面、Vitest
+frontend/                Vue 3、Pinia、Router、审批、执行、下载总结与媒体入库规划页面、Vitest
 deploy/                  Docker Secret Compose override 示例
 docs/                    架构、安全、测试与 PT Profile 文档
 scripts/                 Windows/Linux 启动与测试脚本
 secrets/                 12 个本地 Secret 文件目录，*.txt 已被 Git 忽略
-compose.yaml             4 个默认服务及 2 个 opt-in profile 服务
+compose.yaml             4 个默认服务及 3 个 opt-in profile 服务
 .env.example             无真实密钥的配置样例，真实连接默认关闭
 ```
 
@@ -68,7 +69,7 @@ docker compose ps
 
 ## 本地登录与权限
 
-系统只配置一个本地账号。`AUTH_LOCAL_ROLE` 决定该账号的最高权限：`viewer` 只能读取影视、候选、审批、执行、下载任务、自动化策略/决策和 qB 只读状态；`operator` 继承读取权限，并可创建发现/解析/搜索/审批申请、执行预检、确认身份和拒绝审批；`admin` 继承前两级权限，并可批准/撤销审批、发布自动化策略修订、创建执行意图、提交执行请求和请求人工对账。服务端始终以登录会话中的用户名写人工操作 actor，自动动作使用 `system:automation` 命名空间，客户端伪造的操作者字段不会生效。
+系统只配置一个本地账号。`AUTH_LOCAL_ROLE` 决定该账号的最高权限：`viewer` 只能读取影视、候选、审批、执行、下载任务、媒体入库计划、自动化策略/决策和 qB 只读状态；`operator` 继承读取权限，并可创建发现/解析/搜索/审批申请、执行下载预检、确认身份、拒绝下载审批和创建媒体入库规划请求；`admin` 继承前两级权限，并可批准/撤销下载审批、发布自动化策略修订、创建执行意图、提交执行请求、请求人工对账，以及批准、拒绝或撤销媒体入库规划请求。服务端始终以登录会话中的用户名写人工操作 actor，自动动作使用 `system:automation` 命名空间，客户端伪造的操作者字段不会生效。
 
 认证接口：
 
@@ -135,6 +136,17 @@ qBittorrent 公开命名空间始终只有以上两个 `GET`。系统没有直�
 
 执行与下载任务列表使用有界分页和稳定排序。API 不返回 intent nonce 的持久副本、幂等摘要、lease token、Worker ID、真实 qB URL、真实保存路径或 Secret；内部错误只暴露稳定 `error_code` 和固定提示。`reconcile` 只登记人工对账请求，不进行 qB 外部调用，也不会把不确定结果改成成功。
 
+## 媒体入库规划 API
+
+- `POST /api/media-import-requests`：`operator` 创建不受信源清单和目标映射提案。
+- `GET /api/media-import-requests`：`viewer` 分页查询。
+- `GET /api/media-import-requests/{id}`：`viewer` 查看固定计划、最新只读预检和追加式事件。
+- `POST /api/media-import-requests/{id}/approve`：`admin` 在新鲜预检通过后确认仅规划、保留源文件和禁止覆盖；H&R 非 `SATISFIED` 时还要单独确认。
+- `POST /api/media-import-requests/{id}/reject`：`admin` 拒绝规划请求。
+- `POST /api/media-import-requests/{id}/revoke`：`admin` 撤销已批准的规划请求。
+
+这一命名空间没有 `preflight`、`execute`、`scan`、`move`、`copy`、`hardlink`、`delete` 或媒体库 `writeback` 端点。创建请求只保存 `PLAN_ONLY_NO_FILE_OPERATION` 计划；旧的种子审批和 qB 下载授权不能解释为媒体文件操作授权。批准还要求内部受信的只读 inspection 与客户端提案逐项一致，并使用 30 至 3600 秒范围内的新鲜 `PASS`/`WARNING` 预检。阶段 7A 没有接入真实 inspection 生产者，因此常规部署只能创建和审阅计划，不能凭客户端输入自行产生可批准的预检，更不会执行文件操作。
+
 ## 外部能力与执行开关
 
 默认保持：
@@ -149,6 +161,7 @@ ENABLE_DOWNLOAD_EXECUTOR=false
 ENABLE_AVISTAZ_TORRENT_FETCH=false
 ENABLE_QB_WRITE=false
 ENABLE_DOWNLOAD_MONITOR=false
+ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false
 ```
 
 `ENABLE_AUTOMATION_ENGINE` 是四阶段 `AUTO_IF_ELIGIBLE` 的进程级总闸；它不会覆盖阶段策略，也不会替代 TMDB、AvistaZ、qB 只读、控制面或执行器各自的能力开关。仅发布自动化策略不会访问外部服务或处理旧积压。`AUTOMATION_PREFLIGHT_READY_TTL_SECONDS` 与 `DOWNLOAD_EXECUTOR_READY_TTL_SECONDS` 默认均为 90 秒；过期或配置指纹不匹配的 readiness 会阻止新的自动预检/执行并回退人工。
@@ -156,6 +169,8 @@ ENABLE_DOWNLOAD_MONITOR=false
 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE` 只允许管理员创建 intent 和 `PENDING` 执行记录。独立执行器要求 `ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 三个开关同时为 `true`；少一个即拒绝启动。实际运行还需要显式启用 AvistaZ 搜索、提供 AvistaZ/qB 运行时 Secret 和 qB 目标策略。自动执行即使满足全部资格也只能创建 `ADD_PAUSED` 任务，不允许自动选择 `START_IMMEDIATELY`。任何真实验证前都必须先向用户列出将访问的 URL、将读取或写入的对象和可能影响，并取得明确授权。
 
 `ENABLE_DOWNLOAD_MONITOR=true` 还必须配合 `ENABLE_QB_READ_ONLY=true`。监控器只调用 qB 登录和只读 GET，不调用暂停、恢复、删除或重校验。
+
+`ENABLE_MEDIA_IMPORT_CONTROL_PLANE=true` 只开放数据库中的媒体入库规划状态流。`MEDIA_IMPORT_TARGET_ROOT_REFS` 是逗号分隔的不透明目标根引用白名单，不得填写真实文件系统路径；留空时创建请求失败关闭。`MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS` 默认 300 秒且只接受 30 至 3600 秒。配置不挂载媒体目录、不创建只读检查器，也不授予任何文件读写权限。
 
 推荐使用项目内的本地 Secret 文件和 Compose override。共需 12 个文件：本地认证 3 个、NextFind 2 个、TMDB 1 个、AvistaZ 3 个、qBittorrent 3 个。以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。
 
@@ -216,6 +231,8 @@ Secret 可见范围固定为：API 读取全部 12 个；普通 Worker 只读取
 
 认证与 qB 的非密钥策略仍在本机 `.env` 中配置。认证策略包括 `AUTH_LOCAL_ROLE`、会话/CSRF TTL 和 `AUTH_COOKIE_SECURE`；不要在使用 Secret override 时把三个认证值同时写入 `.env`。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
 
+阶段 7A 的目标根配置与 qB 保存路径相互独立。用户只在本机 `.env` 录入经过约定的不透明 `MEDIA_IMPORT_TARGET_ROOT_REFS`；通过页面或 API 提交的也只能是源/目标相对路径和文件大小提案。现阶段不需要录入真实媒体根路径，也不要给 Compose 添加媒体目录 volume。只有后续引入受信只读 inspection 时，才需要先向用户说明将读取的实际下载根和目标根、挂载模式及检查范围并取得确认；引入复制/硬链接执行器还需要新的独立阶段和文件写入授权。
+
 普通开发启动不启用自动预检、下载执行或监控 profile：
 
 ```powershell
@@ -252,11 +269,13 @@ docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.ex
 
 TMDB 只读测试会连接 `api.themoviedb.org`；AvistaZ 搜索测试会连接 `avistaz.to` 的认证与搜索端点；qB 只读测试会连接 `qb_base_url.txt` 指定且被 `QB_ALLOWED_HOSTS` 精确允许的实例。当前均未执行真实冒烟测试。执行器测试与只读测试不是同一授权范围：批准搜索或 qB 只读测试，不等于批准访问 AvistaZ download URL 或向 qB add。
 
+媒体入库规划的离线验收只使用合成下载任务、文件清单、目标映射和 inspection 快照，不读取真实文件。需要验证真实数据时，应先由用户在本地完成相应下载链路并选定单个 `DownloadJob`，再确认将提交的相对路径清单、大小、目标根引用和映射；这只授权创建提案。阶段 7A 没有真实 inspection/执行能力，因此不得要求用户录入真实根路径，也不得据此读取或修改媒体文件。
+
 ## 明确未实现
 
 - qBittorrent 暂停、恢复、删除、重校验、文件优先级修改、做种控制或 H&R 自动判定。执行器唯一允许的 qB 写操作是受控 add。
 - 自动解决 `OUTCOME_UNKNOWN`/`RECONCILIATION_REQUIRED`；当前只能人工登记对账请求，不能自动再次 add。
-- 下载完成后的媒体整理、重命名、移动、复制、硬链接、删除、扫描入库或 NextFind/媒体库写回。
+- 下载完成后的媒体整理执行：真实路径 inspection、重命名、移动、复制、硬链接、删除、扫描入库或 NextFind/媒体库写回。阶段 7A 仅保存不可执行计划与合成只读预检记录。
 - 任何已验证可用的真实 NexusPHP 站点 Profile、浏览器 DOM 抓取或验证码/反爬绕过；
   当前仅有默认关闭的声明式适配骨架与本地 HTML fixture 契约，详见
   [`docs/pt-site-profiles.md`](docs/pt-site-profiles.md)。

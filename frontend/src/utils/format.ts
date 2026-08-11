@@ -61,6 +61,9 @@ export function statusLabel(status: string): string {
       MANUAL_REQUIRED: '需要人工',
       STALE: '上下文已过期',
       NOOP: '无需动作',
+      PREFLIGHT_REQUIRED: '等待预检',
+      REVIEW_REQUIRED: '等待审核',
+      APPROVED_PLAN_ONLY: '已批准纯规划',
     }[status] ?? status
   )
 }

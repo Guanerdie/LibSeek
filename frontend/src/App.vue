@@ -16,6 +16,7 @@ const navItems = [
   { to: '/approvals', label: '审批计划', icon: '✓' },
   { to: '/executions', label: '下载执行', icon: '▶' },
   { to: '/download-jobs', label: '下载任务', icon: '↓' },
+  { to: '/media-imports', label: '入库规划', icon: '↳' },
   { to: '/automation', label: '自动化', icon: '⚙' },
   { to: '/qbittorrent', label: 'qB 状态', icon: '⇄' },
 ]
@@ -39,13 +40,13 @@ async function logout(): Promise<void> {
         </div>
       </div>
       <nav aria-label="主导航">
-        <RouterLink v-for="item in navItems" :key="item.to" :to="item.to">
+        <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" :aria-label="item.label" :title="item.label">
           <span class="nav-icon">{{ item.icon }}</span>{{ item.label }}
         </RouterLink>
       </nav>
       <div class="phase-note">
         <span class="status-dot"></span>
-        <div><strong>第六阶段</strong><small>受控自动化</small></div>
+        <div><strong>第七阶段</strong><small>入库规划</small></div>
       </div>
     </aside>
     <main class="main-content">

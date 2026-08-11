@@ -19,6 +19,11 @@ import type {
   ExecutionIntent,
   IdentityReview,
   LoginResponse,
+  MediaImportApproveRequest,
+  MediaImportCreateRequest,
+  MediaImportRequest,
+  MediaImportRequestSummary,
+  MediaImportStatus,
   MediaItem,
   MetadataMatch,
   Page,
@@ -341,6 +346,60 @@ export const downloadJobApi = {
     request<DownloadJobSummary>(`/api/download-jobs/${encodeURIComponent(jobId)}/summary`),
   timeline: (jobId: string) =>
     request<DownloadJobTimeline>(`/api/download-jobs/${encodeURIComponent(jobId)}/timeline`),
+}
+
+export const mediaImportApi = {
+  list: (params: {
+    page: number
+    pageSize: number
+    status?: MediaImportStatus
+    downloadJobId?: string
+  }) =>
+    request<Page<MediaImportRequestSummary>>(
+      `/api/media-import-requests?${queryString({
+        page: params.page,
+        page_size: params.pageSize,
+        status: params.status,
+        download_job_id: params.downloadJobId?.trim(),
+      })}`,
+    ),
+  get: (requestId: string) =>
+    request<MediaImportRequest>(
+      `/api/media-import-requests/${encodeURIComponent(requestId)}`,
+    ),
+  create: (payload: MediaImportCreateRequest) =>
+    request<MediaImportRequest>('/api/media-import-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  approve: (requestId: string, payload: MediaImportApproveRequest) =>
+    request<MediaImportRequest>(
+      `/api/media-import-requests/${encodeURIComponent(requestId)}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    ),
+  reject: (requestId: string, reason?: string) =>
+    request<MediaImportRequest>(
+      `/api/media-import-requests/${encodeURIComponent(requestId)}/reject`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason?.trim() || null }),
+      },
+    ),
+  revoke: (requestId: string, reason?: string) =>
+    request<MediaImportRequest>(
+      `/api/media-import-requests/${encodeURIComponent(requestId)}/revoke`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason?.trim() || null }),
+      },
+    ),
 }
 
 export const automationApi = {

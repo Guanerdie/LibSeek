@@ -15,6 +15,9 @@ import ExecutionListView from '../views/ExecutionListView.vue'
 import MediaView from '../views/MediaView.vue'
 import IdentityView from '../views/IdentityView.vue'
 import LoginView from '../views/LoginView.vue'
+import MediaImportCreateView from '../views/MediaImportCreateView.vue'
+import MediaImportDetailView from '../views/MediaImportDetailView.vue'
+import MediaImportListView from '../views/MediaImportListView.vue'
 import QbittorrentView from '../views/QbittorrentView.vue'
 import SystemView from '../views/SystemView.vue'
 import TorrentCandidatesView from '../views/TorrentCandidatesView.vue'
@@ -44,6 +47,13 @@ const router = createRouter({
     { path: '/executions/:id', component: ExecutionDetailView },
     { path: '/download-jobs', component: DownloadJobListView },
     { path: '/download-jobs/:id', component: DownloadJobDetailView },
+    { path: '/media-imports', component: MediaImportListView },
+    {
+      path: '/media-imports/new',
+      component: MediaImportCreateView,
+      meta: { requiredRole: 'operator' },
+    },
+    { path: '/media-imports/:id', component: MediaImportDetailView },
     { path: '/discovery', component: DiscoveryView },
     { path: '/adapters', component: AdaptersView },
     { path: '/automation', component: AutomationView },

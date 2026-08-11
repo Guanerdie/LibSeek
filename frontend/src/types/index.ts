@@ -482,6 +482,192 @@ export interface DownloadJobTimeline {
   items: DownloadJobTimelineItem[]
 }
 
+export type MediaImportStatus =
+  | 'PREFLIGHT_REQUIRED'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED_PLAN_ONLY'
+  | 'REJECTED'
+  | 'REVOKED'
+
+export type MediaImportOperation = 'HARDLINK' | 'COPY'
+
+export interface MediaImportManifestFile {
+  relative_path: string
+  size_bytes: number
+}
+
+export interface MediaImportSourceManifest {
+  source_root_ref: string
+  files: MediaImportManifestFile[]
+}
+
+export interface MediaImportTargetEntry {
+  source_relative_path: string
+  target_relative_path: string
+}
+
+export interface MediaImportTargetMapping {
+  target_root_ref: string
+  files: MediaImportTargetEntry[]
+  source_retention: true
+  overwrite: false
+}
+
+export interface MediaImportCreateRequest {
+  download_job_id: string
+  proposed_operation: MediaImportOperation
+  source_manifest: MediaImportSourceManifest
+  target_mapping: MediaImportTargetMapping
+}
+
+export interface MediaImportJobSummarySnapshot {
+  download_job_id: string
+  media_item_id: string
+  execution_id: string
+  approval_id: string
+  job_status: DownloadJobStatus
+  progress: number
+  info_hash_v1: string | null
+  info_hash_v2: string | null
+  size_bytes: number
+  file_count: number
+  completed_at: string | null
+  hnr_status: HnrStatus
+  media_type: 'movie' | 'tv'
+  tmdb_id: number | null
+  media_title: string
+  media_year: number | null
+  execution_status: DownloadExecutionStatus
+  actual_info_hash_v1: string | null
+  actual_info_hash_v2: string | null
+  actual_size_bytes: number
+  actual_file_count: number
+  verified_at: string
+}
+
+export interface MediaImportPlan {
+  id: string
+  request_id: string
+  download_job_id: string
+  media_item_id: string
+  execution_id: string
+  mode: 'PLAN_ONLY_NO_FILE_OPERATION'
+  proposed_operation: MediaImportOperation
+  source_manifest: MediaImportSourceManifest
+  source_manifest_hash: string
+  target_mapping: MediaImportTargetMapping
+  target_mapping_hash: string
+  job_summary_snapshot: MediaImportJobSummarySnapshot
+  summary_snapshot_hash: string
+  config_fingerprint: string
+  plan_hash: string
+  created_by: string
+  created_at: string
+}
+
+export interface MediaImportPreflightCheck {
+  code: string
+  status: PreflightStatus
+  message: string
+}
+
+export interface MediaImportPreflightResult {
+  overall_status: PreflightStatus
+  checked_at: string
+  config_fingerprint: string
+  checks: MediaImportPreflightCheck[]
+}
+
+export interface MediaImportPreflight {
+  id: string
+  request_id: string
+  plan_id: string
+  overall_status: PreflightStatus
+  inspection_hash: string
+  result_hash: string
+  preflight_hash: string
+  config_fingerprint: string
+  result: MediaImportPreflightResult
+  checked_by: string
+  checked_at: string
+  created_at: string
+}
+
+export interface MediaImportDecisionAcknowledgements {
+  acknowledges_plan_only: true
+  acknowledges_source_retention: true
+  acknowledges_no_overwrite: true
+  acknowledges_hnr: boolean
+}
+
+export interface MediaImportApproveRequest {
+  acknowledges_plan_only: boolean
+  acknowledges_source_retention: boolean
+  acknowledges_no_overwrite: boolean
+  acknowledges_hnr: boolean
+}
+
+export interface MediaImportRequestSummary {
+  id: string
+  download_job_id: string
+  media_item_id: string
+  execution_id: string
+  status: MediaImportStatus
+  requested_by: string
+  requested_at: string
+  updated_at: string
+  plan_id: string
+  mode: 'PLAN_ONLY_NO_FILE_OPERATION'
+  proposed_operation: MediaImportOperation
+  plan_hash: string
+  media_type: 'movie' | 'tv'
+  tmdb_id: number | null
+  media_title: string
+  media_year: number | null
+  source_root_ref: string
+  target_root_ref: string
+  file_count: number
+  size_bytes: number
+  preflight_status: PreflightStatus | null
+  preflight_checked_at: string | null
+  preflight_hash: string | null
+}
+
+export interface MediaImportEvent {
+  id: string
+  request_id: string
+  event_type: string
+  from_status: string | null
+  to_status: string
+  actor: string
+  sanitized_details: Record<string, unknown>
+  created_at: string
+}
+
+export interface MediaImportRequest {
+  id: string
+  download_job_id: string
+  media_item_id: string
+  execution_id: string
+  status: MediaImportStatus
+  requested_by: string
+  requested_at: string
+  approved_by: string | null
+  approved_at: string | null
+  rejected_by: string | null
+  rejected_at: string | null
+  rejection_reason: string | null
+  revoked_by: string | null
+  revoked_at: string | null
+  revocation_reason: string | null
+  decision_acknowledgements: MediaImportDecisionAcknowledgements | null
+  created_at: string
+  updated_at: string
+  plan: MediaImportPlan
+  preflight: MediaImportPreflight | null
+  events: MediaImportEvent[]
+}
+
 export interface QbStatus {
   connected: boolean
   application_version: string

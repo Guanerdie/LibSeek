@@ -20,6 +20,9 @@ describe('authenticated navigation', () => {
     expect(router.resolve('/qbittorrent').matched).toHaveLength(1)
     expect(router.resolve('/executions/execution-1').matched).toHaveLength(1)
     expect(router.resolve('/download-jobs/job-1').matched).toHaveLength(1)
+    expect(router.resolve('/media-imports').matched).toHaveLength(1)
+    expect(router.resolve('/media-imports/new').matched).toHaveLength(1)
+    expect(router.resolve('/media-imports/import-1').matched).toHaveLength(1)
     expect(router.resolve('/automation').matched).toHaveLength(1)
     await router.push('/')
 
@@ -38,10 +41,11 @@ describe('authenticated navigation', () => {
     expect(wrapper.get('a[href="/qbittorrent"]').text()).toContain('qB 状态')
     expect(wrapper.get('a[href="/executions"]').text()).toContain('下载执行')
     expect(wrapper.get('a[href="/download-jobs"]').text()).toContain('下载任务')
+    expect(wrapper.get('a[href="/media-imports"]').text()).toContain('入库规划')
     expect(wrapper.get('a[href="/automation"]').text()).toContain('自动化')
     expect(wrapper.text()).toContain('admin-user')
     expect(wrapper.text()).toContain('管理员')
-    expect(wrapper.text()).toContain('第六阶段')
+    expect(wrapper.text()).toContain('第七阶段')
   })
 
   it('guards protected routes and accepts only safe internal login redirects', async () => {
