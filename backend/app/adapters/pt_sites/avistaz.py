@@ -43,13 +43,16 @@ class AvistaZMockAdapter(PtSiteAdapter):
         self,
         fixtures: list[TorrentCandidate] | None = None,
         limiter: RateLimiter | None = None,
+        *,
+        manifest_id: str = "avistaz-mock",
     ) -> None:
         self.fixtures = fixtures or []
         self.limiter = limiter or NoopRateLimiter()
+        self.manifest_id = manifest_id
 
     def manifest(self) -> AdapterManifest:
         return AdapterManifest(
-            id="avistaz-mock",
+            id=self.manifest_id,
             name="AvistaZ",
             adapter_type="pt_site",
             version="1.0",

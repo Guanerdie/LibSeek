@@ -474,7 +474,7 @@ class JobProcessor:
                         status_code=409,
                     )
                 prior_titles = await self._prior_candidate_titles(session, media_id, site_id)
-            adapter = self.pt_site_registry.create(site_id)
+            adapter = await self.pt_site_registry.create(site_id)
             before_request: Callable[[], Awaitable[None]] | None = None
             if isinstance(job.payload.get("automation_policy_revision_id"), str):
                 async def guard_automatic_search() -> None:

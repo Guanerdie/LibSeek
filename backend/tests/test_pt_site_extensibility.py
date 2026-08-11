@@ -239,12 +239,15 @@ async def test_nexusphp_rejects_private_dns_resolution_before_credentials_are_se
         await adapter.aclose()
 
 
-def test_default_registry_contains_only_avistaz_and_profiles_remain_disabled() -> None:
-    registry = default_pt_site_registry(AvistaZMockAdapter)
+@pytest.mark.asyncio
+async def test_default_registry_contains_only_avistaz_and_profiles_remain_disabled() -> None:
+    registry = default_pt_site_registry(
+        lambda: AvistaZMockAdapter(manifest_id="avistaz")
+    )
     assert registry.registered_site_ids == ("avistaz",)
-    assert isinstance(registry.create("avistaz"), AvistaZMockAdapter)
+    assert isinstance(await registry.create("avistaz"), AvistaZMockAdapter)
     with pytest.raises(AppError) as unknown:
-        registry.create("unknown-site")
+        await registry.create("unknown-site")
     assert unknown.value.error_code == "PT_SITE_NOT_REGISTERED"
 
     registry.register_nexusphp_profile(
@@ -254,8 +257,31 @@ def test_default_registry_contains_only_avistaz_and_profiles_remain_disabled() -
         ),
     )
     with pytest.raises(AppError) as disabled:
-        registry.create("fixture-nexus")
+        await registry.create("fixture-nexus")
     assert disabled.value.error_code == "NEXUSPHP_SITE_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_registry_closes_adapter_and_rejects_factory_identity_mismatch() -> None:
+    class WrongIdentityAdapter(AvistaZMockAdapter):
+        def __init__(self) -> None:
+            super().__init__(manifest_id="wrong-site")
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    adapter = WrongIdentityAdapter()
+    registry = PtSiteRegistry()
+    registry.register("fixture-nexus", lambda: adapter, enabled=True)
+
+    with pytest.raises(AppError) as caught:
+        await registry.create("fixture-nexus")
+
+    assert caught.value.error_code == "PT_SITE_ADAPTER_ID_MISMATCH"
+    assert caught.value.message == "PT 站点适配器身份与注册项不一致"
+    assert caught.value.details == {}
+    assert adapter.closed is True
 
 
 def test_nexusphp_fixture_parser_produces_only_sanitized_candidates() -> None:
@@ -418,6 +444,11 @@ async def test_nexusphp_runtime_secrets_are_memory_only_and_not_in_results() -> 
 async def test_nexusphp_fetch_gate_never_receives_passkey_or_download_path() -> None:
     passkey = "runtime-passkey-must-stay-private"
     gate_calls: list[str] = []
+    before_request_calls = 0
+
+    async def before_request() -> None:
+        nonlocal before_request_calls
+        before_request_calls += 1
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/torrents.php":
@@ -444,11 +475,13 @@ async def test_nexusphp_fetch_gate_never_receives_passkey_or_download_path() -> 
         min_interval_seconds=0,
         request_gate=recording_gate(gate_calls),
     )
+    adapter.set_before_request_guard(before_request)
     try:
         await adapter.search(TorrentSearchRequest(search="Fixture", type=MediaType.MOVIE))
         torrent = await adapter.fetch_torrent("12345")
         assert torrent.startswith(b"d")
         assert gate_calls == ["search", "torrent_fetch"]
+        assert before_request_calls == 2
         assert all(passkey not in operation for operation in gate_calls)
         assert all("download.php" not in operation for operation in gate_calls)
     finally:
@@ -478,6 +511,51 @@ async def test_nexusphp_rejects_cross_origin_redirect_before_following() -> None
             await adapter.search(TorrentSearchRequest(search="Fixture"))
         assert caught.value.error_code == "NEXUSPHP_CROSS_ORIGIN_REDIRECT"
         assert len(requests) == 1
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_guard_blocks_redirect_second_hop_before_send() -> None:
+    cookie = "session=runtime-secret-must-not-leak"
+    requests: list[str] = []
+    guard_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(302, headers={"location": "/redirected-search"})
+
+    async def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            raise AppError(
+                "AUTOMATION_TORRENT_SEARCH_POLICY_CHANGED",
+                "自动 PT 搜索策略已变化",
+                status_code=409,
+            )
+
+    adapter = NexusPhpAdapter(
+        profile(enabled=True),
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header=cookie,
+        enable_live_search=True,
+        transport=httpx.MockTransport(handler),
+        address_resolver=public_resolver,
+        min_interval_seconds=0,
+        request_gate=recording_gate([]),
+    )
+    adapter.set_before_request_guard(guard)
+    try:
+        with pytest.raises(AppError) as caught:
+            await adapter.search(TorrentSearchRequest(search="Fixture"))
+        assert caught.value.error_code == "AUTOMATION_TORRENT_SEARCH_POLICY_CHANGED"
+        assert caught.value.details == {"external_request_performed": False}
+        assert guard_calls == 2
+        assert len(requests) == 1
+        assert "/torrents.php" in requests[0]
+        serialized = f"{caught.value!s}|{caught.value.details!r}"
+        assert cookie not in serialized
     finally:
         await adapter.aclose()
 
@@ -616,7 +694,7 @@ async def test_worker_safely_processes_legacy_avistaz_job_without_payload_site_i
         "worker-legacy-avistaz",
         AvistaZMockAdapter,
         None,
-        AvistaZMockAdapter,
+        lambda: AvistaZMockAdapter(manifest_id="avistaz"),
     )
     assert await processor.run_once() is True
     async with session_factory() as session:
@@ -659,7 +737,7 @@ async def test_worker_fails_closed_when_job_media_does_not_match_search_run(
     def pt_factory() -> AvistaZMockAdapter:
         nonlocal adapter_calls
         adapter_calls += 1
-        return AvistaZMockAdapter()
+        return AvistaZMockAdapter(manifest_id="avistaz")
 
     processor = JobProcessor(
         session_factory,

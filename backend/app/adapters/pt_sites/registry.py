@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -90,8 +91,41 @@ class PtSiteRegistry:
             )
         return registration
 
-    def create(self, site_id: str) -> PtSiteAdapter:
-        return self.require_enabled(site_id).factory()
+    async def create(self, site_id: str) -> PtSiteAdapter:
+        registration = self.require_enabled(site_id)
+        adapter = registration.factory()
+        try:
+            adapter_id = adapter.manifest().id
+        except Exception as exc:
+            await self._safe_close(adapter)
+            raise AppError(
+                "PT_SITE_ADAPTER_MANIFEST_INVALID",
+                "PT 站点适配器能力声明无效",
+                status_code=409,
+            ) from exc
+        if adapter_id != registration.site_id:
+            await self._safe_close(adapter)
+            raise AppError(
+                "PT_SITE_ADAPTER_ID_MISMATCH",
+                "PT 站点适配器身份与注册项不一致",
+                status_code=409,
+            )
+        return adapter
+
+    @staticmethod
+    async def _safe_close(adapter: object) -> None:
+        close = getattr(adapter, "aclose", None)
+        if not callable(close):
+            close = getattr(adapter, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            # Cleanup must not replace the stable registration error.
+            pass
 
 
 def default_pt_site_registry(

@@ -384,7 +384,7 @@ async def test_torrent_search_persists_only_sanitized_scored_candidates(
         seeders=5,
         hit_and_run=False,
     )
-    pt = AvistaZMockAdapter([fixture])
+    pt = AvistaZMockAdapter([fixture], manifest_id="avistaz")
     processor = JobProcessor(
         session_factory,
         "worker-pt",

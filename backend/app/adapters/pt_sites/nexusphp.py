@@ -152,6 +152,7 @@ class SameOriginNexusSession:
         *,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> SafeHttpResult:
         current_url = self._same_origin_url(f"{self.base_url}/", path.lstrip("/"))
         current_method = method
@@ -165,6 +166,8 @@ class SameOriginNexusSession:
                 headers=headers,
             )
             try:
+                if before_send is not None:
+                    await self._run_before_send_guard(before_send)
                 response = await self.client.send(request, stream=True)
             except httpx.TimeoutException as exc:
                 raise AppError(
@@ -218,6 +221,28 @@ class SameOriginNexusSession:
             "NexusPHP 跳转次数过多",
             status_code=502,
         )
+
+    @staticmethod
+    async def _run_before_send_guard(
+        guard: Callable[[], Awaitable[None]],
+    ) -> None:
+        try:
+            await guard()
+        except AppError as exc:
+            raise AppError(
+                exc.error_code,
+                exc.message,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                details={**exc.details, "external_request_performed": False},
+            ) from exc
+        except Exception as exc:
+            raise AppError(
+                "NEXUSPHP_REQUEST_GUARD_FAILED",
+                "NexusPHP 请求围栏校验失败",
+                status_code=409,
+                details={"external_request_performed": False},
+            ) from exc
 
 
 class NexusPhpHtmlParser:
@@ -504,6 +529,7 @@ class NexusPhpAdapter(PtSiteAdapter):
         min_interval_seconds: float = 10.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         request_gate: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.profile = profile
         self._cookie_header = self._validate_memory_secret(cookie_header, "cookie")
@@ -518,6 +544,7 @@ class NexusPhpAdapter(PtSiteAdapter):
             )
         self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.request_gate = request_gate
+        self.before_request = before_request
         self.parser = NexusPhpHtmlParser(profile)
         self.session = SameOriginNexusSession(
             profile.base_url,
@@ -529,6 +556,11 @@ class NexusPhpAdapter(PtSiteAdapter):
             max_response_bytes=max_response_bytes,
         )
         self._candidate_memory: dict[str, TorrentCandidate] = {}
+
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self.before_request = guard
 
     def __repr__(self) -> str:
         return (
@@ -731,7 +763,13 @@ class NexusPhpAdapter(PtSiteAdapter):
             )
         async with gate(operation):
             await self.limiter.acquire(operation)
-            return await self.session.request(method, path, params=params, headers=headers)
+            return await self.session.request(
+                method,
+                path,
+                params=params,
+                headers=headers,
+                before_send=self.before_request,
+            )
 
     def _search_params(self, request: TorrentSearchRequest) -> dict[str, Any] | None:
         query = self.profile.query
