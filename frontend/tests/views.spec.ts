@@ -729,6 +729,13 @@ describe('Approval views', () => {
     expect(wrapper.text()).toContain('测试剧集')
     expect(wrapper.text()).toContain('UNKNOWN')
     expect(wrapper.text()).toContain('查看审批')
+    expect(wrapper.findAll('.approval-mobile-item')).toHaveLength(1)
+    expect(wrapper.get('.approval-mobile-item').text()).toContain('测试剧集')
+    expect(wrapper.get('.approval-mobile-item a').attributes('href')).toBe('/approvals/approval-1')
+    expect(wrapper.get('.phase-banner').text()).toContain('审批只生成不可执行计划')
+    expect(wrapper.get('.phase-banner').text()).toContain('独立执行流程')
+    expect(wrapper.get('.phase-banner').text()).toContain('自动执行策略')
+    expect(wrapper.get('.phase-banner').text()).toContain('默认关闭的服务端执行总闸开启')
   })
 
   it('does not enable approval when preflight is UNKNOWN', async () => {
@@ -736,12 +743,16 @@ describe('Approval views', () => {
     const wrapper = mount(ApprovalView)
     await flushPromises()
     expect(wrapper.text()).toContain('候选 H&R 规则未知')
-    expect(wrapper.text()).toContain('仅管理员可在已批准计划上完成两步确认')
+    expect(wrapper.get('.page > .phase-banner').text()).toContain('审批只生成不可执行计划')
+    expect(wrapper.get('.page > .phase-banner').text()).toContain('独立执行流程')
+    expect(wrapper.get('.page > .phase-banner').text()).toContain('自动执行策略')
+    expect(wrapper.get('.page > .phase-banner').text()).toContain('默认关闭的服务端执行总闸开启')
+    expect(wrapper.get('.acknowledgements').text()).toContain('独立 ADD_PAUSED 执行可能随即排队')
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     for (const checkbox of checkboxes) await checkbox.setValue(true)
     const approveButton = wrapper
       .findAll('button')
-      .find((button) => button.text().includes('批准并生成计划'))
+      .find((button) => button.text().includes('批准计划并评估执行策略'))
     expect(approveButton?.attributes('disabled')).toBeDefined()
   })
 
@@ -767,12 +778,12 @@ describe('Approval views', () => {
     const findButton = (text: string) => wrapper.findAll('button').find((item) => item.text().includes(text))
 
     for (const checkbox of wrapper.findAll('input[type="checkbox"]')) await checkbox.setValue(true)
-    expect(findButton('批准并生成计划')?.attributes('disabled')).toBeUndefined()
+    expect(findButton('批准计划并评估执行策略')?.attributes('disabled')).toBeUndefined()
     expect(findButton('拒绝')?.attributes('disabled')).toBeUndefined()
 
     auth.principal = { username: 'operator-user', role: 'operator' }
     await nextTick()
-    expect(findButton('批准并生成计划')?.attributes('disabled')).toBeDefined()
+    expect(findButton('批准计划并评估执行策略')?.attributes('disabled')).toBeDefined()
     expect(findButton('运行 qB 只读预检')?.attributes('disabled')).toBeUndefined()
     expect(findButton('拒绝')?.attributes('disabled')).toBeUndefined()
 
@@ -802,6 +813,9 @@ describe('Approval views', () => {
     await flushPromises()
     const control = wrapper.get('.execution-control-section')
 
+    expect(wrapper.get('.download-plan .phase-banner').text()).toContain('本次审批仅生成不可执行计划')
+    expect(wrapper.get('.download-plan .phase-banner').text()).toContain('自动执行策略')
+    expect(wrapper.get('.download-plan .phase-banner').text()).toContain('默认关闭的服务端执行总闸必须开启')
     expect(control.get('.segmented-control button.active').text()).toContain('添加后暂停')
     await control.get('.execution-checks input[type="checkbox"]').setValue(true)
     await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
@@ -809,6 +823,8 @@ describe('Approval views', () => {
 
     expect(mocks.executionCreateIntent).toHaveBeenCalledWith('approval-1', 'ADD_PAUSED')
     expect(wrapper.text()).not.toContain(`ei1_${'n'.repeat(32)}`)
+    expect(control.get('.final-step label').text()).toContain('本次人工提交')
+    expect(control.get('.final-step label').text()).toContain('仅在服务端执行总闸开启时才可能写入 qBittorrent')
     await control.get('.final-step input[type="checkbox"]').setValue(true)
     await control.findAll('button').find((item) => item.text().includes('第二步'))?.trigger('click')
     await flushPromises()

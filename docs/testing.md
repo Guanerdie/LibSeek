@@ -59,6 +59,21 @@ npm.cmd run lint
 
 ## Compose（PowerShell）
 
+启动门禁回归使用临时 `.env`、非敏感哨兵和假 `docker`，只执行两份启动脚本的
+validate-only 分支，绝不会运行真实 `docker compose up`：
+
+```powershell
+Set-Location D:\project\unin
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-startup-gates.ps1
+```
+
+该验证覆盖 `.env.example` 与 `compose.yaml` 声明的全部进程环境键、任意
+`COMPOSE_*`、空值及大小写变体、dotenv 重复键最后值、变量插值、示例密码的引号/注释变体，
+并确认错误不回显哨兵。`start.ps1 -ValidateOnly` 与 `start.sh --validate-only` 只能调用一次
+固定了仓库 `.env` 和 `compose.yaml` 的 `compose config --quiet`；`up`、`ps` 不得被调用。
+Windows 下 POSIX 脚本的动态回归通过 WSL 执行，并在 PATH 首位放置只记录参数的假 `docker`。
+该脚本已由 `scripts/test.ps1` 调用。
+
 默认配置：
 
 ```powershell
@@ -66,44 +81,48 @@ Set-Location D:\project\unin
 docker compose --env-file .env.example config --quiet
 ```
 
-Secret override 配置结构：
+分阶段 Secret override 配置结构（只解析，不启动容器、不读取 Secret 文件）：
+
+```powershell
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example config --quiet
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.avistaz.yaml.example config --quiet
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.qb.yaml.example config --quiet
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.avistaz.yaml.example config --quiet
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.qb.yaml.example --profile automation-preflight --profile download-monitor config --quiet
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.avistaz.yaml.example -f deploy\compose.secrets.qb.yaml.example --profile automation-preflight --profile download-execution --profile download-monitor config --quiet
+```
+
+原全量 12 Secret override 必须继续兼容；阶段 5/6 可选服务 profile 仍使用全部危险开关为 `false` 的 `.env.example`：
 
 ```powershell
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example config --quiet
-```
-
-阶段 5/6 可选服务 profile（仍使用全部危险开关为 `false` 的 `.env.example`，只验证 Compose 结构，不会启动容器）：
-
-```powershell
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile automation-preflight config --quiet
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-execution config --quiet
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-monitor config --quiet
 ```
 
-这些命令只解析服务配置和 Secret 引用。五种渲染结果中的 API 都必须显式包含 `ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false`、空的 `MEDIA_IMPORT_TARGET_ROOT_REFS` 和 `MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS=300`；任何服务都不得出现媒体目录 volume。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此成功不代表以下 12 个文件已经就绪，也不代表自动预检或执行开关已获授权：
+这些命令只解析服务配置和 Secret 引用。所有渲染结果中的 API 都必须显式包含 `ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false`、空的 `MEDIA_IMPORT_TARGET_ROOT_REFS` 和 `MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS=300`；任何服务都不得出现媒体目录 volume。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此成功不代表对应文件已经就绪，也不代表任一外部访问、自动预检或执行开关已获授权。
 
-```text
-auth_local_username.txt
-auth_local_password.txt
-auth_session_signing_key.txt
-nextfind_username.txt
-nextfind_password.txt
-tmdb_access_token.txt
-avistaz_username.txt
-avistaz_password.txt
-avistaz_pid.txt
-qb_base_url.txt
-qb_username.txt
-qb_password.txt
-```
+分层渲染必须满足以下精确权限矩阵；表中数量按服务显示，未列出的服务为 0，前端始终为 0：
 
-渲染后的服务权限矩阵还必须满足：API=12；普通 Worker=NextFind 2 + TMDB 1 + AvistaZ 3 且无 qB；`automation-preflight`=qB 3；下载执行器=AvistaZ 3 + qB 3；监控器=qB 3；前端=0。`automation-preflight` 必须只存在于同名 opt-in profile，并显式接收默认关闭的总闸、qB 只读开关、预检策略/目标配置和 90 秒 readiness TTL，不能获得 NextFind、TMDB 或 AvistaZ Secret。
+| 已叠加 override | API | 普通 Worker | `automation-preflight` | 下载执行器 | 监控器 |
+|---|---:|---:|---:|---:|---:|
+| discovery | 6 | 3 | 0 | 0 | 0 |
+| discovery + AvistaZ | 9 | 6 | 0 | 3 | 0 |
+| discovery + qB | 9 | 3 | 3 | 3 | 3 |
+| discovery + AvistaZ + qB | 12 | 6 | 3 | 6 | 3 |
+| 原全量 override | 12 | 6 | 3 | 6 | 3 |
 
-可用渲染后的 JSON 只读核对 Secret 数量，不读取任何文件内容：
+名称也必须匹配：discovery=认证 3 + NextFind 2 + TMDB 1；AvistaZ=3；qB=3。普通 Worker 绝不能获得 qB Secret；`automation-preflight` 绝不能获得认证、NextFind、TMDB 或 AvistaZ Secret。各增量 override 单独渲染时也必须只声明本组 6/3/3 个顶层 Secret。还要给 12 个同名明文环境变量注入非敏感哨兵值后重新渲染多层组合，确认已挂载 Secret 的服务中哨兵值均被清为空字符串、对应 `*_FILE` 精确指向 `/run/secrets/<name>`；这用于防止后置 override 使用 `!reset` 时出现 Compose v5 合并回退。`automation-preflight` 必须只存在于同名 opt-in profile，并显式接收默认关闭的总闸、qB 只读开关、预检策略/目标配置和 90 秒 readiness TTL。
+
+可用全部三层渲染后的 JSON 只读核对 Secret 数量，不读取任何文件内容：
 
 ```powershell
 $rendered = docker compose --env-file .env.example `
-    -f compose.yaml -f deploy\compose.secrets.yaml.example `
+    -f compose.yaml `
+    -f deploy\compose.secrets.discovery.yaml.example `
+    -f deploy\compose.secrets.avistaz.yaml.example `
+    -f deploy\compose.secrets.qb.yaml.example `
     --profile automation-preflight --profile download-execution `
     --profile download-monitor config --format json | ConvertFrom-Json
 
@@ -118,24 +137,47 @@ foreach ($name in @(
 }
 ```
 
-预期数量依次为 `12, 6, 3, 6, 3, 0`，且名称必须与上方权限矩阵一致。
+预期数量依次为 `12, 6, 3, 6, 3, 0`，且应与原全量 override 的渲染结果一致。
 
-启动容器前应单独检查文件存在性，不读取或打印其内容：
+启动容器前只检查本次命令实际叠加的分组，不读取或打印文件内容。第一轮将 `$enabledSecretGroups` 保持为 `@('discovery')`；只有录入对应文件并取得授权后才加入 `avistaz` 或 `qb`：
 
 ```powershell
-$requiredSecrets = @(
-    'auth_local_username.txt', 'auth_local_password.txt',
-    'auth_session_signing_key.txt',
-    'nextfind_username.txt', 'nextfind_password.txt',
-    'tmdb_access_token.txt', 'avistaz_username.txt', 'avistaz_password.txt',
-    'avistaz_pid.txt', 'qb_base_url.txt', 'qb_username.txt', 'qb_password.txt'
-)
+$secretGroups = @{
+    discovery = @(
+        'auth_local_username.txt', 'auth_local_password.txt',
+        'auth_session_signing_key.txt', 'nextfind_username.txt',
+        'nextfind_password.txt', 'tmdb_access_token.txt'
+    )
+    avistaz = @(
+        'avistaz_username.txt', 'avistaz_password.txt', 'avistaz_pid.txt'
+    )
+    qb = @('qb_base_url.txt', 'qb_username.txt', 'qb_password.txt')
+}
+$enabledSecretGroups = @('discovery')
+$requiredSecrets = $enabledSecretGroups | ForEach-Object { $secretGroups[$_] }
 $missingSecrets = $requiredSecrets | Where-Object {
     -not (Test-Path -LiteralPath (Join-Path '.\secrets' $_))
 }
 if ($missingSecrets) {
-    throw "缺少本地 Secret 文件：$($missingSecrets -join ', ')"
+    throw "缺少本阶段本地 Secret 文件：$($missingSecrets -join ', ')"
 }
+```
+
+禁止创建空文件、占位值或虚假凭据来通过启动检查。只叠加 discovery 时，`avistaz_*.txt` 和 `qb_*.txt` 六个文件不存在是正确状态；三组并集才是原全量 override 所需的 12 个文件：
+
+```text
+auth_local_username.txt
+auth_local_password.txt
+auth_session_signing_key.txt
+nextfind_username.txt
+nextfind_password.txt
+tmdb_access_token.txt
+avistaz_username.txt
+avistaz_password.txt
+avistaz_pid.txt
+qb_base_url.txt
+qb_username.txt
+qb_password.txt
 ```
 
 不得把真实凭据写入命令行、聊天或版本库，也不得使用占位值启动容器。Secret 文件格式和服务可见范围见 `docs/security.md`。

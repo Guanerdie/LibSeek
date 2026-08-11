@@ -53,9 +53,11 @@ from app.services.executions import (
     mark_reconciliation_required,
     persist_info_hash_before_submission,
     qb_target_fingerprint,
+    record_download_job_monitor_error,
     update_download_job_observation,
     verify_download_execution,
 )
+from app.services.preflight import is_allowed_save_path
 from app.services.torrent_validation import ValidatedTorrent, validate_torrent
 
 _ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
@@ -1199,7 +1201,23 @@ class DownloadMonitor:
         for job in jobs:
             try:
                 observed = self._job_observation(job, observations)
-            except AppError:
+            except AppError as error:
+                error_code = (
+                    error.error_code
+                    if _ERROR_CODE.fullmatch(error.error_code)
+                    else "DOWNLOAD_MONITOR_INTERNAL_ERROR"
+                )
+                async with self.session_factory() as session:
+                    await record_download_job_monitor_error(
+                        session,
+                        job.id,
+                        error_code=error_code,
+                        error_message=error.message,
+                        actor=self.monitor_id,
+                        details=error.details,
+                    )
+                    await session.commit()
+                updated += 1
                 continue
             async with self.session_factory() as session:
                 await update_download_job_observation(
@@ -1253,6 +1271,7 @@ class DownloadMonitor:
                 "QB_INFO_HASH_AMBIGUOUS",
                 "qBittorrent 返回多个匹配下载任务的观察结果",
                 status_code=502,
+                details={"match_count": len(matches)},
             )
         return matches[0] if matches else None
 
@@ -1292,6 +1311,14 @@ def require_download_monitor_enabled(settings: Settings) -> None:
         raise AppError(
             "DOWNLOAD_MONITOR_TARGET_NOT_CONFIGURED",
             "qBittorrent monitoring target is not configured",
+            status_code=409,
+        )
+    if not settings.qb_allowed_save_paths or not is_allowed_save_path(
+        save_path, settings.qb_allowed_save_paths
+    ):
+        raise AppError(
+            "DOWNLOAD_MONITOR_TARGET_NOT_ALLOWED",
+            "qBittorrent monitoring target is outside the allowed save paths",
             status_code=409,
         )
 

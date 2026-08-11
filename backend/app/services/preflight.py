@@ -212,7 +212,8 @@ def _info_hash_check(torrents: list[QbTorrent] | None, info_hash: str | None) ->
         return _check("DUPLICATE_INFO_HASH", PreflightStatus.UNKNOWN, "候选没有可校验的 info_hash")
     if torrents is None:
         return _check("DUPLICATE_INFO_HASH", PreflightStatus.UNKNOWN, "无法读取 qBittorrent 任务")
-    duplicate = any(item.hash.casefold() == info_hash.casefold() for item in torrents)
+    normalized_hash = info_hash.casefold()
+    duplicate = any(normalized_hash in item.identity_hashes for item in torrents)
     if duplicate:
         return _check(
             "DUPLICATE_INFO_HASH",

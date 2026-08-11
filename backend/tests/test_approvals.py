@@ -245,6 +245,19 @@ async def test_same_info_hash_is_blocked_and_unknown_is_not_pass() -> None:
     )
     assert duplicate_check.status == PreflightStatus.BLOCKED
 
+    v2_hash = "b" * 64
+    v2_torrent = qb_torrent(info_hash=v2_hash[:40]).model_copy(
+        update={"infohash_v2": v2_hash}
+    )
+    v2_snapshot = snapshot.model_copy(update={"info_hash": v2_hash})
+    v2_blocked = await evaluate_preflight(
+        FakeReadOnlyQb([v2_torrent]), v2_snapshot, settings
+    )
+    v2_duplicate_check = next(
+        check for check in v2_blocked.checks if check.code == "DUPLICATE_INFO_HASH"
+    )
+    assert v2_duplicate_check.status == PreflightStatus.BLOCKED
+
     unknown_snapshot = snapshot.model_copy(update={"info_hash": None, "hit_and_run": None})
     unknown = await evaluate_preflight(
         FakeReadOnlyQb([qb_torrent(info_hash="f" * 40)]), unknown_snapshot, settings

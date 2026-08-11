@@ -10,7 +10,7 @@
 - 阶段 4 控制面由 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 默认关闭；intent/execute/reconcile 只写 PostgreSQL，不直接获取 `.torrent` 或调用 qBittorrent。
 - 阶段 5 执行器位于独立 `download-execution` profile。`ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 默认全部为 `false` 且必须同时为真；缺一即拒绝启动。启用意味着会访问已批准候选的 AvistaZ download URL，并可能向指定 qBittorrent 执行一次受控 add，因此必须逐次获得用户明确授权。
 - qBittorrent 公开 API 仍只允许 SID 登录及版本、任务、任务文件和分类读取；不存在直接 add/start/resume/pause/delete/recheck/download 业务路由。内部写适配器只允许执行器使用 add，且在真正 POST 前执行数据库 write guard。
-- 独立监控器由 `ENABLE_DOWNLOAD_MONITOR=false` 默认关闭，并额外要求 `ENABLE_QB_READ_ONLY=true`；它只读 qB，不调用任何 mutation，也不推断或覆盖 H&R 结论。
+- 独立监控器由 `ENABLE_DOWNLOAD_MONITOR=false` 默认关闭，并额外要求 `ENABLE_QB_READ_ONLY=true`，且监控目标必须位于 `QB_ALLOWED_SAVE_PATHS` 白名单内；它只读 qB，不调用任何 mutation，也不推断或覆盖 H&R 结论。
 - 没有文件扫描、移动、复制、硬链接、覆盖、删除或媒体库写入代码；`HARDLINK`/`COPY` 只是不受信计划中的建议操作类型。
 - 自动化策略不追溯 `effective_from` 之前的积压条目；任何低分、并列、冲突、旧解析、站点/实体绑定不一致、IMDb-only、候选警告、季集覆盖不足、H&R `UNKNOWN`、预检非完整 `PASS` 或能力开关缺失都回退人工。自动选种只接受候选 TMDB ID 与已确认影视 TMDB ID 精确一致；自动执行只能 `ADD_PAUSED`，不能自动立即启动。
 - 默认注册表没有任何 NexusPHP 真实站点；声明式 NexusPHP 骨架默认关闭，只按经过审查的本地 HTML fixture 解析，且明确拒绝验证码和浏览器挑战，不提供任何绕过能力。
@@ -79,7 +79,7 @@ GET /api/downloaders/qbittorrent/torrents
 
 ## 执行意图、幂等与对账边界
 
-- `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 默认关闭创建意图和执行记录；即使显式开启，也只启用数据库控制面，不代表 AvistaZ 取种或 qB 写能力已启用。自动执行还必须同时通过自动化总闸、执行阶段策略、H&R/确认项和执行能力复核。
+- `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE=false` 默认关闭创建意图和执行记录；即使显式开启，也只启用数据库控制面，不代表 AvistaZ 取种或 qB 写能力已启用。执行阶段为 `AUTO_IF_ELIGIBLE` 时，人工或自动批准后都会立即评估独立执行资格；自动执行还必须同时通过自动化总闸、执行阶段策略、H&R/确认项和执行能力复核，且只能创建 `ADD_PAUSED` 执行记录。
 - 执行意图 nonce 使用密码学安全随机数生成，只在 `POST .../execution-intents` 的首次成功响应返回原文。数据库、审计与后续查询只保存或返回 SHA-256；丢失原文后不能恢复。
 - 人工 intent 固定绑定审批快照哈希、下载计划哈希、qB 目标指纹、`ADD_PAUSED`/`START_IMMEDIATELY` 启动模式和短有效期。自动 intent 额外绑定策略修订与允许决策并固定为 `ADD_PAUSED`。执行时重新计算全部绑定，配置漂移、过期、撤销、策略变化、错误 nonce 或已消费 intent 都会失败。
 - `Idempotency-Key` 限 16 至 200 位安全字符，数据库只保存 SHA-256 并施加唯一约束；审批 ID 与 intent ID 也分别唯一。相同键只能重放完全相同的请求，不能改绑其他审批、intent 或 nonce。
@@ -114,11 +114,13 @@ GET /api/downloaders/qbittorrent/torrents
 
 SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写入路径的完整性保护，不是外部签名或 WORM 存储。生产数据库仍必须最小化写权限、限制管理员访问并备份 `approval_events`；能够禁用 trigger 并同时改写记录和哈希的数据库超级管理员超出当前应用层威胁模型。若需覆盖该威胁，应引入运行时 HMAC 密钥或外部追加式审计锚点。
 
-## 凭据与 12 个 Docker Secret
+## 凭据与分阶段 Docker Secret
 
 本地认证 username/password/session signing key、NextFind username/password、TMDB Bearer Access Token、AvistaZ username/password/PID 以及 qBittorrent base URL/username/password 只可来自服务端运行时 Secret。它们不会写入数据库、前端响应或应用日志。
 
-推荐采用 `deploy/compose.secrets.yaml.example`。API 读取全部 12 个 `/run/secrets/...` 文件；普通 Worker 读取 NextFind 2 个、TMDB 1 个和 AvistaZ 3 个文件，明确没有 qB；自动预检 Worker 只读取 qB 3 个；下载执行器读取 AvistaZ 3 个与 qB 3 个；只读监控器只读取 qB 3 个；前端不挂载任何 Secret。override 会把主 Compose 中同名明文环境变量清空。
+推荐按授权进度采用三份可叠加的最小 override：`deploy/compose.secrets.discovery.yaml.example` 只声明认证、NextFind 和 TMDB 6 个文件；`deploy/compose.secrets.avistaz.yaml.example` 只声明 AvistaZ 3 个文件；`deploy/compose.secrets.qb.yaml.example` 只声明 qB 3 个文件。每一层只把本组同名明文环境变量清空并改为 `/run/secrets/...`，不会把尚未录入的另一组声明为必需文件，也不会自动开启实时能力开关或 profile。未叠加层的凭据必须在 `.env` 中保持空白。
+
+现有 `deploy/compose.secrets.yaml.example` 继续提供全部 12 个 Secret 的兼容入口，只有全部文件已安全录入时才使用；不得与三份分层 override 重复叠加。三层全部叠加后，API 读取全部 12 个；普通 Worker 读取 NextFind 2 个、TMDB 1 个和 AvistaZ 3 个，明确没有 qB；自动预检 Worker 只读取 qB 3 个；下载执行器读取 AvistaZ 3 个与 qB 3 个；只读监控器只读取 qB 3 个；前端不挂载任何 Secret。
 
 | 本地文件 | 容器 Secret | 可见服务 |
 |---|---|---|
@@ -136,6 +138,8 @@ SHA-256、字段绑定和数据库 trigger 提供应用层及普通数据库写�
 | `secrets/qb_password.txt` | `qb_password` | API、自动预检 Worker、下载执行器、只读监控器 |
 
 项目内 `secrets/*.txt` 已被 `.gitignore` 排除，但文件仍是本机明文 Secret。部署者必须限制 ACL、禁止云同步/备份到不受控位置，并在不再使用时安全移除。文件内容只放值本身，不加引号、不加 `KEY=`，末尾换行会被读取时移除。
+
+Compose `config` 只证明引用结构能被解析，不检查源文件是否存在。启动前应按实际叠加层分别检查 6/3/3 个文件的存在性；禁止为了通过检查创建空文件、占位值或伪造凭据。只叠加 discovery 层时，AvistaZ/qB 文件缺失是预期状态，不应阻止基础服务启动。
 
 不要在聊天、命令参数、截图、Issue、日志或版本库中提供密码、签名密钥、PID、Cookie、Token 或 TMDB Key。PowerShell 隐藏输入和本地 Secret 文件创建方法见项目 README。
 

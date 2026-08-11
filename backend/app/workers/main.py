@@ -16,6 +16,7 @@ from app.core.security import validate_external_url
 from app.db.session import SessionFactory
 from app.errors import AppError
 from app.services.site_rate_limit import PostgresAdvisoryRequestGate
+from app.workers.identity import job_worker_id
 from app.workers.processor import JobProcessor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -100,7 +101,8 @@ def build_avistaz_adapter() -> AvistaZAdapter:
 
 async def run() -> None:
     settings = get_settings()
-    worker_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}"
+    instance_id = os.getenv("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}"
+    worker_id = job_worker_id(instance_id)
     pt_site_catalog = build_pt_site_catalog(settings)
     pt_sites = default_pt_site_registry(
         build_avistaz_adapter,

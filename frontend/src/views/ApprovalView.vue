@@ -141,7 +141,7 @@ async function executeApprovedPlan(): Promise<void> {
     >
       <div class="header-actions"><a class="button secondary" href="/approvals">返回审批列表</a></div>
     </PageHeader>
-    <div class="phase-banner"><span>受控执行</span>仅管理员可在已批准计划上完成两步确认；默认以暂停状态添加到 qBittorrent。</div>
+    <div class="phase-banner"><span>受控执行</span>审批只生成不可执行计划；后续仅在独立执行流程中，经过管理员两步确认，或显式启用并满足自动执行策略，且默认关闭的服务端执行总闸开启时，才可能写入 qBittorrent。默认添加后暂停。</div>
     <PageState :loading="store.loading" :error="store.error" />
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
     <div v-if="store.planError" class="notice-state warning-state">{{ store.planError }}</div>
@@ -195,7 +195,7 @@ async function executeApprovedPlan(): Promise<void> {
               <div><dt>预计大小</dt><dd>{{ formatBytes(store.plan.estimated_size_bytes) }}</dd></div>
               <div><dt>模式</dt><dd>APPROVED_IMMUTABLE_PLAN</dd></div>
             </dl>
-            <div v-if="!executionStore.selected" class="phase-banner inline-banner"><span>尚未提交</span>完成下方两步确认前，不会向 qBittorrent 写入任何内容。</div>
+            <div v-if="!executionStore.selected" class="phase-banner inline-banner"><span>尚未提交</span>本次审批仅生成不可执行计划；后续仍须进入独立执行流程，经过管理员两步确认，或显式启用并满足自动执行策略，且默认关闭的服务端执行总闸必须开启，才可能写入 qBittorrent。</div>
           </div>
 
           <div v-if="(store.approval?.status === 'APPROVED' && store.plan) || executionStore.selected?.approval_id === store.approval?.id" class="approval-section execution-control-section">
@@ -233,7 +233,7 @@ async function executeApprovedPlan(): Promise<void> {
               <div v-if="executionStore.intent" class="execution-step final-step">
                 <div class="execution-step-heading"><strong>2</strong><div><h3>最终提交</h3><p>提交会创建一次性执行记录。安全随机凭据不会显示或保存，失败后也不会复用。</p></div></div>
                 <div class="execution-checks">
-                  <label><input v-model="finalExecutionConfirmed" type="checkbox" :disabled="!canAdmin || executionStore.working" />我确认现在向 qBittorrent 执行上述已批准计划</label>
+                  <label><input v-model="finalExecutionConfirmed" type="checkbox" :disabled="!canAdmin || executionStore.working" />我确认本次人工提交上述已批准计划；仅在服务端执行总闸开启时才可能写入 qBittorrent</label>
                   <button class="button primary" :disabled="executionStore.working || !canAdmin || !finalExecutionConfirmed" @click="executeApprovedPlan">
                     {{ executionStore.working ? '提交中…' : '第二步：提交下载执行' }}
                   </button>
@@ -267,7 +267,7 @@ async function executeApprovedPlan(): Promise<void> {
             <div v-if="store.approval.status === 'PENDING'" class="acknowledgements">
               <label><input v-model="acknowledgesHnr" type="checkbox" :disabled="!canAdmin || store.working" />已了解该站 H&R 规则</label>
               <label><input v-model="acknowledgesSeeding" type="checkbox" :disabled="!canAdmin || store.working" />下载完成后需要继续做种</label>
-              <label><input v-model="acknowledgesPlanOnly" type="checkbox" :disabled="!canAdmin || store.working" />当前阶段仅创建下载计划，不开始下载</label>
+              <label><input v-model="acknowledgesPlanOnly" type="checkbox" :disabled="!canAdmin || store.working" />我确认审批本身只生成不可执行计划；若已显式启用且满足自动执行策略，独立 ADD_PAUSED 执行可能随即排队</label>
             </div>
             <button
               v-if="store.approval.status === 'PENDING'"
@@ -275,7 +275,7 @@ async function executeApprovedPlan(): Promise<void> {
               :disabled="store.working || !canAdmin || !acknowledgementsComplete || !preflightPassable"
               @click="store.approve(store.approval.id)"
             >
-              批准并生成计划
+              批准计划并评估执行策略
             </button>
             <label v-if="store.approval.status === 'PENDING' || store.approval.status === 'APPROVED'">原因（可选）<textarea v-model="reason" maxlength="1000" :disabled="store.approval.status === 'PENDING' ? !canOperate : !canAdmin" /></label>
             <button v-if="store.approval.status === 'PENDING'" class="button danger-button" :disabled="store.working || !canOperate" @click="store.reject(store.approval.id, reason)">拒绝</button>

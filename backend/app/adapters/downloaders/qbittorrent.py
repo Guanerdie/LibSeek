@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from app.schemas.adapters import AdapterManifest
 from app.services.torrent_validation import validate_torrent
 
 QbAddOutcome = Literal["SUBMITTED", "ALREADY_PRESENT"]
+QbAddStateField = Literal["paused", "stopped"]
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,10 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
     _ALLOWED_REQUESTS = QbittorrentReadOnlyAdapter._ALLOWED_REQUESTS | {
         ("POST", "/api/v2/torrents/add")
     }
+    _WEB_API_VERSION = re.compile(
+        r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+    )
+    _STOPPED_ADD_PARAMETER_SINCE = (2, 11, 0)
 
     def __init__(
         self,
@@ -40,6 +46,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         transport: httpx.AsyncBaseTransport | None = None,
         before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        self._add_state_field: QbAddStateField | None = None
         super().__init__(
             base_url=base_url,
             username=username,
@@ -137,11 +144,12 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         if metadata.identity_hashes & known_hashes:
             return QbAddResult(info_hash=selected_hash, outcome="ALREADY_PRESENT")
 
+        add_state_field = await self._get_add_state_field()
         form = {
             "savepath": save_path,
             "category": category,
             "tags": ",".join(tags),
-            "paused": "false" if start_immediately else "true",
+            add_state_field: "false" if start_immediately else "true",
         }
         try:
             response = await self._request(
@@ -164,6 +172,36 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         if self._looks_like_html(response) or response.text.strip() != "Ok.":
             raise self._unknown_outcome()
         return QbAddResult(info_hash=selected_hash, outcome="SUBMITTED")
+
+    async def _get_add_state_field(self) -> QbAddStateField:
+        if self._add_state_field is not None:
+            return self._add_state_field
+
+        raw_version = await self.get_web_api_version()
+        match = self._WEB_API_VERSION.fullmatch(raw_version)
+        if match is None:
+            raise AppError(
+                "QB_WEB_API_VERSION_INVALID",
+                "qBittorrent Web API 版本格式无效，无法安全选择添加参数",
+                status_code=502,
+            )
+        version = (int(match[1]), int(match[2]), int(match[3]))
+        if version[0] != 2:
+            raise AppError(
+                "QB_WEB_API_VERSION_UNSUPPORTED",
+                "qBittorrent Web API 版本不受支持，已拒绝添加请求",
+                status_code=409,
+            )
+
+        # Web API 2.11.0 (qBittorrent 5.0) renamed the add flag from paused to stopped.
+        self._add_state_field = (
+            "stopped" if version >= self._STOPPED_ADD_PARAMETER_SINCE else "paused"
+        )
+        return self._add_state_field
+
+    def _clear_session(self) -> None:
+        self._add_state_field = None
+        super()._clear_session()
 
     @staticmethod
     def _unknown_outcome() -> AppError:

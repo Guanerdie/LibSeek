@@ -35,7 +35,7 @@ frontend/                Vue 3、Pinia、Router、审批、执行、下载总结
 deploy/                  Docker Secret Compose override 示例
 docs/                    架构、安全、测试与 PT Profile 文档
 scripts/                 Windows/Linux 启动与测试脚本
-secrets/                 12 个本地 Secret 文件目录，*.txt 已被 Git 忽略
+secrets/                 按 6 + 3 + 3 阶段录入的本地 Secret 目录，*.txt 已被 Git 忽略
 compose.yaml             4 个默认服务及 3 个 opt-in profile 服务
 .env.example             无真实密钥的配置样例，真实连接默认关闭
 ```
@@ -48,11 +48,14 @@ Windows PowerShell：
 Set-Location D:\project\unin
 Copy-Item .env.example .env
 notepad .env
+.\scripts\start.ps1 -ValidateOnly
 .\scripts\start.ps1
-docker compose ps
+docker compose --env-file .env -f compose.yaml ps
 ```
 
 先同时修改 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的同一个密码。本机快速启动还需在 `.env` 填写 `AUTH_LOCAL_USERNAME`、`AUTH_LOCAL_PASSWORD` 和至少 32 个字符的 `AUTH_SESSION_SIGNING_KEY`；此方式只把值传给 API。生产部署推荐让这三项在 `.env` 保持空白，改用下文 Docker Secret override 和双 Compose 文件命令。NextFind 凭据留空时系统仍可启动，但不会创建真实发现任务；认证材料缺失时健康检查仍可用，但受保护 API 会返回 `AUTH_NOT_CONFIGURED`。不要把任何密码、签名密钥、PID、Cookie、Token 或 TMDB Key 发送到聊天或提交到版本库。
+
+启动脚本将 `config`、`up` 和 `ps` 固定到项目根目录的 `.env` 与 `compose.yaml`；`-ValidateOnly` 只执行门禁和 Compose 配置解析，不启动容器。为防止 Compose 优先采用父进程值，脚本拒绝所有已导出的项目配置变量、`*_FILE` Secret 来源和 `COMPOSE_*` 控制变量，即使它们的值为空也会拒绝。请使用 `Remove-Item Env:<NAME>` 真正移除 PowerShell 进程变量；`.env` 只接受直接字面值，不允许 `$VAR` 或 `${VAR}` 二次插值，也不允许非空 `COMPOSE_*` 键。
 
 Linux / Docker：
 
@@ -61,9 +64,12 @@ cd /path/to/unin
 cp .env.example .env
 chmod 600 .env
 ${EDITOR:-vi} .env
+sh ./scripts/start.sh --validate-only
 sh ./scripts/start.sh
-docker compose ps
+docker compose --env-file .env -f compose.yaml ps
 ```
+
+Linux 中同样必须用 `unset NAME` 移除父进程配置变量；`export NAME=` 仍会被门禁拒绝。
 
 验收：打开 `http://127.0.0.1:8080`；API 文档位于 `http://127.0.0.1:8000/api/docs`；`docker compose ps` 中四个服务应为 healthy。
 
@@ -122,7 +128,7 @@ qBittorrent 公开命名空间始终只有以上两个 `GET`。系统没有直�
 
 策略和决策查询允许 `viewer`，发布新修订只允许 `admin` 且必须携带当前 `base_revision_no`。四阶段默认均为 `MANUAL`；`DISABLED` 会由后端阻止该阶段新的人工和自动正向动作；`AUTO_IF_ELIGIBLE` 只在总闸开启且全部硬条件满足时行动，否则记录 `MANUAL_REQUIRED`、`BLOCKED`、`STALE` 或 `NOOP` 等审计结果并允许人工接管。策略不扫描、不追溯处理 `effective_from` 之前的积压条目。
 
-默认资格阈值为身份最低分 `0.5`、身份前两名最小差值 `0.1`、种子最低分 `0.75`、种子前两名最小差值 `0.1`、最少做种数 `1`。阈值只是必要条件，不会绕过类型/年份/TMDB ID/季集覆盖、候选警告、H&R、预检或执行能力闸门。启用自动审批必须确认 H&R、继续做种和“仅生成计划”；启用自动执行必须另行确认 H&R、继续做种和“只允许 `ADD_PAUSED`”，确认项按策略修订不可变保存。
+默认资格阈值为身份最低分 `0.5`、身份前两名最小差值 `0.1`、种子最低分 `0.75`、种子前两名最小差值 `0.1`、最少做种数 `1`。阈值只是必要条件，不会绕过类型/年份/TMDB ID/季集覆盖、候选警告、H&R、预检或执行能力闸门。启用自动审批必须确认 H&R、继续做种和“仅生成计划”；启用自动执行必须另行确认 H&R、继续做种和“只允许 `ADD_PAUSED`”，确认项按策略修订不可变保存。执行阶段为 `AUTO_IF_ELIGIBLE` 时，人工或自动批准后都会立即评估独立执行资格；只有总闸、执行策略、能力心跳和全部资格同时通过才会创建 `ADD_PAUSED` 执行记录。
 
 ## 执行控制面与下载任务 API
 
@@ -171,11 +177,21 @@ ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false
 
 `ENABLE_DOWNLOAD_EXECUTION_CONTROL_PLANE` 只允许管理员创建 intent 和 `PENDING` 执行记录。独立执行器要求 `ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 三个开关同时为 `true`；少一个即拒绝启动。实际运行还需要显式启用 AvistaZ 搜索、提供 AvistaZ/qB 运行时 Secret 和 qB 目标策略。自动执行即使满足全部资格也只能创建 `ADD_PAUSED` 任务，不允许自动选择 `START_IMMEDIATELY`。任何真实验证前都必须先向用户列出将访问的 URL、将读取或写入的对象和可能影响，并取得明确授权。
 
-`ENABLE_DOWNLOAD_MONITOR=true` 还必须配合 `ENABLE_QB_READ_ONLY=true`。监控器只调用 qB 登录和只读 GET，不调用暂停、恢复、删除或重校验。
+`ENABLE_DOWNLOAD_MONITOR=true` 还必须配合 `ENABLE_QB_READ_ONLY=true`，并要求 `QB_TARGET_SAVE_PATH` 位于非空的 `QB_ALLOWED_SAVE_PATHS` 白名单内。监控器只调用 qB 登录和只读 GET，不调用暂停、恢复、删除或重校验。
 
 `ENABLE_MEDIA_IMPORT_CONTROL_PLANE=true` 只开放数据库中的媒体入库规划状态流。`MEDIA_IMPORT_TARGET_ROOT_REFS` 是逗号分隔的不透明目标根引用白名单，不得填写真实文件系统路径；留空时创建请求失败关闭。`MEDIA_IMPORT_PREFLIGHT_MAX_AGE_SECONDS` 默认 300 秒且只接受 30 至 3600 秒。配置不挂载媒体目录、不创建只读检查器，也不授予任何文件读写权限。
 
-推荐使用项目内的本地 Secret 文件和 Compose override。共需 12 个文件：本地认证 3 个、NextFind 2 个、TMDB 1 个、AvistaZ 3 个、qBittorrent 3 个。以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。
+推荐按实际验证阶段叠加 Docker Secret override，不必在第一轮就创建全部 12 个文件：
+
+| override | 本地文件 | 用途 |
+|---|---:|---|
+| `deploy/compose.secrets.discovery.yaml.example` | 6 | 本地认证 3 个、NextFind 2 个、TMDB 1 个；第一轮只读发现只使用这一层 |
+| `deploy/compose.secrets.avistaz.yaml.example` | 3 | AvistaZ username/password/PID；获得 AvistaZ 访问授权后再叠加 |
+| `deploy/compose.secrets.qb.yaml.example` | 3 | qBittorrent base URL/username/password；获得目标 qB 访问授权后再叠加 |
+
+三个文件是可叠加的增量 override；只会清空并替换本层对应的明文环境变量，不会自动开启实时开关或可选 profile。现有 [全量 12 Secret override](deploy/compose.secrets.yaml.example) 保持兼容，已安全录入全部 12 个文件的部署可以继续使用；不要把全量文件和三份分层文件重复叠加。未启用阶段的凭据应继续在 `.env` 中保持空白。
+
+以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。第一轮只执行 discovery 分组；AvistaZ 和 qB 分组等取得对应授权时再执行。
 
 ```powershell
 Set-Location D:\project\unin
@@ -197,46 +213,79 @@ function Write-LocalSecret([string]$Path, [string]$Prompt) {
         Remove-Variable plainValue -ErrorAction SilentlyContinue
     }
 }
+```
 
+第一轮在同一个 PowerShell 会话中只执行以下 discovery 分组，然后停止：
+
+```powershell
 Write-LocalSecret '.\secrets\auth_local_username.txt' 'UNIN local username'
 Write-LocalSecret '.\secrets\auth_local_password.txt' 'UNIN local password'
 Write-LocalSecret '.\secrets\auth_session_signing_key.txt' 'UNIN session signing key (minimum 32 characters)'
 Write-LocalSecret '.\secrets\nextfind_username.txt' 'NextFind username'
 Write-LocalSecret '.\secrets\nextfind_password.txt' 'NextFind password'
 Write-LocalSecret '.\secrets\tmdb_access_token.txt' 'TMDB Bearer Access Token'
+icacls .\secrets\*.txt /inheritance:r /grant:r "$($env:USERNAME):(R)"
+```
+
+AvistaZ 阶段取得授权后，在仍定义有 `Write-LocalSecret` 的 PowerShell 会话中执行；若已打开新会话，先重新执行上面的函数定义，不要重复录入 discovery 文件：
+
+```powershell
 Write-LocalSecret '.\secrets\avistaz_username.txt' 'AvistaZ username'
 Write-LocalSecret '.\secrets\avistaz_password.txt' 'AvistaZ password'
 Write-LocalSecret '.\secrets\avistaz_pid.txt' 'AvistaZ PID'
+icacls .\secrets\*.txt /inheritance:r /grant:r "$($env:USERNAME):(R)"
+```
+
+qBittorrent 阶段取得指定实例访问授权后同理执行：
+
+```powershell
 Write-LocalSecret '.\secrets\qb_base_url.txt' 'qBittorrent base URL'
 Write-LocalSecret '.\secrets\qb_username.txt' 'qBittorrent username'
 Write-LocalSecret '.\secrets\qb_password.txt' 'qBittorrent password'
 icacls .\secrets\*.txt /inheritance:r /grant:r "$($env:USERNAME):(R)"
 ```
 
-12 个文件名必须与 [deploy/compose.secrets.yaml.example](deploy/compose.secrets.yaml.example) 一致：
+文件名按 override 分组如下；三组并集与全量 override 的 12 个文件完全一致：
 
 ```text
+# deploy/compose.secrets.discovery.yaml.example（第一轮 6 个）
 secrets/auth_local_username.txt
 secrets/auth_local_password.txt
 secrets/auth_session_signing_key.txt
 secrets/nextfind_username.txt
 secrets/nextfind_password.txt
 secrets/tmdb_access_token.txt
+
+# deploy/compose.secrets.avistaz.yaml.example（后续 3 个）
 secrets/avistaz_username.txt
 secrets/avistaz_password.txt
 secrets/avistaz_pid.txt
+
+# deploy/compose.secrets.qb.yaml.example（后续 3 个）
 secrets/qb_base_url.txt
 secrets/qb_username.txt
 secrets/qb_password.txt
 ```
 
-Secret 可见范围固定为：API 读取全部 12 个；普通 Worker 只读取 NextFind 2 个、TMDB 1 个和 AvistaZ 3 个，明确没有 qB Secret；`automation-preflight` 只读取 qB 3 个；下载执行器读取 AvistaZ 3 个和 qB 3 个；只读监控器只读取 qB 3 个；前端不挂载任何 Secret。非 Secret 的主机白名单、目标引用和安全策略仍按职责传入对应服务。
+Secret 可见范围随已叠加的层增加，但服务边界固定：discovery 层只让 API 读取 6 个、普通 Worker 读取 NextFind/TMDB 3 个；AvistaZ 层只向 API、普通 Worker 和下载执行器各增加 AvistaZ 3 个；qB 层只向 API、`automation-preflight`、下载执行器和只读监控器各增加 qB 3 个；前端始终为 0。三层全部叠加后，权限矩阵与原全量 override 相同：API=12、普通 Worker=6、`automation-preflight`=3、下载执行器=6、监控器=3、前端=0。非 Secret 的主机白名单、目标引用和安全策略仍按职责传入对应服务。
 
 认证与 qB 的非密钥策略仍在本机 `.env` 中配置。认证策略包括 `AUTH_LOCAL_ROLE`、会话/CSRF TTL 和 `AUTH_COOKIE_SECURE`；不要在使用 Secret override 时把三个认证值同时写入 `.env`。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
 
 阶段 7A 的目标根配置与 qB 保存路径相互独立。用户只在本机 `.env` 录入经过约定的不透明 `MEDIA_IMPORT_TARGET_ROOT_REFS`；通过页面或 API 提交的也只能是源/目标相对路径和文件大小提案。现阶段不需要录入真实媒体根路径，也不要给 Compose 添加媒体目录 volume。只有后续引入受信只读 inspection 时，才需要先向用户说明将读取的实际下载根和目标根、挂载模式及检查范围并取得确认；引入复制/硬链接执行器还需要新的独立阶段和文件写入授权。
 
-普通开发启动不启用自动预检、下载执行或监控 profile：
+第一轮只读发现只需 6 个 discovery Secret，不声明或挂载 AvistaZ/qB Secret，也不启用自动预检、下载执行或监控 profile：
+
+```powershell
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example up -d --build
+```
+
+获得 AvistaZ 只读搜索授权并录入对应 3 个 Secret 后，在 discovery 层之后追加：
+
+```powershell
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.avistaz.yaml.example up -d --build
+```
+
+若本机已经安全录入全部 12 个 Secret，原全量命令仍受支持：
 
 ```powershell
 docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example up -d --build
@@ -245,7 +294,7 @@ docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.ex
 自动审批的 qB 只读预检使用独立 `automation-preflight` profile。只有在用户明确批准目标 qB 实例的只读登录/查询、`ENABLE_AUTOMATION_ENGINE=true`、`ENABLE_QB_READ_ONLY=true`，并确认当前自动化策略后才允许启动：
 
 ```powershell
-docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example --profile automation-preflight up -d --build
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.qb.yaml.example --profile automation-preflight up -d --build
 ```
 
 该服务只挂载 qB 三项 Secret，不持有 NextFind、TMDB 或 AvistaZ Secret，也不调用 qB mutation。它发布绑定 `preflight_policy_fingerprint` 与 `QB_TARGET_INSTANCE_REF` 的短 TTL readiness；系统只有观察到与当前配置匹配的新鲜心跳才会排队自动预检。Worker 随后只对固定审批快照执行登录和只读 GET；完整 `PASS` 才可能自动生成计划，其余结果保留人工处理。
@@ -253,7 +302,7 @@ docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.ex
 仅在真实执行得到单独授权、三开关已显式启用且目标审批已再次确认后，才允许加入 `download-execution` profile：
 
 ```powershell
-docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-execution up -d --build
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.avistaz.yaml.example -f deploy\compose.secrets.qb.yaml.example --profile download-execution up -d --build
 ```
 
 这会允许执行器重新搜索已批准的 AvistaZ torrent ID、访问对应 download URL、读取并校验 `.torrent`，并在通过所有闸门后最多向 `qb_base_url.txt` 指定的 qBittorrent 提交一次 add。执行器只有在三开关、AvistaZ/qB 凭据存在性、目标主机与保存路径策略通过时才发布绑定执行配置指纹的短 TTL readiness。自动执行必须观察到匹配心跳，启动模式固定为 `ADD_PAUSED`，提交后还会验证任务确实保持暂停；只有管理员在人工一次性 intent 中显式选择 `START_IMMEDIATELY` 才会立即启动。
@@ -261,13 +310,13 @@ docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.ex
 需要验证完整自动链路时，必须分别取得 qB 只读预检和真实 qB add 授权，再同时启用两个 profile；仅启用 `automation-preflight` 不授予或启动下载执行器：
 
 ```powershell
-docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example --profile automation-preflight --profile download-execution up -d --build
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.avistaz.yaml.example -f deploy\compose.secrets.qb.yaml.example --profile automation-preflight --profile download-execution up -d --build
 ```
 
 只读监控另用 `download-monitor` profile，并要求 `ENABLE_DOWNLOAD_MONITOR=true` 与 `ENABLE_QB_READ_ONLY=true`：
 
 ```powershell
-docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-monitor up -d --build
+docker compose --env-file .env -f compose.yaml -f deploy\compose.secrets.discovery.yaml.example -f deploy\compose.secrets.qb.yaml.example --profile download-monitor up -d --build
 ```
 
 TMDB 只读测试会连接 `api.themoviedb.org`；AvistaZ 搜索测试会连接 `avistaz.to` 的认证与搜索端点；qB 只读测试会连接 `qb_base_url.txt` 指定且被 `QB_ALLOWED_HOSTS` 精确允许的实例。当前均未执行真实冒烟测试。执行器测试与只读测试不是同一授权范围：批准搜索或 qB 只读测试，不等于批准访问 AvistaZ download URL 或向 qB add。

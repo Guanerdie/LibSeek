@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.security import sanitize_details
+from app.core.security import sanitize_details, sanitize_public_text
 from app.core.time import utc_now
 from app.errors import AppError
 from app.models.entities import (
@@ -1155,6 +1155,39 @@ async def update_download_job_observation(
                 "progress": observed.progress if observed is not None else job.progress,
                 "error_code": job.error_code,
             },
+        )
+    await session.flush()
+    return job
+
+
+async def record_download_job_monitor_error(
+    session: AsyncSession,
+    job_id: str,
+    *,
+    error_code: str,
+    error_message: str,
+    actor: str,
+    details: dict[str, object] | None = None,
+) -> DownloadJob:
+    """Persist a safe, user-visible monitor failure without downloader mutation."""
+    job = await session.get(DownloadJob, job_id, with_for_update=True)
+    if job is None:
+        raise AppError("DOWNLOAD_JOB_NOT_FOUND", "下载任务不存在", status_code=404)
+
+    previous = job.status
+    duplicate = previous == DownloadJobStatus.ERROR and job.error_code == error_code
+    job.status = DownloadJobStatus.ERROR
+    job.error_code = error_code
+    job.error_message = sanitize_public_text(error_message)
+    if not duplicate:
+        _add_job_event(
+            session,
+            job,
+            event_type="MONITOR_ERROR",
+            actor=actor,
+            from_status=previous,
+            to_status=DownloadJobStatus.ERROR,
+            details={**(details or {}), "error_code": error_code},
         )
     await session.flush()
     return job

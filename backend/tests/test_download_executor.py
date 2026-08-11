@@ -24,6 +24,7 @@ from app.models.entities import (
     DownloadExecution,
     DownloadExecutionEvent,
     DownloadJob,
+    DownloadJobEvent,
     DownloadPlan,
     MediaItem,
     TorrentCandidateRecord,
@@ -73,6 +74,7 @@ from app.workers.download_executor import (
     DownloadExecutor,
     DownloadMonitor,
 )
+from app.workers.download_monitor_main import build_qb_monitor
 
 RELEASE_TITLE = "Execution Movie 2026 1080p WEB-DL"
 TORRENT_ID = "approved-torrent-42"
@@ -1572,3 +1574,105 @@ async def test_monitor_uses_only_read_methods_and_keeps_hnr_unknown(
         assert job is not None
         assert job.status == DownloadJobStatus.SEEDING
         assert job.hnr_status == HnrStatus.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_monitor_records_ambiguous_hash_match_as_auditable_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    initial = qb_observation(info_hash)
+    executor_qb = FakeQb(
+        [[], [initial]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: executor_qb,
+        settings,
+    )
+    assert await executor.run_once() is True
+
+    duplicate = initial.model_copy(update={"name": "duplicate qB row"})
+    monitor_qb = FakeQb([[initial, duplicate]])
+    monitor = DownloadMonitor(
+        session_factory,
+        "monitor-test",
+        lambda: monitor_qb,
+        settings,
+    )
+    assert await monitor.run_once() == 1
+    assert await monitor.run_once() == 1
+    assert monitor_qb.calls == [
+        "authenticate",
+        "list_torrents",
+        "close",
+        "authenticate",
+        "list_torrents",
+        "close",
+    ]
+
+    async with session_factory() as session:
+        job = await session.scalar(
+            select(DownloadJob).where(DownloadJob.execution_id == execution_id)
+        )
+        assert job is not None
+        assert job.status == DownloadJobStatus.ERROR
+        assert job.error_code == "QB_INFO_HASH_AMBIGUOUS"
+        events = list(
+            (
+                await session.scalars(
+                    select(DownloadJobEvent).where(
+                        DownloadJobEvent.download_job_id == job.id,
+                        DownloadJobEvent.event_type == "MONITOR_ERROR",
+                    )
+                )
+            ).all()
+        )
+        assert len(events) == 1
+        assert events[0].from_status == DownloadJobStatus.PAUSED.value
+        assert events[0].to_status == DownloadJobStatus.ERROR.value
+        assert events[0].sanitized_details == {
+            "error_code": "QB_INFO_HASH_AMBIGUOUS",
+            "match_count": 2,
+        }
+
+
+@pytest.mark.parametrize(
+    ("target_save_path", "allowed_save_paths", "expected_error_code"),
+    [
+        ("", ("/downloads/movies",), "DOWNLOAD_MONITOR_TARGET_NOT_CONFIGURED"),
+        (
+            "/downloads/movies/incoming",
+            (),
+            "DOWNLOAD_MONITOR_TARGET_NOT_ALLOWED",
+        ),
+        (
+            "/private/unapproved",
+            ("/downloads/movies",),
+            "DOWNLOAD_MONITOR_TARGET_NOT_ALLOWED",
+        ),
+    ],
+)
+def test_monitor_startup_gate_rejects_invalid_target_before_credentials(
+    target_save_path: str,
+    allowed_save_paths: tuple[str, ...],
+    expected_error_code: str,
+) -> None:
+    settings = executor_settings(
+        qb_target_save_path=target_save_path,
+        qb_allowed_save_paths=allowed_save_paths,
+        qb_base_url=None,
+        qb_username=None,
+        qb_password=None,
+    )
+
+    with pytest.raises(AppError) as caught:
+        build_qb_monitor(settings)
+
+    assert caught.value.error_code == expected_error_code

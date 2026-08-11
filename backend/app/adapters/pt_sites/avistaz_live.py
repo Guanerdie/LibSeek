@@ -563,8 +563,18 @@ class AvistaZAdapter(PtSiteAdapter):
         match = re.search(r"(?i)(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)", value)
         if match is None:
             return None
-        units = {"B": 1, "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4}
-        unit = match.group(2).upper().replace("IB", "B")
+        units = {
+            "B": 1,
+            "KB": 1000,
+            "MB": 1000**2,
+            "GB": 1000**3,
+            "TB": 1000**4,
+            "KIB": 1024,
+            "MIB": 1024**2,
+            "GIB": 1024**3,
+            "TIB": 1024**4,
+        }
+        unit = match.group(2).upper()
         factor = units.get(unit)
         return int(float(match.group(1)) * factor) if factor else None
 

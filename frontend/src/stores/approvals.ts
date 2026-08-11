@@ -169,7 +169,7 @@ export const useApprovalStore = defineStore('approvals', () => {
           acknowledges_seeding: true,
           acknowledges_plan_only: true,
         }),
-      '审批已通过，仅生成下载计划',
+      '审批已通过，下载计划已生成；若自动执行策略已启用且满足条件，独立 ADD_PAUSED 执行可能已排队',
     )
   const reject = (approvalId: string, reason: string) =>
     perform(() => approvalApi.reject(approvalId, reason), '审批已拒绝')

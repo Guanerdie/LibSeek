@@ -174,6 +174,22 @@ async def test_jackett_data_envelope_and_real_field_names_are_normalized() -> No
     await avistaz.aclose()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1.5 GB", 1_500_000_000),
+        ("1.5 GiB", 1_610_612_736),
+        ("2 MiB", 2_097_152),
+        ("3 KB", 3000),
+    ],
+)
+def test_avistaz_human_size_preserves_decimal_and_binary_units(
+    value: str,
+    expected: int,
+) -> None:
+    assert AvistaZAdapter._size(value) == expected
+
+
 @pytest.mark.asyncio
 async def test_torrent_fetch_is_explicitly_enabled_and_uses_only_in_memory_url() -> None:
     torrent_bytes = b"d4:infod4:name7:exampleee"
