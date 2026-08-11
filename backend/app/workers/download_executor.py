@@ -27,8 +27,11 @@ from app.models.entities import (
 )
 from app.models.enums import (
     ApprovalStatus,
+    AutomationMode,
+    AutomationStage,
     DownloadExecutionStatus,
     DownloadLaunchMode,
+    Origin,
 )
 from app.schemas.adapters import (
     TorrentCandidate,
@@ -37,6 +40,8 @@ from app.schemas.adapters import (
 from app.schemas.approvals import ApprovalCandidateSnapshot
 from app.schemas.qbittorrent import QbTorrent
 from app.services.approvals import verify_download_plan, verify_snapshot
+from app.services.automation import stage_mode
+from app.services.automation_policy import get_current_policy
 from app.services.executions import (
     finalize_download_submission,
     mark_outcome_unknown,
@@ -65,6 +70,10 @@ _TERMINAL_EXECUTION_STATES = {
 
 
 class AvistaZExecutionAdapter(Protocol):
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None: ...
+
     async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]: ...
 
     async def fetch_torrent(self, torrent_id: str) -> bytes: ...
@@ -73,6 +82,10 @@ class AvistaZExecutionAdapter(Protocol):
 
 
 class QbExecutionAdapter(Protocol):
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None: ...
+
     async def authenticate(self) -> None: ...
 
     async def list_torrents(self) -> list[QbTorrent]: ...
@@ -113,6 +126,7 @@ class ExecutionBinding:
     plan: DownloadPlan
     snapshot: ApprovalCandidateSnapshot
     launch_mode: DownloadLaunchMode
+    origin: Origin
 
 
 class DownloadExecutor:
@@ -164,6 +178,16 @@ class DownloadExecutor:
                 return
             binding = await self._load_binding(claim)
             avistaz = self.avistaz_factory()
+            if binding.origin == Origin.AUTOMATION:
+                async def avistaz_request_guard() -> None:
+                    allowed = await self._ensure_external_action_allowed(
+                        claim,
+                        expected_status=DownloadExecutionStatus.VALIDATING,
+                    )
+                    if not allowed:
+                        raise self._lease_lost()
+
+                self._install_request_guard(avistaz, avistaz_request_guard)
 
             if not await self._ensure_external_action_allowed(
                 claim, expected_status=DownloadExecutionStatus.VALIDATING
@@ -197,6 +221,19 @@ class DownloadExecutor:
             reservation_committed = True
 
             qb = self.qb_factory()
+            if binding.origin == Origin.AUTOMATION:
+                async def qb_request_guard() -> None:
+                    allowed = await self._ensure_external_action_allowed(
+                        claim,
+                        expected_status=DownloadExecutionStatus.SUBMITTING,
+                        external_write_may_have_occurred=(
+                            external_write_may_have_occurred
+                        ),
+                    )
+                    if not allowed:
+                        raise self._lease_lost()
+
+                self._install_request_guard(qb, qb_request_guard)
             if not await self._ensure_external_action_allowed(
                 claim, expected_status=DownloadExecutionStatus.SUBMITTING
             ):
@@ -241,7 +278,9 @@ class DownloadExecutor:
                 outcome = DownloadExecutionStatus(add_result.outcome)
 
             if not await self._ensure_external_action_allowed(
-                claim, expected_status=DownloadExecutionStatus.SUBMITTING
+                claim,
+                expected_status=DownloadExecutionStatus.SUBMITTING,
+                external_write_may_have_occurred=external_write_may_have_occurred,
             ):
                 return
             observed = self._find_unique_observation(metadata, await qb.list_torrents())
@@ -251,6 +290,23 @@ class DownloadExecutor:
                     "qBittorrent 提交后未观察到已校验种子",
                     status_code=502,
                 )
+            if (
+                outcome == DownloadExecutionStatus.SUBMITTED
+                and binding.launch_mode == DownloadLaunchMode.ADD_PAUSED
+                and observed.state.casefold()
+                not in {"pauseddl", "pausedup", "stoppeddl", "stoppedup"}
+            ):
+                raise AppError(
+                    "QB_ADD_PAUSED_NOT_OBSERVED",
+                    "qBittorrent 未保持添加后暂停状态，必须人工对账",
+                    status_code=502,
+                )
+            if not await self._ensure_external_action_allowed(
+                claim,
+                expected_status=DownloadExecutionStatus.SUBMITTING,
+                external_write_may_have_occurred=external_write_may_have_occurred,
+            ):
+                return
 
             async with self.session_factory() as session:
                 await finalize_download_submission(
@@ -395,6 +451,7 @@ class DownloadExecutor:
                 plan=plan,
                 snapshot=snapshot,
                 launch_mode=execution.launch_mode,
+                origin=execution.origin,
             )
 
     async def _reserve_submission(
@@ -431,6 +488,7 @@ class DownloadExecutor:
         claim: ExecutionClaim,
         *,
         expected_status: DownloadExecutionStatus,
+        external_write_may_have_occurred: bool = False,
     ) -> bool:
         async with self.session_factory() as session:
             execution = await session.get(
@@ -452,6 +510,25 @@ class DownloadExecutor:
             approval = await session.get(
                 ApprovalRequest, execution.approval_id, with_for_update=True
             )
+            automation_error = await self._automation_fence_error(
+                session, execution, approval
+            )
+            if automation_error is not None:
+                if external_write_may_have_occurred:
+                    raise AppError(
+                        "AUTOMATION_POLICY_CHANGED_AFTER_WRITE",
+                        "自动化策略在 qBittorrent 写入可能发生后变化，必须人工对账",
+                        status_code=409,
+                    )
+                await self._cancel_by_automation_fence(
+                    session,
+                    execution,
+                    approval,
+                    error_code=automation_error,
+                    now=now,
+                )
+                await session.commit()
+                return False
             if expected_status == DownloadExecutionStatus.VALIDATING:
                 if approval is not None:
                     verify_snapshot(approval)
@@ -528,6 +605,112 @@ class DownloadExecutor:
         )
         if not allowed:
             raise self._lease_lost()
+
+    @staticmethod
+    def _install_request_guard(
+        adapter: object,
+        guard: Callable[[], Awaitable[None]],
+    ) -> None:
+        set_request_guard = getattr(adapter, "set_before_request_guard", None)
+        if not callable(set_request_guard):
+            raise AppError(
+                "AUTOMATION_REQUEST_GUARD_UNAVAILABLE",
+                "外部适配器无法安装逐请求自动化围栏",
+                status_code=409,
+            )
+        set_request_guard(guard)
+
+    async def _automation_fence_error(
+        self,
+        session: AsyncSession,
+        execution: DownloadExecution,
+        approval: ApprovalRequest | None,
+    ) -> str | None:
+        if execution.origin != Origin.AUTOMATION:
+            return None
+        if (
+            execution.launch_mode != DownloadLaunchMode.ADD_PAUSED
+            or not self.settings.enable_automation_engine
+            or not self.settings.enable_download_execution_control_plane
+            or not self.settings.download_executor_enabled
+        ):
+            return "AUTOMATION_EXECUTION_GATE_DISABLED"
+        if approval is None:
+            return "AUTOMATION_APPROVAL_MISSING"
+        snapshot = verify_snapshot(approval)
+        if snapshot.hit_and_run is None:
+            return "HNR_UNKNOWN"
+        _, current = await get_current_policy(session)
+        if execution.automation_policy_revision_id != current.id:
+            return "AUTOMATION_POLICY_REVISION_CHANGED"
+        if stage_mode(current, AutomationStage.EXECUTION) != AutomationMode.AUTO_IF_ELIGIBLE:
+            return "AUTOMATION_EXECUTION_MODE_CHANGED"
+        return None
+
+    def _add_approval_fence_event(
+        self,
+        session: AsyncSession,
+        approval: ApprovalRequest,
+        *,
+        previous: ApprovalStatus,
+        error_code: str,
+    ) -> None:
+        session.add(
+            ApprovalEvent(
+                approval_request_id=approval.id,
+                event_type="AUTOMATION_EXECUTION_CANCELLED",
+                from_status=previous.value,
+                to_status=ApprovalStatus.REVOKED.value,
+                actor=self.worker_id,
+                reason="自动化策略或安全资格在外部写入前失效",
+                snapshot_hash=approval.snapshot_hash,
+                sanitized_details={"error_code": error_code},
+            )
+        )
+
+    async def _cancel_by_automation_fence(
+        self,
+        session: AsyncSession,
+        execution: DownloadExecution,
+        approval: ApprovalRequest | None,
+        *,
+        error_code: str,
+        now: datetime,
+    ) -> None:
+        previous = execution.status
+        execution.status = DownloadExecutionStatus.CANCELLED
+        execution.error_code = error_code
+        execution.error_message = "自动化策略或安全资格已变化，外部写入前取消"
+        execution.next_retry_at = None
+        execution.locked_at = None
+        execution.locked_by = None
+        execution.lease_token = None
+        if approval is not None and approval.status in {
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.EXECUTING,
+        }:
+            previous_approval = approval.status
+            approval.status = ApprovalStatus.REVOKED
+            approval.decided_at = now
+            self._add_approval_fence_event(
+                session,
+                approval,
+                previous=previous_approval,
+                error_code=error_code,
+            )
+        self._add_execution_event(
+            session,
+            execution,
+            event_type="AUTOMATION_FENCE_CANCELLED",
+            from_status=previous,
+            to_status=DownloadExecutionStatus.CANCELLED,
+            details={
+                "error_code": error_code,
+                "automatic_retry_allowed": False,
+                "external_write_performed": False,
+            },
+        )
+        await session.flush()
 
     async def _renew_lease(self, claim: ExecutionClaim) -> bool:
         async with self.session_factory() as session:
@@ -794,14 +977,31 @@ class DownloadExecutor:
                 "AvistaZ 候选标题与不可变下载计划不一致",
                 status_code=409,
             )
-        if (
+        tmdb_binding_mismatch = (
             candidate.tmdb_id is not None
             and binding.snapshot.tmdb_id is not None
             and candidate.tmdb_id != binding.snapshot.tmdb_id
-        ):
+        )
+        if binding.origin == Origin.AUTOMATION:
+            tmdb_binding_mismatch = (
+                candidate.tmdb_id is None
+                or binding.snapshot.tmdb_id is None
+                or candidate.tmdb_id != binding.snapshot.tmdb_id
+            )
+        if tmdb_binding_mismatch:
             raise AppError(
                 "AVISTAZ_CANDIDATE_BINDING_DRIFT",
                 "AvistaZ 候选 TMDB ID 与不可变审批不一致",
+                status_code=409,
+            )
+        if binding.origin == Origin.AUTOMATION and (
+            candidate.hit_and_run is None
+            or binding.snapshot.hit_and_run is None
+            or candidate.hit_and_run != binding.snapshot.hit_and_run
+        ):
+            raise AppError(
+                "AVISTAZ_HNR_BINDING_DRIFT",
+                "AvistaZ 候选 H&R 信息与自动审批快照不一致",
                 status_code=409,
             )
         return candidate

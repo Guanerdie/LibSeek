@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   approvalApi,
+  automationApi,
   authApi,
   downloadJobApi,
   executionApi,
@@ -144,5 +145,60 @@ describe('API request security', () => {
       expect(init?.method).toBeUndefined()
       expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
     }
+  })
+
+  it('keeps automation audit reads read-only and protects flat revision publication', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse({})))
+
+    await automationApi.policy()
+    await automationApi.revisions({ page: 2, pageSize: 20 })
+    await automationApi.decisions({
+      page: 3,
+      pageSize: 50,
+      stage: 'EXECUTION',
+      outcome: 'BLOCKED',
+      mediaItemId: 'media/unsafe',
+    })
+    await automationApi.decision('decision/unsafe')
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/automation/policy',
+      '/api/automation/policy-revisions?page=2&page_size=20',
+      '/api/automation/decisions?page=3&page_size=50&stage=EXECUTION&outcome=BLOCKED&media_item_id=media%2Funsafe',
+      '/api/automation/decisions/decision%2Funsafe',
+    ])
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.method).toBeUndefined()
+      expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
+    }
+
+    fetchMock.mockClear()
+    setApiCsrfToken('csrf-session')
+    await automationApi.publishRevision({
+      base_revision_no: 7,
+      identity_mode: 'MANUAL',
+      torrent_selection_mode: 'MANUAL',
+      approval_mode: 'AUTO_IF_ELIGIBLE',
+      execution_mode: 'MANUAL',
+      identity_min_score: 0.95,
+      identity_min_margin: 0.1,
+      torrent_min_score: 0.9,
+      torrent_min_margin: 0.1,
+      torrent_min_seeders: 1,
+      acknowledges_hnr: true,
+      acknowledges_seeding: true,
+      acknowledges_plan_only: true,
+      acknowledges_add_paused_only: false,
+    })
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/automation/policy-revisions')
+    expect(init?.method).toBe('POST')
+    expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-session')
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    expect(body).not.toHaveProperty('created_by')
+    expect(body).not.toHaveProperty('engine_enabled')
+    expect(JSON.stringify(body)).not.toContain('START_IMMEDIATELY')
   })
 })

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 
 import bencodepy  # type: ignore[import-untyped]
 import httpx
@@ -39,7 +40,10 @@ def v2_torrent_fixture() -> tuple[bytes, str]:
 
 
 def adapter(
-    transport: httpx.AsyncBaseTransport, *, enable_write: bool = True
+    transport: httpx.AsyncBaseTransport,
+    *,
+    enable_write: bool = True,
+    before_request: Callable[[], Awaitable[None]] | None = None,
 ) -> QbittorrentAdapter:
     return QbittorrentAdapter(
         base_url=BASE,
@@ -48,6 +52,7 @@ def adapter(
         allowed_hosts=("qb.example.test",),
         transport=transport,
         enable_write=enable_write,
+        before_request=before_request,
     )
 
 
@@ -322,4 +327,57 @@ async def test_write_guard_runs_after_deduplication_and_before_add_post() -> Non
 
     assert caught.value.error_code == "DOWNLOAD_EXECUTION_LEASE_LOST"
     assert guard_calls == 1
+    assert paths == ["/api/v2/auth/login", "/api/v2/torrents/info"]
+
+
+@pytest.mark.asyncio
+async def test_request_guard_blocks_add_after_internal_deduplication_get() -> None:
+    torrent, info_hash = torrent_fixture()
+    paths: list[str] = []
+    guard_calls = 0
+    write_guard_calls = 0
+
+    async def request_guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 3:
+            raise AppError(
+                "AUTOMATION_POLICY_REVISION_CHANGED",
+                "policy changed",
+                status_code=409,
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        raise AssertionError("request guard must block the add POST")
+
+    async def write_guard() -> None:
+        nonlocal write_guard_calls
+        write_guard_calls += 1
+
+    client = adapter(
+        httpx.MockTransport(handler),
+        before_request=request_guard,
+    )
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.add_torrent(
+                torrent,
+                expected_info_hash=info_hash,
+                save_path="/downloads",
+                category="movies",
+                write_guard=write_guard,
+            )
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+    assert caught.value.details["external_request_performed"] is False
+    assert guard_calls == 3
+    assert write_guard_calls == 0
     assert paths == ["/api/v2/auth/login", "/api/v2/torrents/info"]

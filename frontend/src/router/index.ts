@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/auth'
 import type { AuthRole } from '../types'
 import { safeInternalRedirect } from '../utils/navigation'
 import AdaptersView from '../views/AdaptersView.vue'
+import AutomationView from '../views/AutomationView.vue'
 import ApprovalListView from '../views/ApprovalListView.vue'
 import ApprovalView from '../views/ApprovalView.vue'
 import DiscoveryView from '../views/DiscoveryView.vue'
@@ -45,6 +46,7 @@ const router = createRouter({
     { path: '/download-jobs/:id', component: DownloadJobDetailView },
     { path: '/discovery', component: DiscoveryView },
     { path: '/adapters', component: AdaptersView },
+    { path: '/automation', component: AutomationView },
     { path: '/qbittorrent', component: QbittorrentView },
   ],
 })

@@ -18,6 +18,8 @@ from app.errors import AppError
 from app.models.entities import (
     ApprovalEvent,
     ApprovalRequest,
+    AutomationDecision,
+    AutomationPolicyRevision,
     DownloadExecution,
     DownloadExecutionEvent,
     DownloadJob,
@@ -27,11 +29,15 @@ from app.models.entities import (
 )
 from app.models.enums import (
     ApprovalStatus,
+    AutomationMode,
+    AutomationStage,
+    DecisionOutcome,
     DownloadExecutionStatus,
     DownloadJobStatus,
     DownloadLaunchMode,
     ExecutionIntentStatus,
     HnrStatus,
+    Origin,
 )
 from app.schemas.executions import (
     DownloadExecutionCreateRequest,
@@ -40,6 +46,11 @@ from app.schemas.executions import (
 )
 from app.schemas.qbittorrent import QbTorrent
 from app.services.approvals import consume_approval, verify_download_plan, verify_snapshot
+from app.services.automation_policy import (
+    get_current_policy,
+    verify_automation_decision,
+    verify_policy_revision,
+)
 from app.services.torrent_validation import ValidatedTorrent
 
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{15,199}$")
@@ -142,8 +153,17 @@ async def create_execution_intent(
     settings: Settings,
     *,
     actor: str,
+    origin: Origin = Origin.MANUAL,
+    automation_policy_revision_id: str | None = None,
+    automation_decision_id: str | None = None,
 ) -> tuple[ExecutionIntent, str]:
     _require_control_plane_enabled(settings)
+    _require_origin_binding(
+        origin,
+        request.launch_mode,
+        automation_policy_revision_id=automation_policy_revision_id,
+        automation_decision_id=automation_decision_id,
+    )
     approval = await _get_locked_approval(session, approval_id)
     now = utc_now()
     _require_approved(approval, session, now)
@@ -201,6 +221,9 @@ async def create_execution_intent(
         plan_hash=plan.plan_hash,
         qb_target_fingerprint=qb_target_fingerprint(settings, plan, request.launch_mode),
         launch_mode=request.launch_mode,
+        origin=origin,
+        automation_policy_revision_id=automation_policy_revision_id,
+        automation_decision_id=automation_decision_id,
         status=ExecutionIntentStatus.ACTIVE,
         created_by=actor.strip(),
         expires_at=now + timedelta(seconds=ttl),
@@ -218,6 +241,9 @@ async def create_execution_intent(
             "plan_hash": intent.plan_hash,
             "qb_target_fingerprint": intent.qb_target_fingerprint,
             "launch_mode": intent.launch_mode.value,
+            "origin": intent.origin.value,
+            "automation_policy_revision_id": intent.automation_policy_revision_id,
+            "automation_decision_id": intent.automation_decision_id,
             "expires_at": intent.expires_at.isoformat(),
         },
     )
@@ -233,7 +259,17 @@ async def execute_approved_plan(
     settings: Settings,
     *,
     actor: str,
+    origin: Origin = Origin.MANUAL,
+    automation_policy_revision_id: str | None = None,
+    automation_decision_id: str | None = None,
+    execution_id: str | None = None,
 ) -> tuple[DownloadExecution, bool]:
+    _require_origin_binding(
+        origin,
+        DownloadLaunchMode.ADD_PAUSED if origin == Origin.AUTOMATION else None,
+        automation_policy_revision_id=automation_policy_revision_id,
+        automation_decision_id=automation_decision_id,
+    )
     key_digest = idempotency_key_digest(idempotency_key)
     nonce_digest = hash_secret(request.nonce)
     request_hash = _execution_request_hash(
@@ -241,6 +277,9 @@ async def execute_approved_plan(
         intent_id=request.intent_id,
         nonce_sha256=nonce_digest,
         idempotency_key_sha256=key_digest,
+        origin=origin,
+        automation_policy_revision_id=automation_policy_revision_id,
+        automation_decision_id=automation_decision_id,
     )
     existing = await session.scalar(
         select(DownloadExecution)
@@ -330,6 +369,16 @@ async def execute_approved_plan(
         )
     if not hmac.compare_digest(intent.nonce_sha256, nonce_digest):
         raise AppError("EXECUTION_NONCE_INVALID", "执行意图 nonce 无效", status_code=403)
+    if (
+        intent.origin != origin
+        or intent.automation_policy_revision_id != automation_policy_revision_id
+        or intent.automation_decision_id != automation_decision_id
+    ):
+        raise AppError(
+            "EXECUTION_AUTOMATION_BINDING_MISMATCH",
+            "执行意图的自动化来源绑定不一致",
+            status_code=409,
+        )
 
     current_target_fingerprint = qb_target_fingerprint(settings, plan, intent.launch_mode)
     if (
@@ -344,6 +393,7 @@ async def execute_approved_plan(
         )
 
     execution = DownloadExecution(
+        **({"id": execution_id} if execution_id is not None else {}),
         approval_id=approval.id,
         intent_id=intent.id,
         idempotency_key_sha256=key_digest,
@@ -352,6 +402,9 @@ async def execute_approved_plan(
         plan_hash=plan.plan_hash,
         qb_target_fingerprint=current_target_fingerprint,
         launch_mode=intent.launch_mode,
+        origin=origin,
+        automation_policy_revision_id=automation_policy_revision_id,
+        automation_decision_id=automation_decision_id,
         status=DownloadExecutionStatus.PENDING,
         max_attempts=settings.job_max_attempts,
         requested_by=actor.strip(),
@@ -376,6 +429,9 @@ async def execute_approved_plan(
             "plan_hash": execution.plan_hash,
             "qb_target_fingerprint": execution.qb_target_fingerprint,
             "launch_mode": execution.launch_mode.value,
+            "origin": execution.origin.value,
+            "automation_policy_revision_id": execution.automation_policy_revision_id,
+            "automation_decision_id": execution.automation_decision_id,
             "control_plane_only": True,
         },
     )
@@ -849,7 +905,13 @@ async def finalize_download_submission(
             "下载执行的审批不再处于 EXECUTING 状态",
             status_code=409,
         )
-    verify_snapshot(approval)
+    snapshot = verify_snapshot(approval)
+    await _require_final_automation_submission_cas(
+        session,
+        execution,
+        snapshot_hit_and_run=snapshot.hit_and_run,
+        settings=settings,
+    )
     plan = await _get_verified_plan(session, approval)
     if qb_target_fingerprint(settings, plan, execution.launch_mode) != (
         execution.qb_target_fingerprint
@@ -868,6 +930,17 @@ async def finalize_download_submission(
         raise AppError(
             "QB_SUBMISSION_TARGET_MISMATCH",
             "qBittorrent 中的下载目标与已批准计划不一致",
+            status_code=409,
+        )
+    if (
+        outcome == DownloadExecutionStatus.SUBMITTED
+        and execution.launch_mode == DownloadLaunchMode.ADD_PAUSED
+        and observed.state.casefold()
+        not in {"pauseddl", "pausedup", "stoppeddl", "stoppedup"}
+    ):
+        raise AppError(
+            "QB_ADD_PAUSED_NOT_OBSERVED",
+            "qBittorrent 未保持添加后暂停状态，禁止确认自动提交成功",
             status_code=409,
         )
     persisted_hashes = _execution_identity_hashes(execution)
@@ -972,6 +1045,39 @@ async def finalize_download_submission(
     )
     await session.flush()
     return job
+
+
+async def _require_final_automation_submission_cas(
+    session: AsyncSession,
+    execution: DownloadExecution,
+    *,
+    snapshot_hit_and_run: bool | None,
+    settings: Settings,
+) -> None:
+    """Hold the policy head lock until finalization commits for automatic writes."""
+    if execution.origin != Origin.AUTOMATION:
+        return
+    gates_enabled = all(
+        (
+            execution.launch_mode == DownloadLaunchMode.ADD_PAUSED,
+            settings.enable_automation_engine,
+            settings.enable_download_execution_control_plane,
+            settings.download_executor_enabled,
+            settings.enable_avistaz_live_search,
+            snapshot_hit_and_run is not None,
+        )
+    )
+    _, current = await get_current_policy(session, for_update=True)
+    if (
+        not gates_enabled
+        or execution.automation_policy_revision_id != current.id
+        or current.execution_mode != AutomationMode.AUTO_IF_ELIGIBLE
+    ):
+        raise AppError(
+            "AUTOMATION_POLICY_CHANGED_AFTER_WRITE",
+            "自动化策略在 qBittorrent 写入可能发生后变化，必须人工对账",
+            status_code=409,
+        )
 
 
 async def update_download_job_observation(
@@ -1139,11 +1245,26 @@ async def verify_download_execution(
         )
     verify_snapshot(approval)
     verify_download_plan(plan, approval)
+    _require_origin_binding(
+        execution.origin,
+        execution.launch_mode,
+        automation_policy_revision_id=execution.automation_policy_revision_id,
+        automation_decision_id=execution.automation_decision_id,
+    )
+    _require_origin_binding(
+        intent.origin,
+        intent.launch_mode,
+        automation_policy_revision_id=intent.automation_policy_revision_id,
+        automation_decision_id=intent.automation_decision_id,
+    )
     expected_request_hash = _execution_request_hash(
         approval_id=execution.approval_id,
         intent_id=execution.intent_id,
         nonce_sha256=intent.nonce_sha256,
         idempotency_key_sha256=execution.idempotency_key_sha256,
+        origin=execution.origin,
+        automation_policy_revision_id=execution.automation_policy_revision_id,
+        automation_decision_id=execution.automation_decision_id,
     )
     if (
         execution.approval_snapshot_hash != approval.snapshot_hash
@@ -1152,6 +1273,10 @@ async def verify_download_execution(
         or execution.plan_hash != intent.plan_hash
         or execution.qb_target_fingerprint != intent.qb_target_fingerprint
         or execution.launch_mode != intent.launch_mode
+        or execution.origin != intent.origin
+        or execution.automation_policy_revision_id
+        != intent.automation_policy_revision_id
+        or execution.automation_decision_id != intent.automation_decision_id
         or execution.request_hash != expected_request_hash
     ):
         raise AppError(
@@ -1159,6 +1284,35 @@ async def verify_download_execution(
             "下载执行记录与审批、意图或计划绑定不一致",
             status_code=409,
         )
+    if execution.origin == Origin.AUTOMATION:
+        revision = await session.get(
+            AutomationPolicyRevision, execution.automation_policy_revision_id
+        )
+        decision = await session.get(
+            AutomationDecision, execution.automation_decision_id
+        )
+        if revision is None or decision is None:
+            raise AppError(
+                "DOWNLOAD_EXECUTION_BINDING_INVALID",
+                "自动下载执行缺少策略或决策绑定",
+                status_code=409,
+            )
+        await verify_policy_revision(session, revision)
+        verify_automation_decision(decision)
+        if (
+            decision.policy_revision_id != revision.id
+            or decision.stage != AutomationStage.EXECUTION
+            or decision.action != "CREATE_DOWNLOAD_EXECUTION"
+            or decision.outcome != DecisionOutcome.ACTION_CREATED
+            or decision.media_item_id != approval.media_item_id
+            or decision.approval_request_id != approval.id
+            or decision.download_execution_id != execution.id
+        ):
+            raise AppError(
+                "DOWNLOAD_EXECUTION_BINDING_INVALID",
+                "自动下载执行与策略决策记录不一致",
+                status_code=409,
+            )
     return execution
 
 
@@ -1257,16 +1411,27 @@ def _execution_request_hash(
     intent_id: str,
     nonce_sha256: str,
     idempotency_key_sha256: str,
+    origin: Origin = Origin.MANUAL,
+    automation_policy_revision_id: str | None = None,
+    automation_decision_id: str | None = None,
 ) -> str:
-    return _canonical_hash(
-        {
-            "operation": "CREATE_DOWNLOAD_EXECUTION_V1",
-            "approval_id": approval_id,
-            "intent_id": intent_id,
-            "nonce_sha256": nonce_sha256,
-            "idempotency_key_sha256": idempotency_key_sha256,
-        }
-    )
+    payload: dict[str, object] = {
+        "operation": "CREATE_DOWNLOAD_EXECUTION_V1",
+        "approval_id": approval_id,
+        "intent_id": intent_id,
+        "nonce_sha256": nonce_sha256,
+        "idempotency_key_sha256": idempotency_key_sha256,
+    }
+    if origin == Origin.AUTOMATION:
+        payload.update(
+            {
+                "operation": "CREATE_DOWNLOAD_EXECUTION_V2",
+                "origin": origin.value,
+                "automation_policy_revision_id": automation_policy_revision_id,
+                "automation_decision_id": automation_decision_id,
+            }
+        )
+    return _canonical_hash(payload)
 
 
 def _canonical_hash(value: dict[str, object]) -> str:
@@ -1450,6 +1615,33 @@ def _require_control_plane_enabled(settings: Settings) -> None:
         raise AppError(
             "DOWNLOAD_EXECUTION_CONTROL_PLANE_DISABLED",
             "下载执行控制面默认关闭",
+            status_code=409,
+        )
+
+
+def _require_origin_binding(
+    origin: Origin,
+    launch_mode: DownloadLaunchMode | None,
+    *,
+    automation_policy_revision_id: str | None,
+    automation_decision_id: str | None,
+) -> None:
+    if origin == Origin.MANUAL:
+        if automation_policy_revision_id is not None or automation_decision_id is not None:
+            raise AppError(
+                "EXECUTION_ORIGIN_BINDING_INVALID",
+                "人工执行不能绑定自动化策略或决策",
+                status_code=409,
+            )
+        return
+    if (
+        launch_mode != DownloadLaunchMode.ADD_PAUSED
+        or not automation_policy_revision_id
+        or not automation_decision_id
+    ):
+        raise AppError(
+            "AUTOMATION_EXECUTION_BINDING_INVALID",
+            "自动执行必须绑定策略、决策并使用添加后暂停模式",
             status_code=409,
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 import httpx
 import pytest
@@ -19,7 +20,10 @@ async def no_sleep(_: float) -> None:
 
 
 def adapter(
-    transport: httpx.AsyncBaseTransport | None = None, *, enable_torrent_fetch: bool = False
+    transport: httpx.AsyncBaseTransport | None = None,
+    *,
+    enable_torrent_fetch: bool = False,
+    before_request: Callable[[], Awaitable[None]] | None = None,
 ) -> AvistaZAdapter:
     return AvistaZAdapter(
         username="test-user",
@@ -28,6 +32,7 @@ def adapter(
         min_interval_seconds=0,
         sleep=no_sleep,
         transport=transport,
+        before_request=before_request,
         enable_torrent_fetch=enable_torrent_fetch,
     )
 
@@ -267,6 +272,156 @@ async def test_429_uses_bounded_exponential_retry() -> None:
     assert await avistaz.search(TorrentSearchRequest(tmdb=123)) == []
     assert route.call_count == 2
     await avistaz.aclose()
+
+
+@pytest.mark.asyncio
+async def test_guard_change_after_auth_blocks_search_http_request() -> None:
+    requests: list[str] = []
+    guard_calls = 0
+
+    async def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            raise AppError(
+                "AUTOMATION_POLICY_REVISION_CHANGED",
+                "policy changed",
+                status_code=409,
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/v1/jackett/auth":
+            return httpx.Response(200, json={"token": "memory-token"})
+        raise AssertionError("search request must be blocked by the guard")
+
+    avistaz = adapter(httpx.MockTransport(handler), before_request=guard)
+    try:
+        with pytest.raises(AppError) as caught:
+            await avistaz.search(TorrentSearchRequest(tmdb=123))
+    finally:
+        await avistaz.aclose()
+
+    assert caught.value.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+    assert guard_calls == 2
+    assert requests == ["/api/v1/jackett/auth"]
+
+
+@pytest.mark.asyncio
+async def test_guard_change_after_401_blocks_reauthentication_http_request() -> None:
+    requests: list[str] = []
+    guard_calls = 0
+
+    async def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 3:
+            raise AppError(
+                "AUTOMATION_POLICY_REVISION_CHANGED",
+                "policy changed",
+                status_code=409,
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/v1/jackett/auth":
+            return httpx.Response(200, json={"token": "memory-token"})
+        if request.url.path == "/api/v1/jackett/torrents":
+            return httpx.Response(401, json={"message": "expired"})
+        raise AssertionError(request.url)
+
+    avistaz = adapter(httpx.MockTransport(handler), before_request=guard)
+    try:
+        with pytest.raises(AppError) as caught:
+            await avistaz.search(TorrentSearchRequest(tmdb=123))
+    finally:
+        await avistaz.aclose()
+
+    assert caught.value.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+    assert guard_calls == 3
+    assert requests == [
+        "/api/v1/jackett/auth",
+        "/api/v1/jackett/torrents",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_guard_change_after_429_blocks_retry_http_request() -> None:
+    requests: list[str] = []
+    guard_calls = 0
+
+    async def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 3:
+            raise AppError(
+                "AUTOMATION_POLICY_REVISION_CHANGED",
+                "policy changed",
+                status_code=409,
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/v1/jackett/auth":
+            return httpx.Response(200, json={"token": "memory-token"})
+        if request.url.path == "/api/v1/jackett/torrents":
+            return httpx.Response(429, json={"message": "slow down"})
+        raise AssertionError(request.url)
+
+    avistaz = adapter(httpx.MockTransport(handler), before_request=guard)
+    try:
+        with pytest.raises(AppError) as caught:
+            await avistaz.search(TorrentSearchRequest(tmdb=123))
+    finally:
+        await avistaz.aclose()
+
+    assert caught.value.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+    assert guard_calls == 3
+    assert requests == [
+        "/api/v1/jackett/auth",
+        "/api/v1/jackett/torrents",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_guard_runs_again_before_following_same_origin_redirect() -> None:
+    requests: list[str] = []
+    guard_calls = 0
+
+    async def guard() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 3:
+            raise AppError(
+                "AUTOMATION_POLICY_REVISION_CHANGED",
+                "policy changed",
+                status_code=409,
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/api/v1/jackett/auth":
+            return httpx.Response(200, json={"token": "memory-token"})
+        if request.url.path == "/api/v1/jackett/torrents":
+            return httpx.Response(
+                307,
+                headers={"Location": "/api/v1/jackett/redirected-torrents"},
+            )
+        raise AssertionError("redirected request must be blocked by the guard")
+
+    avistaz = adapter(httpx.MockTransport(handler), before_request=guard)
+    try:
+        with pytest.raises(AppError) as caught:
+            await avistaz.search(TorrentSearchRequest(tmdb=123))
+    finally:
+        await avistaz.aclose()
+
+    assert caught.value.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+    assert guard_calls == 3
+    assert requests == [
+        "/api/v1/jackett/auth",
+        "/api/v1/jackett/torrents",
+    ]
 
 
 @pytest.mark.asyncio

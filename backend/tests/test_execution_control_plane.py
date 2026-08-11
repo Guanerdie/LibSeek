@@ -102,7 +102,7 @@ def qb_observation(
     info_hash: str = INFO_HASH,
     info_hash_v1: str | None = INFO_HASH,
     info_hash_v2: str | None = None,
-    state: str = "downloading",
+    state: str = "pausedDL",
     progress: float = 0.25,
     category: str = "movies",
     save_path: str = "/downloads/movies/incoming",
@@ -751,7 +751,7 @@ async def test_finalize_submission_consumes_approval_and_creates_sanitized_job(
             actor="executor-test",
             lease_token=lease_token,
         )
-        assert job.status == DownloadJobStatus.DOWNLOADING
+        assert job.status == DownloadJobStatus.PAUSED
         assert job.save_path_ref == "movies-root"
         assert job.info_hash_v1 == INFO_HASH
         assert job.progress == 0.25
@@ -966,7 +966,7 @@ async def test_monitor_updates_metrics_maps_states_and_keeps_hnr_unknown(
             ).all()
         )
         assert [event.to_status for event in status_events] == [
-            DownloadJobStatus.DOWNLOADING.value,
+            DownloadJobStatus.PAUSED.value,
             DownloadJobStatus.SEEDING.value,
             DownloadJobStatus.MISSING.value,
         ]
@@ -1065,7 +1065,7 @@ async def test_download_job_read_apis_are_paginated_nested_and_redacted(
 
     async with execution_api_client_factory() as client:
         listed = await client.get(
-            "/api/download-jobs?page=1&page_size=10&status=DOWNLOADING"
+            "/api/download-jobs?page=1&page_size=10&status=PAUSED"
         )
         detail = await client.get(f"/api/download-jobs/{job.id}")
         timeline = await client.get(f"/api/download-jobs/{job.id}/timeline")

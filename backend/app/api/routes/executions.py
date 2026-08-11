@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.dependencies import AdminPrincipal, DbSession, SettingsDep, ViewerPrincipal
 from app.errors import AppError
 from app.models.entities import DownloadExecution, ExecutionIntent
-from app.models.enums import DownloadExecutionStatus
+from app.models.enums import AutomationStage, DownloadExecutionStatus
 from app.schemas.common import Page
 from app.schemas.executions import (
     DownloadExecutionCreateRequest,
@@ -17,6 +17,7 @@ from app.schemas.executions import (
     ExecutionIntentCreateRequest,
     ExecutionIntentCreateResponse,
 )
+from app.services.automation import require_stage_not_disabled
 from app.services.executions import (
     create_execution_intent,
     execute_approved_plan,
@@ -102,6 +103,7 @@ async def create_approval_execution_intent(
     settings: SettingsDep,
     principal: AdminPrincipal,
 ) -> ExecutionIntentCreateResponse:
+    await require_stage_not_disabled(session, AutomationStage.EXECUTION)
     try:
         intent, nonce = await create_execution_intent(
             session,
@@ -142,6 +144,7 @@ async def execute_approval_download_plan(
     settings: SettingsDep,
     principal: AdminPrincipal,
 ) -> DownloadExecutionResponse:
+    await require_stage_not_disabled(session, AutomationStage.EXECUTION)
     try:
         execution, created = await execute_approved_plan(
             session,

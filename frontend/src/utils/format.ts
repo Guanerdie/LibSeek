@@ -53,6 +53,14 @@ export function statusLabel(status: string): string {
       WARNING: '警告',
       BLOCKED: '已阻止',
       UNKNOWN: '未知',
+      ENABLED: '已启用',
+      DISABLED: '已关闭',
+      MANUAL: '人工',
+      AUTO_IF_ELIGIBLE: '条件自动',
+      ACTION_CREATED: '已创建动作',
+      MANUAL_REQUIRED: '需要人工',
+      STALE: '上下文已过期',
+      NOOP: '无需动作',
     }[status] ?? status
   )
 }

@@ -54,7 +54,7 @@ npm.cmd run build
 npm.cmd run lint
 ```
 
-覆盖原有列表状态以及身份候选、人工确认、PT 候选、评分理由、警告、固定候选审批、三项批准确认、预检状态和下载计划；还覆盖两步执行确认、默认 `ADD_PAUSED`、nonce 请求前销毁、执行列表/详情、人工对账、下载任务列表以及包含媒体/审批/执行/进度/H&R/警告/三源时间线的总结页。qB、审批、执行与下载任务 store 在失败时清空陈旧状态，并使用请求 generation 丢弃迟到响应。源码不得使用 `localStorage`、`sessionStorage` 或 Pinia 持久化保存凭据、nonce、SID 或 qB 数据。
+覆盖原有列表状态以及身份候选、人工确认、PT 候选、评分理由、警告、固定候选审批、三项批准确认、预检状态和下载计划；还覆盖四阶段自动化策略、总闸只读显示、管理员发布、条件化确认、策略哈希链、决策筛选/分页/脱敏详情，以及两步执行确认、默认 `ADD_PAUSED`、nonce 请求前销毁、执行列表/详情、人工对账、下载任务列表和包含媒体/审批/执行/进度/H&R/警告/三源时间线的总结页。自动化、qB、审批、执行与下载任务 store 在失败时清空陈旧状态，并使用请求 generation 丢弃迟到响应。源码不得使用 `localStorage`、`sessionStorage` 或 Pinia 持久化保存策略、凭据、nonce、SID 或 qB 数据。
 
 ## Compose（PowerShell）
 
@@ -71,19 +71,22 @@ Secret override 配置结构：
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example config --quiet
 ```
 
-阶段 5 可选服务 profile（仍使用全 `false` 的 `.env.example`，只验证 Compose 结构，不会启动容器）：
+阶段 5/6 可选服务 profile（仍使用全 `false` 的 `.env.example`，只验证 Compose 结构，不会启动容器）：
 
 ```powershell
+docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile automation-preflight config --quiet
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-execution config --quiet
 docker compose --env-file .env.example -f compose.yaml -f deploy\compose.secrets.yaml.example --profile download-monitor config --quiet
 ```
 
-这些命令只解析服务配置和 Secret 引用。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此成功不代表以下 10 个文件已经就绪，也不代表执行开关已获授权：
+这些命令只解析服务配置和 Secret 引用。Docker Compose v5 的 `config` 命令不会检查本地 Secret 文件是否存在，因此成功不代表以下 12 个文件已经就绪，也不代表自动预检或执行开关已获授权：
 
 ```text
 auth_local_username.txt
 auth_local_password.txt
 auth_session_signing_key.txt
+nextfind_username.txt
+nextfind_password.txt
 tmdb_access_token.txt
 avistaz_username.txt
 avistaz_password.txt
@@ -93,12 +96,36 @@ qb_username.txt
 qb_password.txt
 ```
 
+渲染后的服务权限矩阵还必须满足：API=12；普通 Worker=NextFind 2 + TMDB 1 + AvistaZ 3 且无 qB；`automation-preflight`=qB 3；下载执行器=AvistaZ 3 + qB 3；监控器=qB 3；前端=0。`automation-preflight` 必须只存在于同名 opt-in profile，并显式接收默认关闭的总闸、qB 只读开关、预检策略/目标配置和 90 秒 readiness TTL，不能获得 NextFind、TMDB 或 AvistaZ Secret。
+
+可用渲染后的 JSON 只读核对 Secret 数量，不读取任何文件内容：
+
+```powershell
+$rendered = docker compose --env-file .env.example `
+    -f compose.yaml -f deploy\compose.secrets.yaml.example `
+    --profile automation-preflight --profile download-execution `
+    --profile download-monitor config --format json | ConvertFrom-Json
+
+foreach ($name in @(
+    'api', 'worker', 'automation-preflight',
+    'download-executor', 'download-monitor', 'frontend'
+)) {
+    $secretNames = @($rendered.services.$name.secrets |
+        Where-Object { $null -ne $_ } |
+        ForEach-Object { $_.source })
+    '{0}: {1} [{2}]' -f $name, $secretNames.Count, ($secretNames -join ',')
+}
+```
+
+预期数量依次为 `12, 6, 3, 6, 3, 0`，且名称必须与上方权限矩阵一致。
+
 启动容器前应单独检查文件存在性，不读取或打印其内容：
 
 ```powershell
 $requiredSecrets = @(
     'auth_local_username.txt', 'auth_local_password.txt',
     'auth_session_signing_key.txt',
+    'nextfind_username.txt', 'nextfind_password.txt',
     'tmdb_access_token.txt', 'avistaz_username.txt', 'avistaz_password.txt',
     'avistaz_pid.txt', 'qb_base_url.txt', 'qb_username.txt', 'qb_password.txt'
 )
@@ -151,6 +178,32 @@ uv run pytest tests\test_download_executor.py tests\test_pt_site_extensibility.p
 - 写前可重试错误的有界 `RETRY_WAIT`，写入可能发生后的 `OUTCOME_UNKNOWN`，提交预留后无法验证的 `RECONCILIATION_REQUIRED`，以及这些状态禁止自动再次 add；
 - 监控器只读更新任务状态和统计、不调用 mutation、不推断 H&R；summary 固定嵌套，timeline 合并三类事件并二次脱敏；
 - 多站点 `site_id` 绑定、未知/禁用站点失败关闭、NexusPHP Profile 严格同源、登录/验证码/挑战稳定错误、运行时 Secret 不进入候选或 request gate，以及全部 HTML fixture 离线解析。
+
+阶段 6 保守自动化定向验收：
+
+```powershell
+Set-Location D:\project\unin\backend
+uv run pytest tests\test_automation_policy.py tests\test_automation_search_fence.py tests\test_automation_preflight_capability.py tests\test_execution_control_plane.py tests\test_download_executor.py -q
+
+Set-Location D:\project\unin\frontend
+npm.cmd test -- automation-store.spec.ts automation-view.spec.ts api-security.spec.ts navigation.spec.ts
+```
+
+覆盖项包括：
+
+- 默认四阶段均为 `MANUAL`、总闸响应为关闭、默认阈值与四项确认均采用保守值；
+- `DISABLED` 阻止该阶段新的人工和自动正向动作，`MANUAL` 只记录人工处理，`AUTO_IF_ELIGIBLE` 在总闸或能力闸门未满足时失败关闭；
+- 策略发布使用 `base_revision_no` compare-and-swap，确认项按审批/执行模式条件化要求，修订不可变且 SHA-256 前向哈希链可检测篡改；
+- 身份候选低分、并列、冲突、解析任务/输入过期与类型/标题/年份/TMDB 绑定不一致均转人工；
+- 种子候选低分、并列、警告、非 AvistaZ/实体绑定、TMDB ID/年份、IMDb-only、info hash/大小/做种数、H&R 和电视剧季集覆盖不安全均转人工；
+- 自动审批只接受完整、新鲜的 `PASS`，`WARNING`/`UNKNOWN`/`BLOCKED` 及 H&R 未知都不会自动批准；资格失败后人工审批流程仍可继续；
+- 普通 Worker 不 claim 自动预检任务；专用 Worker 的任务租约、策略、审批快照、预检前状态和队列决策绑定在每次外部读取前复核，网络 I/O 不长期持有审批行锁；
+- 自动预检 readiness 绑定预检策略指纹与 qB 目标实例，下载执行器 readiness 绑定执行配置；缺失、过期和指纹漂移均阻止新自动动作，心跳不包含生产者 Secret；
+- 自动执行与允许决策、策略修订同事务绑定，启动模式固定为 `ADD_PAUSED`；当前策略改变或执行能力关闭时，尚未写入 qB 的执行不会继续，提交后未观察到暂停会进入人工对账；
+- 自动化不追溯策略生效前的条目，actor 位于 `system:automation` 命名空间；决策并发去重、证据哈希/实体绑定复验、递归脱敏和公共响应不含 `dedupe_key`；
+- 自动化页面的 viewer/operator 只读、admin 发布、四阶段模式/阈值/确认交互、决策筛选与分页，以及窄屏导航和卡片布局。
+
+以上命令只使用 SQLite/Mock transport、合成模型和本地前端 DOM，不需要真实 TMDB、AvistaZ、qBittorrent、PostgreSQL 或运行时 Secret。阶段 6 的通过数量必须以最终全量复验输出为准，文档不固化中间测试计数。
 
 ## 验收边界
 

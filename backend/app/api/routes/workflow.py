@@ -6,6 +6,7 @@ from app.api.dependencies import DbSession, OperatorPrincipal, ViewerPrincipal
 from app.core.config import get_settings
 from app.errors import AppError
 from app.models.entities import MediaItem, TorrentSearchRun
+from app.models.enums import AutomationStage
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
 from app.schemas.entities import (
     IdentityConfirmationRequest,
@@ -16,6 +17,10 @@ from app.schemas.entities import (
     TorrentSearchAccepted,
     TorrentSearchCreateRequest,
     TorrentSearchRunResponse,
+)
+from app.services.automation import (
+    maybe_automate_torrent_search_after_identity,
+    require_stage_not_disabled,
 )
 from app.services.workflow import (
     confirm_identity,
@@ -44,6 +49,7 @@ def _run_response(run: TorrentSearchRun) -> TorrentSearchRunResponse:
 async def resolve_media(
     media_id: str, session: DbSession, _principal: OperatorPrincipal
 ) -> ResolveAccepted:
+    await require_stage_not_disabled(session, AutomationStage.IDENTITY)
     settings = get_settings()
     if not settings.enable_tmdb_live:
         raise AppError("TMDB_LIVE_DISABLED", "TMDB 真实只读连接默认关闭", status_code=409)
@@ -97,8 +103,15 @@ async def create_identity_confirmation(
     session: DbSession,
     principal: OperatorPrincipal,
 ) -> IdentityReviewResponse:
+    await require_stage_not_disabled(session, AutomationStage.IDENTITY)
     media = await _media_or_404(session, media_id)
     review = await confirm_identity(session, media, request, actor=principal.username)
+    await maybe_automate_torrent_search_after_identity(
+        session,
+        media=media,
+        trigger_created_at=review.created_at,
+        settings=get_settings(),
+    )
     await session.commit()
     return IdentityReviewResponse(
         id=review.id,
@@ -122,6 +135,7 @@ async def create_torrent_search(
     session: DbSession,
     _principal: OperatorPrincipal,
 ) -> TorrentSearchAccepted:
+    await require_stage_not_disabled(session, AutomationStage.TORRENT_SELECTION)
     settings = get_settings()
     if request.site_id != "avistaz":
         raise AppError(
@@ -141,6 +155,7 @@ async def create_torrent_search(
         media,
         request,
         max_attempts=settings.job_max_attempts,
+        settings=settings,
     )
     await session.commit()
     data = _run_response(run).model_dump()

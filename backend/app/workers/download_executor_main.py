@@ -12,6 +12,10 @@ from app.core.config import Settings, get_settings
 from app.core.security import validate_external_url
 from app.db.session import SessionFactory
 from app.errors import AppError
+from app.services.execution_capability import (
+    publish_download_executor_ready,
+    require_download_executor_ready_configuration,
+)
 from app.services.site_rate_limit import PostgresAdvisoryRequestGate
 from app.workers.download_executor import (
     DownloadExecutor,
@@ -82,9 +86,9 @@ def build_qb_executor(settings: Settings) -> QbittorrentAdapter:
 async def run() -> None:
     settings = get_settings()
     require_download_executor_enabled(settings)
-    worker_id = os.getenv("DOWNLOAD_EXECUTOR_ID") or (
-        f"download-executor:{socket.gethostname()}:{os.getpid()}"
-    )
+    require_download_executor_ready_configuration(settings)
+    instance_id = os.getenv("DOWNLOAD_EXECUTOR_ID") or f"{socket.gethostname()}:{os.getpid()}"
+    worker_id = f"download-executor:{instance_id}"
     executor = DownloadExecutor(
         SessionFactory,
         worker_id,
@@ -92,21 +96,38 @@ async def run() -> None:
         lambda: build_qb_executor(settings),
         settings,
     )
+    ready_heartbeat = asyncio.create_task(
+        _ready_heartbeat_loop(settings, instance_id)
+    )
     logger.info("Download executor started: %s", worker_id)
-    while True:
+    try:
+        while True:
+            try:
+                handled = await executor.run_once()
+            except AppError as exc:
+                logger.error("Download executor cycle failed: error_code=%s", exc.error_code)
+                handled = False
+            except Exception as exc:
+                logger.error(
+                    "Download executor cycle failed: exception_type=%s",
+                    type(exc).__name__,
+                )
+                handled = False
+            if not handled:
+                await asyncio.sleep(settings.download_executor_poll_seconds)
+    finally:
+        ready_heartbeat.cancel()
         try:
-            handled = await executor.run_once()
-        except AppError as exc:
-            logger.error("Download executor cycle failed: error_code=%s", exc.error_code)
-            handled = False
-        except Exception as exc:
-            logger.error(
-                "Download executor cycle failed: exception_type=%s",
-                type(exc).__name__,
-            )
-            handled = False
-        if not handled:
-            await asyncio.sleep(settings.download_executor_poll_seconds)
+            await ready_heartbeat
+        except asyncio.CancelledError:
+            pass
+
+
+async def _ready_heartbeat_loop(settings: Settings, instance_id: str) -> None:
+    interval = max(5.0, settings.download_executor_ready_ttl_seconds / 3)
+    while True:
+        await publish_download_executor_ready(SessionFactory, settings, instance_id)
+        await asyncio.sleep(interval)
 
 
 if __name__ == "__main__":

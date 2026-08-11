@@ -38,6 +38,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         read_timeout: float = 30,
         max_response_bytes: int = 10 * 1024 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(
             base_url=base_url,
@@ -49,6 +50,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
             read_timeout=read_timeout,
             max_response_bytes=max_response_bytes,
             transport=transport,
+            before_request=before_request,
         )
         self.enable_write = enable_write
 
@@ -80,6 +82,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         params: dict[str, Any] | None = None,
         data: dict[str, str] | None = None,
         files: dict[str, tuple[str, bytes, str]] | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> httpx.Response:
         if method.upper() == "POST" and path == "/api/v2/torrents/add" and not self.enable_write:
             raise AppError(
@@ -94,6 +97,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
             params=params,
             data=data,
             files=files,
+            before_send=before_send,
         )
 
     async def add_torrent(
@@ -139,8 +143,6 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
             "tags": ",".join(tags),
             "paused": "false" if start_immediately else "true",
         }
-        if write_guard is not None:
-            await write_guard()
         try:
             response = await self._request(
                 "POST",
@@ -153,8 +155,11 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
                         "application/x-bittorrent",
                     )
                 },
+                before_send=write_guard,
             )
         except AppError as exc:
+            if exc.details.get("external_request_performed") is False:
+                raise
             raise self._unknown_outcome() from exc
         if self._looks_like_html(response) or response.text.strip() != "Ok.":
             raise self._unknown_outcome()

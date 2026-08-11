@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     event,
     inspect,
+    select,
     text,
 )
 from sqlalchemy.engine import Connection
@@ -27,6 +28,9 @@ from app.core.time import utc_now
 from app.db.base import Base
 from app.models.enums import (
     ApprovalStatus,
+    AutomationMode,
+    AutomationStage,
+    DecisionOutcome,
     DownloadExecutionStatus,
     DownloadJobStatus,
     DownloadLaunchMode,
@@ -36,6 +40,7 @@ from app.models.enums import (
     JobStatus,
     MediaType,
     MetadataStatus,
+    Origin,
     WorkflowStatus,
 )
 
@@ -201,6 +206,9 @@ class MetadataMatch(Base):
     media_id: Mapped[str] = mapped_column(
         ForeignKey("media_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    resolution_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), index=True
+    )
     tmdb_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
@@ -241,6 +249,16 @@ class IdentityReview(Base):
 
 class TorrentSearchRun(Base):
     __tablename__ = "torrent_search_runs"
+    __table_args__ = (
+        Index(
+            "uq_torrent_search_active_media_site",
+            "media_id",
+            "site_id",
+            unique=True,
+            postgresql_where=text("status IN ('PT_SEARCH_PENDING', 'PT_SEARCHING')"),
+            sqlite_where=text("status IN ('PT_SEARCH_PENDING', 'PT_SEARCHING')"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     media_id: Mapped[str] = mapped_column(
@@ -391,6 +409,13 @@ class ExecutionIntent(Base):
             "OR (status <> 'CONSUMED' AND consumed_at IS NULL AND consumed_by IS NULL))",
             name="ck_execution_intents_consumed_fields",
         ),
+        CheckConstraint(
+            "((origin = 'MANUAL' AND automation_policy_revision_id IS NULL "
+            "AND automation_decision_id IS NULL) OR "
+            "(origin = 'AUTOMATION' AND automation_policy_revision_id IS NOT NULL "
+            "AND automation_decision_id IS NOT NULL AND launch_mode = 'ADD_PAUSED'))",
+            name="ck_execution_intents_automation_binding",
+        ),
         Index(
             "uq_execution_intent_active_approval",
             "approval_id",
@@ -410,6 +435,15 @@ class ExecutionIntent(Base):
     qb_target_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     launch_mode: Mapped[DownloadLaunchMode] = mapped_column(
         Enum(DownloadLaunchMode, native_enum=False, length=30), nullable=False
+    )
+    origin: Mapped[Origin] = mapped_column(
+        Enum(Origin, native_enum=False, length=20), default=Origin.MANUAL, nullable=False
+    )
+    automation_policy_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("automation_policy_revisions.id", ondelete="RESTRICT"), index=True
+    )
+    automation_decision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("automation_decisions.id", ondelete="RESTRICT"), index=True
     )
     status: Mapped[ExecutionIntentStatus] = mapped_column(
         Enum(ExecutionIntentStatus, native_enum=False, length=20),
@@ -481,8 +515,10 @@ class DownloadExecution(Base):
             "((status IN ('SUBMITTING', 'SUBMITTED', 'ALREADY_PRESENT', "
             "'OUTCOME_UNKNOWN', 'RECONCILIATION_REQUIRED', 'RECONCILIATION_PENDING') "
             "AND actual_info_hash IS NOT NULL) OR "
+            "(status = 'CANCELLED') OR "
             "(status NOT IN ('SUBMITTING', 'SUBMITTED', 'ALREADY_PRESENT', "
-            "'OUTCOME_UNKNOWN', 'RECONCILIATION_REQUIRED', 'RECONCILIATION_PENDING') "
+            "'OUTCOME_UNKNOWN', 'RECONCILIATION_REQUIRED', 'RECONCILIATION_PENDING', "
+            "'CANCELLED') "
             "AND actual_info_hash IS NULL))",
             name="ck_download_executions_submission_metadata",
         ),
@@ -509,6 +545,13 @@ class DownloadExecution(Base):
             "AND reconciliation_requested_at IS NOT NULL)",
             name="ck_download_executions_reconciliation_reason",
         ),
+        CheckConstraint(
+            "((origin = 'MANUAL' AND automation_policy_revision_id IS NULL "
+            "AND automation_decision_id IS NULL) OR "
+            "(origin = 'AUTOMATION' AND automation_policy_revision_id IS NOT NULL "
+            "AND automation_decision_id IS NOT NULL AND launch_mode = 'ADD_PAUSED'))",
+            name="ck_download_executions_automation_binding",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -533,6 +576,15 @@ class DownloadExecution(Base):
     qb_target_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     launch_mode: Mapped[DownloadLaunchMode] = mapped_column(
         Enum(DownloadLaunchMode, native_enum=False, length=30), nullable=False
+    )
+    origin: Mapped[Origin] = mapped_column(
+        Enum(Origin, native_enum=False, length=20), default=Origin.MANUAL, nullable=False
+    )
+    automation_policy_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("automation_policy_revisions.id", ondelete="RESTRICT"), index=True
+    )
+    automation_decision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("automation_decisions.id", ondelete="RESTRICT"), index=True
     )
     status: Mapped[DownloadExecutionStatus] = mapped_column(
         Enum(DownloadExecutionStatus, native_enum=False, length=40),
@@ -695,6 +747,123 @@ class DownloadJobEvent(Base):
     )
 
 
+class AutomationPolicyRevision(Base):
+    __tablename__ = "automation_policy_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "revision_no >= 1", name="ck_automation_policy_revision_number"
+        ),
+        CheckConstraint(
+            portable_hex_check("policy_hash", (64,)),
+            name="ck_automation_policy_revision_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("previous_policy_hash", (64,)),
+            name="ck_automation_policy_previous_hash",
+        ),
+        CheckConstraint(
+            "(revision_no = 1 AND previous_policy_hash IS NULL) OR "
+            "(revision_no > 1 AND previous_policy_hash IS NOT NULL)",
+            name="ck_automation_policy_hash_chain_shape",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    identity_mode: Mapped[AutomationMode] = mapped_column(
+        Enum(AutomationMode, native_enum=False, length=30), nullable=False
+    )
+    torrent_selection_mode: Mapped[AutomationMode] = mapped_column(
+        Enum(AutomationMode, native_enum=False, length=30), nullable=False
+    )
+    approval_mode: Mapped[AutomationMode] = mapped_column(
+        Enum(AutomationMode, native_enum=False, length=30), nullable=False
+    )
+    execution_mode: Mapped[AutomationMode] = mapped_column(
+        Enum(AutomationMode, native_enum=False, length=30), nullable=False
+    )
+    eligibility_rules: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    acknowledgements: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    policy_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    previous_policy_hash: Mapped[str | None] = mapped_column(String(64))
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class AutomationPolicyHead(Base):
+    __tablename__ = "automation_policy_heads"
+    __table_args__ = (
+        CheckConstraint("scope = 'global'", name="ck_automation_policy_head_scope"),
+        CheckConstraint("version >= 1", name="ck_automation_policy_head_version"),
+    )
+
+    scope: Mapped[str] = mapped_column(String(30), primary_key=True, default="global")
+    current_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("automation_policy_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AutomationDecision(Base):
+    __tablename__ = "automation_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            portable_hex_check("evidence_hash", (64,)),
+            name="ck_automation_decision_evidence_hash",
+        ),
+        CheckConstraint(
+            portable_hex_check("dedupe_key", (64,)),
+            name="ck_automation_decision_dedupe_key",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    policy_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("automation_policy_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    stage: Mapped[AutomationStage] = mapped_column(
+        Enum(AutomationStage, native_enum=False, length=30), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
+    outcome: Mapped[DecisionOutcome] = mapped_column(
+        Enum(DecisionOutcome, native_enum=False, length=30), nullable=False, index=True
+    )
+    media_item_id: Mapped[str] = mapped_column(
+        ForeignKey("media_items.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    metadata_match_id: Mapped[str | None] = mapped_column(
+        ForeignKey("metadata_matches.id", ondelete="RESTRICT"), index=True
+    )
+    torrent_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("torrent_candidates.id", ondelete="RESTRICT"), index=True
+    )
+    approval_request_id: Mapped[str | None] = mapped_column(
+        ForeignKey("approval_requests.id", ondelete="RESTRICT"), index=True
+    )
+    download_execution_id: Mapped[str | None] = mapped_column(
+        String(36), index=True
+    )
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    actor: Mapped[str] = mapped_column(
+        String(120), default="system:automation", nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
 _APPROVAL_IMMUTABLE_FIELDS = (
     "media_item_id",
     "torrent_candidate_id",
@@ -713,6 +882,9 @@ _EXECUTION_INTENT_IMMUTABLE_FIELDS = (
     "plan_hash",
     "qb_target_fingerprint",
     "launch_mode",
+    "origin",
+    "automation_policy_revision_id",
+    "automation_decision_id",
     "created_by",
     "expires_at",
     "created_at",
@@ -727,6 +899,9 @@ _DOWNLOAD_EXECUTION_IMMUTABLE_FIELDS = (
     "plan_hash",
     "qb_target_fingerprint",
     "launch_mode",
+    "origin",
+    "automation_policy_revision_id",
+    "automation_decision_id",
     "requested_by",
     "requested_at",
     "created_at",
@@ -831,6 +1006,48 @@ def reject_download_job_identity_update(
         raise ValueError(f"download job immutable fields cannot change: {', '.join(changed)}")
 
 
+@event.listens_for(AutomationPolicyRevision, "before_update")
+@event.listens_for(AutomationDecision, "before_update")
+def reject_automation_audit_update(
+    _mapper: Mapper[object],
+    _connection: Connection,
+    _target: object,
+) -> None:
+    raise ValueError("automation policy revisions and decisions are immutable")
+
+
+@event.listens_for(AutomationPolicyHead, "before_update")
+def guard_automation_policy_head_update(
+    _mapper: Mapper[AutomationPolicyHead],
+    _connection: Connection,
+    target: AutomationPolicyHead,
+) -> None:
+    state = inspect(target)
+    if state.attrs.scope.history.has_changes():
+        raise ValueError("automation policy head scope is immutable")
+    version_history = state.attrs.version.history
+    revision_history = state.attrs.current_revision_id.history
+    if not version_history.has_changes() or not revision_history.has_changes():
+        raise ValueError("automation policy head revision and version must advance together")
+    if version_history.deleted and target.version != version_history.deleted[0] + 1:
+        raise ValueError("automation policy head version must advance by one")
+    if not revision_history.deleted:
+        raise ValueError("automation policy head previous revision is unavailable")
+    previous = _connection.execute(
+        select(AutomationPolicyRevision.policy_hash).where(
+            AutomationPolicyRevision.id == revision_history.deleted[0]
+        )
+    ).scalar_one_or_none()
+    current = _connection.execute(
+        select(
+            AutomationPolicyRevision.revision_no,
+            AutomationPolicyRevision.previous_policy_hash,
+        ).where(AutomationPolicyRevision.id == target.current_revision_id)
+    ).one_or_none()
+    if current is None or previous is None or current != (target.version, previous):
+        raise ValueError("automation policy head must follow the immutable hash chain")
+
+
 @event.listens_for(ApprovalRequest, "before_delete")
 @event.listens_for(ApprovalEvent, "before_update")
 @event.listens_for(ApprovalEvent, "before_delete")
@@ -843,6 +1060,9 @@ def reject_download_job_identity_update(
 @event.listens_for(DownloadJob, "before_delete")
 @event.listens_for(DownloadJobEvent, "before_update")
 @event.listens_for(DownloadJobEvent, "before_delete")
+@event.listens_for(AutomationPolicyRevision, "before_delete")
+@event.listens_for(AutomationPolicyHead, "before_delete")
+@event.listens_for(AutomationDecision, "before_delete")
 def reject_immutable_audit_mutation(
     _mapper: Mapper[object],
     _connection: Connection,

@@ -102,3 +102,30 @@ class AuthRole(StrEnum):
     VIEWER = "viewer"
     OPERATOR = "operator"
     ADMIN = "admin"
+
+
+class AutomationMode(StrEnum):
+    DISABLED = "DISABLED"
+    MANUAL = "MANUAL"
+    AUTO_IF_ELIGIBLE = "AUTO_IF_ELIGIBLE"
+
+
+class AutomationStage(StrEnum):
+    IDENTITY = "IDENTITY"
+    TORRENT_SELECTION = "TORRENT_SELECTION"
+    APPROVAL = "APPROVAL"
+    EXECUTION = "EXECUTION"
+
+
+class DecisionOutcome(StrEnum):
+    ACTION_CREATED = "ACTION_CREATED"
+    MANUAL_REQUIRED = "MANUAL_REQUIRED"
+    DISABLED = "DISABLED"
+    BLOCKED = "BLOCKED"
+    STALE = "STALE"
+    NOOP = "NOOP"
+
+
+class Origin(StrEnum):
+    MANUAL = "MANUAL"
+    AUTOMATION = "AUTOMATION"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
+from sqlalchemy.exc import IntegrityError
 
 from app.api.dependencies import (
     AdminPrincipal,
@@ -12,7 +13,7 @@ from app.api.dependencies import (
 from app.core.config import get_settings
 from app.errors import AppError
 from app.models.entities import ApprovalRequest
-from app.models.enums import ApprovalStatus
+from app.models.enums import ApprovalStatus, AutomationStage
 from app.schemas.approvals import (
     ApprovalApproveRequest,
     ApprovalCreateRequest,
@@ -36,6 +37,12 @@ from app.services.approvals import (
     revoke_request,
     save_preflight_result,
     validate_preflight_result,
+)
+from app.services.automation import (
+    maybe_create_automatic_execution,
+    maybe_enqueue_automatic_preflight,
+    maybe_finalize_automatic_approval,
+    require_stage_not_disabled,
 )
 from app.services.preflight import evaluate_preflight
 
@@ -89,14 +96,28 @@ async def create_candidate_approval(
     session: DbSession,
     principal: OperatorPrincipal,
 ) -> ApprovalResponse:
-    approval = await create_approval_request(
-        session,
-        candidate_id,
-        request,
-        get_settings(),
-        actor=principal.username,
-    )
-    await session.commit()
+    await require_stage_not_disabled(session, AutomationStage.TORRENT_SELECTION)
+    try:
+        approval = await create_approval_request(
+            session,
+            candidate_id,
+            request,
+            get_settings(),
+            actor=principal.username,
+        )
+        await maybe_enqueue_automatic_preflight(
+            session,
+            approval=approval,
+            settings=get_settings(),
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise AppError(
+            "APPROVAL_REQUEST_CONFLICT",
+            "审批请求发生并发冲突，请重新读取候选状态",
+            status_code=409,
+        ) from exc
     return await _response(session, approval)
 
 
@@ -126,6 +147,7 @@ async def approve_approval_request(
     session: DbSession,
     principal: AdminPrincipal,
 ) -> ApprovalResponse:
+    await require_stage_not_disabled(session, AutomationStage.APPROVAL)
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
         await approve_request(
@@ -134,6 +156,11 @@ async def approve_approval_request(
             request,
             get_settings(),
             actor=principal.username,
+        )
+        await maybe_create_automatic_execution(
+            session,
+            approval=approval,
+            settings=get_settings(),
         )
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)
@@ -184,11 +211,35 @@ async def preflight_approval_request(
     principal: OperatorPrincipal,
     adapter: QbAdapter,
 ) -> ApprovalResponse:
+    await require_stage_not_disabled(session, AutomationStage.APPROVAL)
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
         snapshot = require_pending_approval(session, approval)
-        result = await evaluate_preflight(adapter, snapshot, get_settings())
+    except AppError as exc:
+        await _commit_expiration_on_error(session, approval, exc)
+        raise
+    snapshot_hash = approval.snapshot_hash
+    await session.commit()
+
+    # qBittorrent is read outside the approval transaction. The immutable snapshot is
+    # revalidated under a fresh row lock before the observation is persisted.
+    result = await evaluate_preflight(adapter, snapshot, get_settings())
+    approval = await get_approval_or_404(session, approval_id, for_update=True)
+    try:
+        require_pending_approval(session, approval)
+        if approval.snapshot_hash != snapshot_hash:
+            raise AppError(
+                "APPROVAL_SNAPSHOT_CHANGED",
+                "审批快照已变化，预检结果已丢弃",
+                status_code=409,
+            )
         await save_preflight_result(session, approval, result, actor=principal.username)
+        await maybe_finalize_automatic_approval(
+            session,
+            approval=approval,
+            settings=get_settings(),
+            expected_snapshot_hash=snapshot_hash,
+        )
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)
         raise

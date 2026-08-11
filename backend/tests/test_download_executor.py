@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
@@ -25,12 +26,17 @@ from app.models.entities import (
 )
 from app.models.enums import (
     ApprovalStatus,
+    AutomationMode,
+    AutomationStage,
+    DecisionOutcome,
     DownloadExecutionStatus,
     DownloadJobStatus,
+    DownloadLaunchMode,
     HnrStatus,
     IdentityConfidence,
     MediaType,
     MetadataStatus,
+    Origin,
     PreflightStatus,
     WorkflowStatus,
 )
@@ -42,13 +48,17 @@ from app.schemas.approvals import (
     PreflightResult,
     PromotionSnapshot,
 )
+from app.schemas.automation import AutomationPolicyRevisionCreateRequest
 from app.schemas.executions import (
     DownloadExecutionCreateRequest,
     ExecutionIntentCreateRequest,
 )
 from app.schemas.qbittorrent import QbTorrent
 from app.services.approvals import download_plan_hash, snapshot_hash
+from app.services.automation import add_decision_once, build_automation_decision
+from app.services.automation_policy import get_current_policy, publish_policy_revision
 from app.services.executions import create_execution_intent, execute_approved_plan
+from app.workers import download_executor as download_executor_module
 from app.workers.download_executor import (
     DownloadExecutor,
     DownloadMonitor,
@@ -120,7 +130,7 @@ def approved_candidate(info_hash: str) -> TorrentCandidate:
 def qb_observation(
     info_hash: str,
     *,
-    state: str = "downloading",
+    state: str = "pausedDL",
     progress: float = 0.25,
 ) -> QbTorrent:
     return QbTorrent(
@@ -156,14 +166,24 @@ class FakeAvistaZ:
         self.search_calls: list[TorrentSearchRequest] = []
         self.fetch_calls: list[str] = []
         self.closed = False
+        self.before_request: Callable[[], Awaitable[None]] | None = None
+
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self.before_request = guard
 
     async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]:
+        if self.before_request is not None:
+            await self.before_request()
         self.search_calls.append(request)
         if self.search_error is not None:
             raise self.search_error
         return self.candidates
 
     async def fetch_torrent(self, torrent_id: str) -> bytes:
+        if self.before_request is not None:
+            await self.before_request()
         self.fetch_calls.append(torrent_id)
         return self.payload
 
@@ -178,17 +198,38 @@ class FakeQb:
         *,
         add_result: QbAddResult | None = None,
         add_error: AppError | None = None,
+        before_add_request: Callable[[], Awaitable[None]] | None = None,
+        before_write_guard: Callable[[], Awaitable[None]] | None = None,
+        before_list_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.list_results = list_results
         self.add_result = add_result
         self.add_error = add_error
+        self.before_add_request = before_add_request
+        self.before_write_guard = before_write_guard
+        self.before_list_request = before_list_request
         self.calls: list[str] = []
         self.added_payloads: list[bytes] = []
+        self.write_guard_calls = 0
+        self.before_request: Callable[[], Awaitable[None]] | None = None
+
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self.before_request = guard
+
+    async def _guard_request(self) -> None:
+        if self.before_request is not None:
+            await self.before_request()
 
     async def authenticate(self) -> None:
+        await self._guard_request()
         self.calls.append("authenticate")
 
     async def list_torrents(self) -> list[QbTorrent]:
+        if self.before_list_request is not None:
+            await self.before_list_request()
+        await self._guard_request()
         self.calls.append("list_torrents")
         index = min(self.calls.count("list_torrents") - 1, len(self.list_results) - 1)
         return self.list_results[index]
@@ -205,7 +246,13 @@ class FakeQb:
         write_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> QbAddResult:
         del expected_info_hash, save_path, category, tags, start_immediately
+        if self.before_add_request is not None:
+            await self.before_add_request()
+        await self._guard_request()
+        if self.before_write_guard is not None:
+            await self.before_write_guard()
         if write_guard is not None:
+            self.write_guard_calls += 1
             await write_guard()
         self.calls.append("add_torrent")
         self.added_payloads.append(torrent)
@@ -225,14 +272,62 @@ class CrashingQb(FakeQb):
         raise KeyboardInterrupt("simulated process crash")
 
 
+def automation_policy_request(
+    base_revision_no: int,
+    *,
+    execution_mode: AutomationMode,
+) -> AutomationPolicyRevisionCreateRequest:
+    return AutomationPolicyRevisionCreateRequest(
+        base_revision_no=base_revision_no,
+        identity_mode=AutomationMode.MANUAL,
+        torrent_selection_mode=AutomationMode.MANUAL,
+        approval_mode=AutomationMode.MANUAL,
+        execution_mode=execution_mode,
+        acknowledges_hnr=True,
+        acknowledges_seeding=True,
+        acknowledges_plan_only=True,
+        acknowledges_add_paused_only=True,
+    )
+
+
+async def disable_automatic_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        head, _ = await get_current_policy(session)
+        await publish_policy_revision(
+            session,
+            automation_policy_request(
+                head.version,
+                execution_mode=AutomationMode.MANUAL,
+            ),
+            actor="policy-test",
+        )
+        await session.commit()
+
+
 async def seed_pending_execution(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
     info_hash: str,
+    *,
+    automatic: bool = False,
 ) -> str:
     now = datetime.now(UTC)
     expires_at = now + timedelta(hours=1)
     async with session_factory() as session:
+        automation_revision = None
+        if automatic:
+            head, _ = await get_current_policy(session)
+            await session.commit()
+            _, automation_revision = await publish_policy_revision(
+                session,
+                automation_policy_request(
+                    head.version,
+                    execution_mode=AutomationMode.AUTO_IF_ELIGIBLE,
+                ),
+                actor="policy-test",
+            )
         media = MediaItem(
             source="nextfind",
             source_item_id=f"executor-media-{info_hash[:8]}",
@@ -343,12 +438,38 @@ async def seed_pending_execution(
         plan.plan_hash = download_plan_hash(plan)
         session.add(plan)
         await session.flush()
+        origin = Origin.AUTOMATION if automatic else Origin.MANUAL
+        execution_id = str(uuid.uuid4()) if automatic else None
+        automation_decision_id = None
+        if automation_revision is not None:
+            assert execution_id is not None
+            decision = build_automation_decision(
+                automation_revision,
+                stage=AutomationStage.EXECUTION,
+                action="CREATE_DOWNLOAD_EXECUTION",
+                outcome=DecisionOutcome.ACTION_CREATED,
+                media_item_id=media.id,
+                approval_request_id=approval.id,
+                download_execution_id=execution_id,
+                reason_codes=("APPROVED_PLAN_ELIGIBLE",),
+                evidence={
+                    "approval_request_id": approval.id,
+                    "launch_mode": DownloadLaunchMode.ADD_PAUSED.value,
+                },
+            )
+            stored, _ = await add_decision_once(session, decision)
+            automation_decision_id = stored.id
         intent, nonce = await create_execution_intent(
             session,
             approval.id,
-            ExecutionIntentCreateRequest(),
+            ExecutionIntentCreateRequest(launch_mode=DownloadLaunchMode.ADD_PAUSED),
             settings,
             actor="execution-admin",
+            origin=origin,
+            automation_policy_revision_id=(
+                automation_revision.id if automation_revision is not None else None
+            ),
+            automation_decision_id=automation_decision_id,
         )
         execution, created = await execute_approved_plan(
             session,
@@ -357,6 +478,12 @@ async def seed_pending_execution(
             f"executor-idempotency-{info_hash}",
             settings,
             actor="execution-admin",
+            origin=origin,
+            automation_policy_revision_id=(
+                automation_revision.id if automation_revision is not None else None
+            ),
+            automation_decision_id=automation_decision_id,
+            execution_id=execution_id,
         )
         assert created is True
         await session.commit()
@@ -436,7 +563,7 @@ async def test_executor_submits_only_exact_researched_torrent_and_creates_job(
         assert execution.locked_at is None
         assert approval is not None and approval.status == ApprovalStatus.CONSUMED
         assert job is not None
-        assert job.status == DownloadJobStatus.DOWNLOADING
+        assert job.status == DownloadJobStatus.PAUSED
         assert job.hnr_status == HnrStatus.UNKNOWN
 
 
@@ -537,6 +664,261 @@ async def test_unknown_add_outcome_is_terminal_and_never_automatically_retried(
         assert execution.next_retry_at is None
         assert execution.lease_token is None
         assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_automatic_policy_change_before_qb_post_cancels_without_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings(
+        enable_automation_engine=True,
+        enable_avistaz_live_search=True,
+    )
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        automatic=True,
+    )
+    avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    qb = FakeQb(
+        [[]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+        before_add_request=lambda: disable_automatic_execution(session_factory),
+    )
+    executor = DownloadExecutor(
+        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+    )
+
+    assert await executor.run_once() is True
+
+    assert qb.calls == ["authenticate", "list_torrents", "close"]
+    assert qb.write_guard_calls == 0
+    assert qb.added_payloads == []
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        approval = (
+            await session.get(ApprovalRequest, execution.approval_id)
+            if execution is not None
+            else None
+        )
+        jobs = list(
+            (
+                await session.scalars(
+                    select(DownloadJob).where(DownloadJob.execution_id == execution_id)
+                )
+            ).all()
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.CANCELLED
+        assert execution.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+        assert execution.next_retry_at is None
+        assert execution.lease_token is None
+        assert approval is not None and approval.status == ApprovalStatus.REVOKED
+        assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_write_guard_blocks_policy_change_after_global_request_guard(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings(
+        enable_automation_engine=True,
+        enable_avistaz_live_search=True,
+    )
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        automatic=True,
+    )
+    avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    qb = FakeQb(
+        [[]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+        before_write_guard=lambda: disable_automatic_execution(session_factory),
+    )
+    executor = DownloadExecutor(
+        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+    )
+
+    assert await executor.run_once() is True
+
+    assert qb.calls == ["authenticate", "list_torrents", "close"]
+    assert qb.write_guard_calls == 1
+    assert qb.added_payloads == []
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        approval = (
+            await session.get(ApprovalRequest, execution.approval_id)
+            if execution is not None
+            else None
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.CANCELLED
+        assert execution.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
+        assert execution.next_retry_at is None
+        assert approval is not None and approval.status == ApprovalStatus.REVOKED
+
+
+@pytest.mark.asyncio
+async def test_automatic_policy_change_after_qb_add_requires_manual_reconciliation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings(
+        enable_automation_engine=True,
+        enable_avistaz_live_search=True,
+    )
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        automatic=True,
+    )
+    list_attempts = 0
+
+    async def change_policy_before_post_add_observation() -> None:
+        nonlocal list_attempts
+        list_attempts += 1
+        if list_attempts == 2:
+            await disable_automatic_execution(session_factory)
+
+    avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    qb = FakeQb(
+        [[], [qb_observation(info_hash)]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+        before_list_request=change_policy_before_post_add_observation,
+    )
+    executor = DownloadExecutor(
+        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+    )
+
+    assert await executor.run_once() is True
+
+    assert qb.calls == ["authenticate", "list_torrents", "add_torrent", "close"]
+    assert list_attempts == 2
+    assert qb.write_guard_calls == 1
+    assert qb.added_payloads == [payload]
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        jobs = list(
+            (
+                await session.scalars(
+                    select(DownloadJob).where(DownloadJob.execution_id == execution_id)
+                )
+            ).all()
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.OUTCOME_UNKNOWN
+        assert execution.error_code == "AUTOMATION_POLICY_CHANGED_AFTER_WRITE"
+        assert execution.next_retry_at is None
+        assert execution.lease_token is None
+        assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_policy_change_between_final_fence_and_finalize_is_outcome_unknown(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings(
+        enable_automation_engine=True,
+        enable_avistaz_live_search=True,
+    )
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        automatic=True,
+    )
+    avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    observed = qb_observation(info_hash)
+    qb = FakeQb(
+        [[], [observed]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+    )
+    real_finalize = download_executor_module.finalize_download_submission
+
+    async def change_policy_then_finalize(*args: object, **kwargs: object) -> object:
+        await disable_automatic_execution(session_factory)
+        return await real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        download_executor_module,
+        "finalize_download_submission",
+        change_policy_then_finalize,
+    )
+    executor = DownloadExecutor(
+        session_factory, "executor-test", lambda: avistaz, lambda: qb, settings
+    )
+
+    assert await executor.run_once() is True
+
+    assert qb.calls == [
+        "authenticate",
+        "list_torrents",
+        "add_torrent",
+        "list_torrents",
+        "close",
+    ]
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        jobs = list(
+            (
+                await session.scalars(
+                    select(DownloadJob).where(DownloadJob.execution_id == execution_id)
+                )
+            ).all()
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.OUTCOME_UNKNOWN
+        assert execution.error_code == "AUTOMATION_POLICY_CHANGED_AFTER_WRITE"
+        assert execution.next_retry_at is None
+        assert jobs == []
+
+
+@pytest.mark.asyncio
+async def test_automatic_execution_rejects_candidate_without_tmdb_binding(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings(
+        enable_automation_engine=True,
+        enable_avistaz_live_search=True,
+    )
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        automatic=True,
+    )
+    candidate = approved_candidate(info_hash).model_copy(update={"tmdb_id": None})
+    avistaz = FakeAvistaZ([candidate], payload)
+    qb_factory_calls = 0
+
+    def qb_factory() -> NoReturn:
+        nonlocal qb_factory_calls
+        qb_factory_calls += 1
+        raise AssertionError("qB must not be created for an unbound TMDB candidate")
+
+    executor = DownloadExecutor(
+        session_factory, "executor-test", lambda: avistaz, qb_factory, settings
+    )
+
+    assert await executor.run_once() is True
+
+    assert avistaz.fetch_calls == []
+    assert qb_factory_calls == 0
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.error_code == "AVISTAZ_CANDIDATE_BINDING_DRIFT"
+        assert execution.actual_info_hash is None
 
 
 @pytest.mark.asyncio

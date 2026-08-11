@@ -74,6 +74,7 @@ class SafeAsyncHttpClient:
         params: Mapping[str, Any] | None = None,
         json_body: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> SafeHttpResult:
         current_url = urljoin(f"{self.base_url}/", path.lstrip("/"))
         current_method = method
@@ -89,6 +90,8 @@ class SafeAsyncHttpClient:
                 headers=headers,
             )
             try:
+                if before_send is not None:
+                    await before_send()
                 response = await self.client.send(request, stream=True)
             except httpx.TimeoutException as exc:
                 raise AppError(

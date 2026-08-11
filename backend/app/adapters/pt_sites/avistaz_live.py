@@ -141,6 +141,7 @@ class AvistaZAdapter(PtSiteAdapter):
         min_interval_seconds: float = 6.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         request_gate: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+        before_request: Callable[[], Awaitable[None]] | None = None,
         enable_torrent_fetch: bool = False,
     ) -> None:
         if not username or not password or not pid:
@@ -160,10 +161,16 @@ class AvistaZAdapter(PtSiteAdapter):
         self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.sleep = sleep
         self.request_gate = request_gate
+        self.before_request = before_request
         self.enable_torrent_fetch = enable_torrent_fetch
         self._site_lock = asyncio.Lock()
         self._candidate_memory: dict[str, TorrentCandidate] = {}
         self._download_memory: dict[str, str] = {}
+
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self.before_request = guard
 
     def manifest(self) -> AdapterManifest:
         return AdapterManifest(
@@ -228,6 +235,7 @@ class AvistaZAdapter(PtSiteAdapter):
                         params=params,
                         json_body=json_body,
                         headers=headers,
+                        before_send=self.before_request,
                     )
                 if response.status_code != 429:
                     return response

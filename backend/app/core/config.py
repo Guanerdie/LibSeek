@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     enable_avistaz_torrent_fetch: bool = False
     enable_qb_write: bool = False
     enable_download_monitor: bool = False
+    enable_automation_engine: bool = False
     execution_intent_default_ttl_seconds: int = Field(default=300, ge=30, le=3600)
     execution_intent_max_ttl_seconds: int = Field(default=900, ge=30, le=3600)
     download_execution_lease_seconds: int = Field(default=300, ge=30, le=3600)
@@ -93,6 +94,8 @@ class Settings(BaseSettings):
     download_execution_retry_base_seconds: int = Field(default=30, ge=1, le=3600)
     download_execution_retry_max_seconds: int = Field(default=900, ge=1, le=86_400)
     download_executor_poll_seconds: float = Field(default=2, ge=0.1, le=60)
+    download_executor_ready_ttl_seconds: int = Field(default=90, ge=15, le=300)
+    automation_preflight_ready_ttl_seconds: int = Field(default=90, ge=15, le=300)
     download_monitor_interval_seconds: float = Field(default=15, ge=1, le=3600)
     download_monitor_batch_size: int = Field(default=100, ge=1, le=500)
     torrent_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)

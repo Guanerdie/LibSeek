@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import math
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import timedelta
 from typing import Any
@@ -40,8 +40,17 @@ from app.schemas.adapters import (
     TorrentSearchRequest,
 )
 from app.schemas.entities import TorrentSearchCreateRequest
+from app.services.automation import (
+    maybe_automate_identity,
+    maybe_automate_torrent_selection,
+    require_automatic_torrent_search_current,
+)
 from app.services.matching import MatchPreferences, score_metadata_match, score_torrent_candidate
-from app.services.workflow import refresh_media_search_workflow_status
+from app.services.workflow import (
+    metadata_resolution_input_fingerprint,
+    refresh_media_search_workflow_status,
+    torrent_search_input_fingerprint,
+)
 
 
 class JobProcessor:
@@ -100,7 +109,11 @@ class JobProcessor:
         async with self.session_factory() as session:
             statement = (
                 select(Job)
-                .where(claimable, Job.attempts < Job.max_attempts)
+                .where(
+                    claimable,
+                    Job.attempts < Job.max_attempts,
+                    Job.job_type.not_like("AUTOMATION_PREFLIGHT:%"),
+                )
                 .order_by(Job.created_at.asc())
                 .with_for_update(skip_locked=True)
                 .limit(1)
@@ -311,6 +324,16 @@ class JobProcessor:
             media = await session.get(MediaItem, media_id, with_for_update=True)
             if job is None or not self._owns_lease(job, lease_token) or media is None:
                 return
+            expected_fingerprint = job.payload.get("input_fingerprint")
+            if (
+                isinstance(expected_fingerprint, str)
+                and expected_fingerprint != metadata_resolution_input_fingerprint(media)
+            ):
+                raise AppError(
+                    "METADATA_INPUT_CHANGED",
+                    "影视身份输入在 TMDB 查询期间发生变化，旧结果已丢弃",
+                    retryable=False,
+                )
             unique: dict[int, MetadataRecord] = {
                 candidate.tmdb_id: candidate for candidate in candidates
             }
@@ -349,6 +372,7 @@ class JobProcessor:
                 session.add(
                     MetadataMatch(
                         media_id=media.id,
+                        resolution_job_id=job.id,
                         tmdb_id=candidate.tmdb_id,
                         rank=rank,
                         score=match.score,
@@ -376,6 +400,13 @@ class JobProcessor:
                         "manual_confirmation_required": True,
                     },
                 )
+            )
+            await session.flush()
+            await maybe_automate_identity(
+                session,
+                job=job,
+                media=media,
+                settings=get_settings(),
             )
             await session.commit()
 
@@ -444,8 +475,28 @@ class JobProcessor:
                     )
                 prior_titles = await self._prior_candidate_titles(session, media_id, site_id)
             adapter = self.pt_site_registry.create(site_id)
+            before_request: Callable[[], Awaitable[None]] | None = None
+            if isinstance(job.payload.get("automation_policy_revision_id"), str):
+                async def guard_automatic_search() -> None:
+                    await self._guard_automatic_torrent_search(job.id, job.lease_token)
+
+                before_request = guard_automatic_search
+                set_request_guard = getattr(
+                    adapter, "set_before_request_guard", None
+                )
+                if not callable(set_request_guard):
+                    raise AppError(
+                        "AUTOMATION_REQUEST_GUARD_UNAVAILABLE",
+                        "PT 适配器无法安装逐请求自动化围栏",
+                        status_code=409,
+                    )
+                set_request_guard(before_request)
+                await before_request()
             candidates, strategy_log = await self._search_with_fallbacks(
-                adapter, metadata, requested
+                adapter,
+                metadata,
+                requested,
+                before_request=before_request,
             )
             if any(candidate.site_id != site_id for candidate in candidates):
                 raise AppError(
@@ -503,11 +554,13 @@ class JobProcessor:
         finally:
             await self._close_adapter(adapter)
 
-    @staticmethod
     async def _search_with_fallbacks(
+        self,
         adapter: PtSiteAdapter,
         metadata: MetadataRecord,
         requested: TorrentSearchCreateRequest,
+        *,
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[list[TorrentCandidate], list[dict[str, object]]]:
         common: dict[str, Any] = {
             "type": metadata.media_type,
@@ -539,11 +592,30 @@ class JobProcessor:
             strategies.append((name, TorrentSearchRequest(search=query, **common)))
         log: list[dict[str, object]] = []
         for name, request in strategies:
+            if before_request is not None:
+                await before_request()
             results = await adapter.search(request)
             log.append({"strategy": name, "candidate_count": len(results)})
             if results:
                 return list(results), log
         return [], log
+
+    async def _guard_automatic_torrent_search(
+        self, job_id: str, lease_token: str | None
+    ) -> None:
+        async with self.session_factory() as session:
+            job = await session.get(Job, job_id)
+            if job is None or not self._owns_lease(job, lease_token):
+                raise AppError(
+                    "AUTOMATION_TORRENT_SEARCH_LEASE_LOST",
+                    "自动 PT 搜索任务租约已失效，禁止外部请求",
+                    status_code=409,
+                )
+            await require_automatic_torrent_search_current(
+                session,
+                job=job,
+                settings=get_settings(),
+            )
 
     @staticmethod
     async def _prior_candidate_titles(
@@ -595,6 +667,41 @@ class JobProcessor:
                     "PT search job, run, and media bindings do not match",
                     status_code=409,
                 )
+            review = await session.scalar(
+                select(IdentityReview)
+                .where(
+                    IdentityReview.media_id == media.id,
+                    IdentityReview.status == "CONFIRMED",
+                )
+                .order_by(IdentityReview.created_at.desc(), IdentityReview.id.desc())
+                .limit(1)
+            )
+            if review is None:
+                raise AppError(
+                    "TORRENT_SEARCH_INPUT_STALE",
+                    "PT 搜索完成时影视身份已变化",
+                    status_code=409,
+                )
+            requested = TorrentSearchCreateRequest.model_validate(run.sanitized_request)
+            expected_fingerprint = job.payload.get("input_fingerprint")
+            current_fingerprint = torrent_search_input_fingerprint(
+                media, review, requested, get_settings()
+            )
+            automatic_job = isinstance(
+                job.payload.get("automation_policy_revision_id"), str
+            )
+            if (
+                (automatic_job and not isinstance(expected_fingerprint, str))
+                or (
+                    isinstance(expected_fingerprint, str)
+                    and expected_fingerprint != current_fingerprint
+                )
+            ):
+                raise AppError(
+                    "TORRENT_SEARCH_INPUT_STALE",
+                    "PT 搜索输入已变化，候选结果已丢弃",
+                    status_code=409,
+                )
             for candidate in candidates:
                 session.add(
                     TorrentCandidateRecord(
@@ -640,6 +747,14 @@ class JobProcessor:
                         "read_only": True,
                     },
                 )
+            )
+            await session.flush()
+            await maybe_automate_torrent_selection(
+                session,
+                job=job,
+                run=run,
+                media=media,
+                settings=get_settings(),
             )
             await session.commit()
 

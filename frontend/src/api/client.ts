@@ -1,5 +1,10 @@
 import type {
   AdapterManifest,
+  AutomationDecision,
+  AutomationDecisionOutcome,
+  AutomationPolicy,
+  AutomationPolicyRevision,
+  AutomationStage,
   ApprovalRequest,
   CsrfResponse,
   DiscoveryRun,
@@ -24,6 +29,7 @@ import type {
   TorrentCandidateResult,
   TorrentSearchPreferences,
   TorrentSearchRun,
+  CreateAutomationPolicyRevision,
 } from '../types'
 
 interface ErrorPayload {
@@ -335,6 +341,43 @@ export const downloadJobApi = {
     request<DownloadJobSummary>(`/api/download-jobs/${encodeURIComponent(jobId)}/summary`),
   timeline: (jobId: string) =>
     request<DownloadJobTimeline>(`/api/download-jobs/${encodeURIComponent(jobId)}/timeline`),
+}
+
+export const automationApi = {
+  policy: () => request<AutomationPolicy>('/api/automation/policy'),
+  revisions: (params: { page: number; pageSize: number }) =>
+    request<Page<AutomationPolicyRevision>>(
+      `/api/automation/policy-revisions?${queryString({
+        page: params.page,
+        page_size: params.pageSize,
+      })}`,
+    ),
+  publishRevision: (payload: CreateAutomationPolicyRevision) =>
+    request<AutomationPolicy>('/api/automation/policy-revisions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  decisions: (params: {
+    page: number
+    pageSize: number
+    stage?: AutomationStage
+    outcome?: AutomationDecisionOutcome
+    mediaItemId?: string
+  }) =>
+    request<Page<AutomationDecision>>(
+      `/api/automation/decisions?${queryString({
+        page: params.page,
+        page_size: params.pageSize,
+        stage: params.stage,
+        outcome: params.outcome,
+        media_item_id: params.mediaItemId?.trim(),
+      })}`,
+    ),
+  decision: (decisionId: string) =>
+    request<AutomationDecision>(
+      `/api/automation/decisions/${encodeURIComponent(decisionId)}`,
+    ),
 }
 
 export const qbApi = {

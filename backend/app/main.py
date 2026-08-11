@@ -8,6 +8,7 @@ from app.api.routes import (
     adapters,
     approvals,
     auth,
+    automation,
     discovery,
     downloaders,
     executions,
@@ -24,7 +25,7 @@ from app.schemas.common import ErrorResponse
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    version="0.5.0",
+    version="0.6.0",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
@@ -61,6 +62,7 @@ app.include_router(media.router, prefix=settings.api_prefix)
 app.include_router(adapters.router, prefix=settings.api_prefix)
 app.include_router(workflow.router, prefix=settings.api_prefix)
 app.include_router(approvals.router, prefix=settings.api_prefix)
+app.include_router(automation.router, prefix=settings.api_prefix)
 app.include_router(downloaders.router, prefix=settings.api_prefix)
 app.include_router(executions.router, prefix=settings.api_prefix)
 app.include_router(jobs.router, prefix=settings.api_prefix)

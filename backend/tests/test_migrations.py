@@ -36,6 +36,20 @@ def load_download_executor_migration() -> ModuleType:
     return module
 
 
+def load_conservative_automation_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260811_0008_conservative_automation.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_20260811_0008", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_local_episode_matrix_migration_adds_and_drops_json_column() -> None:
     migration = load_local_episode_matrix_migration()
     assert migration.revision == "20260811_0005"
@@ -134,3 +148,74 @@ def test_download_executor_migration_has_named_state_constraints() -> None:
     assert "append-preserved download jobs or events" in downgrade_sql
     assert "approval_requests WHERE status = 'EXECUTING'" in downgrade_sql
     assert "download_executions WHERE status = 'RETRY_WAIT'" in downgrade_sql
+
+
+def test_conservative_automation_migration_is_seeded_guarded_and_reversible() -> None:
+    migration = load_conservative_automation_migration()
+    assert migration.revision == "20260811_0008"
+    assert migration.down_revision == "20260811_0007"
+
+    operation_names = (
+        "add_column",
+        "create_foreign_key",
+        "create_index",
+        "create_table",
+        "create_check_constraint",
+        "execute",
+        "drop_constraint",
+    )
+    patches = [patch.object(migration.op, name) for name in operation_names]
+    mocks = [item.start() for item in patches]
+    try:
+        migration.upgrade()
+    finally:
+        for item in reversed(patches):
+            item.stop()
+
+    created_tables = {call.args[0] for call in mocks[3].call_args_list}
+    assert created_tables == {
+        "automation_policy_revisions",
+        "automation_policy_heads",
+        "automation_decisions",
+    }
+    constraint_names = {call.args[0] for call in mocks[4].call_args_list}
+    assert constraint_names == {
+        "ck_download_executions_submission_metadata",
+        "ck_execution_intents_automation_binding",
+        "ck_download_executions_automation_binding",
+    }
+    created_indexes = {call.args[0] for call in mocks[2].call_args_list}
+    assert "uq_torrent_search_active_media_site" in created_indexes
+    sql = "\n".join(str(call.args[0]) for call in mocks[5].call_args_list)
+    assert migration.DEFAULT_POLICY_HASH in sql
+    assert "'MANUAL', 'MANUAL', 'MANUAL', 'MANUAL'" in sql
+    assert "trg_automation_policy_revision_immutable" in sql
+    assert "trg_automation_policy_head_guard" in sql
+    assert "trg_download_execution_automation_binding_immutable" in sql
+
+    downgrade_operations = (
+        "execute",
+        "drop_constraint",
+        "drop_index",
+        "drop_column",
+        "drop_table",
+        "create_check_constraint",
+    )
+    downgrade_patches = [
+        patch.object(migration.op, name) for name in downgrade_operations
+    ]
+    downgrade_mocks = [item.start() for item in downgrade_patches]
+    try:
+        migration.downgrade()
+    finally:
+        for item in reversed(downgrade_patches):
+            item.stop()
+    downgrade_sql = "\n".join(
+        str(call.args[0]) for call in downgrade_mocks[0].call_args_list
+    )
+    assert "SELECT 1 FROM automation_decisions" in downgrade_sql
+    assert "count(*) FROM automation_policy_revisions" in downgrade_sql
+    assert migration.DEFAULT_POLICY_HASH in downgrade_sql
+    assert "revision_no <> 1" in downgrade_sql
+    assert "execution_intents WHERE origin = 'AUTOMATION'" in downgrade_sql
+    assert "cannot downgrade with automation audit or custom policy records" in downgrade_sql

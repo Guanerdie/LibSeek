@@ -507,3 +507,86 @@ export interface QbTorrent {
   tags: string
   save_path: string
 }
+
+// Automation API contract. Keep all policy/decision wire-field assumptions in this
+// section so a backend contract change can be integrated without touching views.
+export type AutomationMode = 'DISABLED' | 'MANUAL' | 'AUTO_IF_ELIGIBLE'
+
+export type AutomationStage =
+  | 'IDENTITY'
+  | 'TORRENT_SELECTION'
+  | 'APPROVAL'
+  | 'EXECUTION'
+
+export type AutomationDecisionOutcome =
+  | 'ACTION_CREATED'
+  | 'MANUAL_REQUIRED'
+  | 'DISABLED'
+  | 'BLOCKED'
+  | 'STALE'
+  | 'NOOP'
+
+export interface AutomationPolicyRevision {
+  id: string
+  revision_no: number
+  identity_mode: AutomationMode
+  torrent_selection_mode: AutomationMode
+  approval_mode: AutomationMode
+  execution_mode: AutomationMode
+  identity_min_score: number
+  identity_min_margin: number
+  torrent_min_score: number
+  torrent_min_margin: number
+  torrent_min_seeders: number
+  acknowledges_hnr: boolean
+  acknowledges_seeding: boolean
+  acknowledges_plan_only: boolean
+  acknowledges_add_paused_only: boolean
+  previous_policy_hash: string | null
+  policy_hash: string
+  effective_from: string
+  created_by: string
+  created_at: string
+}
+
+export interface AutomationPolicy {
+  scope: 'global'
+  version: number
+  engine_enabled: boolean
+  revision: AutomationPolicyRevision
+}
+
+export interface CreateAutomationPolicyRevision {
+  base_revision_no: number
+  identity_mode: AutomationMode
+  torrent_selection_mode: AutomationMode
+  approval_mode: AutomationMode
+  execution_mode: AutomationMode
+  identity_min_score: number
+  identity_min_margin: number
+  torrent_min_score: number
+  torrent_min_margin: number
+  torrent_min_seeders: number
+  acknowledges_hnr: boolean
+  acknowledges_seeding: boolean
+  acknowledges_plan_only: boolean
+  acknowledges_add_paused_only: boolean
+}
+
+export interface AutomationDecision {
+  id: string
+  policy_revision_id: string
+  stage: AutomationStage
+  action: string
+  outcome: AutomationDecisionOutcome
+  media_item_id: string
+  metadata_match_id: string | null
+  torrent_candidate_id: string | null
+  approval_request_id: string | null
+  download_execution_id: string | null
+  reason_codes: string[]
+  evidence_snapshot: Record<string, unknown>
+  evidence_hash: string
+  actor: string
+  created_at: string
+}

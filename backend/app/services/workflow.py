@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.episodes import derive_missing_episode_codes
 from app.core.security import sanitize_details
 from app.errors import AppError
@@ -34,6 +38,61 @@ SEARCH_STATUS_PRECEDENCE = (
     WorkflowStatus.NO_CANDIDATE,
     WorkflowStatus.SEARCH_FAILED,
 )
+
+
+def metadata_resolution_input_fingerprint(media: MediaItem) -> str:
+    payload = {
+        "source": media.source,
+        "source_item_id": media.source_item_id,
+        "media_type": media.media_type.value,
+        "tmdb_id": media.tmdb_id,
+        "title": media.title,
+        "year": media.year,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def torrent_search_input_fingerprint(
+    media: MediaItem,
+    review: IdentityReview,
+    request: TorrentSearchCreateRequest,
+    settings: Settings,
+) -> str:
+    payload = {
+        "media": {
+            "media_type": media.media_type.value,
+            "tmdb_id": media.tmdb_id,
+            "title": media.title,
+            "year": media.year,
+            "missing_episodes": media.missing_episodes,
+        },
+        "identity_review_id": review.id,
+        "identity_snapshot": review.candidate_snapshot,
+        "request": request.model_dump(mode="json"),
+        "effective_preferences": {
+            "resolutions": list(request.preferred_resolutions)
+            or list(settings.preferred_resolutions),
+            "sources": list(request.preferred_sources) or list(settings.preferred_sources),
+            "audio": list(request.preferred_audio) or list(settings.preferred_audio),
+            "subtitles": list(request.preferred_subtitles)
+            or list(settings.preferred_subtitles),
+            "max_size_bytes": request.max_size_bytes
+            or settings.max_candidate_size_bytes,
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 async def refresh_media_search_workflow_status(
@@ -72,7 +131,11 @@ async def enqueue_metadata_resolution(
     job = Job(
         job_type=job_type,
         status=JobStatus.PENDING,
-        payload={"media_id": media.id, "read_only": True},
+        payload={
+            "media_id": media.id,
+            "input_fingerprint": metadata_resolution_input_fingerprint(media),
+            "read_only": True,
+        },
         max_attempts=max_attempts,
     )
     media.workflow_status = WorkflowStatus.METADATA_PENDING
@@ -107,7 +170,12 @@ async def confirm_identity(
     request: IdentityConfirmationRequest,
     *,
     actor: str,
+    audit_event_type: str = "IDENTITY_CONFIRMED_MANUALLY",
 ) -> IdentityReview:
+    locked_media = await session.get(MediaItem, media.id, with_for_update=True)
+    if locked_media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    media = locked_media
     existing = await session.scalar(
         select(IdentityReview)
         .where(IdentityReview.media_id == media.id, IdentityReview.status == "CONFIRMED")
@@ -164,7 +232,7 @@ async def confirm_identity(
         [
             review,
             AuditEvent(
-                event_type="IDENTITY_CONFIRMED_MANUALLY",
+                event_type=audit_event_type,
                 entity_type="media_item",
                 entity_id=media.id,
                 sanitized_details=sanitize_details(
@@ -188,6 +256,7 @@ async def enqueue_torrent_search(
     request: TorrentSearchCreateRequest,
     *,
     max_attempts: int,
+    settings: Settings | None = None,
 ) -> tuple[TorrentSearchRun, Job, bool]:
     locked_media = await session.get(MediaItem, media.id, with_for_update=True)
     if locked_media is None:
@@ -231,6 +300,7 @@ async def enqueue_torrent_search(
         if existing_job is not None:
             return existing_run, existing_job, True
     safe_request = request.model_dump(mode="json")
+    effective_settings = settings or get_settings()
     run = TorrentSearchRun(
         media_id=media.id,
         site_id=request.site_id,
@@ -246,6 +316,9 @@ async def enqueue_torrent_search(
             "media_id": media.id,
             "search_run_id": run.id,
             "site_id": request.site_id,
+            "input_fingerprint": torrent_search_input_fingerprint(
+                media, review, request, effective_settings
+            ),
             "read_only": True,
         },
         max_attempts=max_attempts,

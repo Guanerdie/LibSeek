@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -38,6 +39,7 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         read_timeout: float = 30,
         max_response_bytes: int = 10 * 1024 * 1024,
         transport: httpx.AsyncBaseTransport | None = None,
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._base_url = self._validate_url(
             base_url.rstrip("/"), allowed_hosts, allow_insecure_http
@@ -48,6 +50,7 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         self._password = password
         self._authenticated = False
         self._max_response_bytes = max(1, max_response_bytes)
+        self._before_request = before_request
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
@@ -55,6 +58,11 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
             trust_env=False,
             headers={"Accept": "application/json, text/plain;q=0.9"},
         )
+
+    def set_before_request_guard(
+        self, guard: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        self._before_request = guard
 
     def manifest(self) -> AdapterManifest:
         return AdapterManifest(
@@ -162,6 +170,7 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         params: dict[str, Any] | None = None,
         data: dict[str, str] | None = None,
         files: dict[str, tuple[str, bytes, str]] | None = None,
+        before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> httpx.Response:
         normalized_method = method.upper()
         if (normalized_method, path) not in self._ALLOWED_REQUESTS:
@@ -177,6 +186,10 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
             request = self._client.build_request(
                 normalized_method, url, params=params, data=data, files=files
             )
+            if self._before_request is not None:
+                await self._run_before_send_guard(self._before_request)
+            if before_send is not None:
+                await self._run_before_send_guard(before_send)
             upstream = await self._client.send(request, stream=True, follow_redirects=False)
             content = bytearray()
             try:
@@ -216,6 +229,28 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
                 details={"status_code": response.status_code},
             )
         return response
+
+    @staticmethod
+    async def _run_before_send_guard(
+        guard: Callable[[], Awaitable[None]],
+    ) -> None:
+        try:
+            await guard()
+        except AppError as exc:
+            raise AppError(
+                exc.error_code,
+                exc.message,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                details={**exc.details, "external_request_performed": False},
+            ) from exc
+        except Exception as exc:
+            raise AppError(
+                "QB_REQUEST_GUARD_FAILED",
+                "qBittorrent 请求围栏校验失败",
+                status_code=409,
+                details={"external_request_performed": False},
+            ) from exc
 
     def _clear_session(self) -> None:
         self._authenticated = False

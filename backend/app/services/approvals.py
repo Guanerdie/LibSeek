@@ -145,7 +145,9 @@ async def create_approval_request(
     *,
     actor: str,
 ) -> ApprovalRequest:
-    candidate_record = await session.get(TorrentCandidateRecord, candidate_id)
+    candidate_record = await session.get(
+        TorrentCandidateRecord, candidate_id, with_for_update=True
+    )
     if candidate_record is None:
         raise AppError("TORRENT_CANDIDATE_NOT_FOUND", "PT 候选不存在", status_code=404)
     run = await session.get(TorrentSearchRun, candidate_record.search_run_id)
@@ -457,6 +459,56 @@ async def approve_request(
     )
     await session.flush()
     return approval, plan
+
+
+async def approve_request_automatically(
+    session: AsyncSession,
+    approval: ApprovalRequest,
+    settings: Settings,
+    *,
+    actor: str,
+    policy_revision_id: str,
+    decision_id: str,
+) -> tuple[ApprovalRequest, DownloadPlan]:
+    snapshot = require_pending_approval(session, approval)
+    if snapshot.hit_and_run is None:
+        raise AppError("HNR_UNKNOWN", "H&R 信息未知，禁止自动批准", status_code=409)
+    if approval.preflight_result is None:
+        raise AppError("PREFLIGHT_REQUIRED", "自动批准前必须完成下载预检", status_code=409)
+    preflight = validate_preflight_result(approval.preflight_result)
+    if preflight.overall_status != PreflightStatus.PASS:
+        raise AppError(
+            "AUTOMATION_PREFLIGHT_NOT_PASS",
+            "自动批准只接受完整 PASS 的预检结果",
+            status_code=409,
+            details={"overall_status": preflight.overall_status.value},
+        )
+    approved, plan = await approve_request(
+        session,
+        approval,
+        ApprovalApproveRequest(
+            acknowledges_hnr=True,
+            acknowledges_seeding=True,
+            acknowledges_plan_only=True,
+        ),
+        settings,
+        actor=actor,
+    )
+    _add_event(
+        session,
+        approved,
+        event_type="AUTOMATION_POLICY_BOUND",
+        from_status=ApprovalStatus.APPROVED,
+        to_status=ApprovalStatus.APPROVED,
+        actor=actor,
+        details={
+            "automation_policy_revision_id": policy_revision_id,
+            "automation_decision_id": decision_id,
+            "preflight_requirement": "PASS_ONLY",
+        },
+    )
+    await session.flush()
+    return approved, plan
 
 
 async def reject_request(
