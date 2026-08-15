@@ -16,7 +16,7 @@ UNIN 当前版本为 `0.8.0`。系统已实现从 NextFind 发现未入库影视
 
 - Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、httpx；前端为 Vue 3、Pinia、Vue Router、Vite 和 Vitest。
 - 本地管理员认证与分级授权：首次页面创建管理员、PBKDF2 密码哈希、签名会话 Cookie、登录前 bootstrap CSRF、所有已登录状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级。
-- NextFind 只读发现：从 `https://nextfind.example/#/discover` 对应服务获取未入库条目，使用独立 Cookie、默认仅含 `nextfind.example` 的专用 HTTPS 主机白名单、重定向复验、NDJSON 坏行隔离、分页循环检测和响应大小限制；不能借用全局 TMDB/AvistaZ 白名单发送 NextFind 凭据。
+- NextFind 只读发现：从使用者在“连接配置”页面录入的服务地址获取未入库条目，使用独立 Cookie、专用 HTTPS 主机白名单、重定向复验、NDJSON 坏行隔离、分页循环检测和响应大小限制；不能借用全局 TMDB/AvistaZ 白名单发送 NextFind 凭据。
 - TMDB 只读补全：优先使用 NextFind 提供的 TMDB ID，否则按标题、年份和类型返回最多 5 个候选；保存中英文名、IMDb 等外部 ID、已播季集矩阵和冲突。默认由人工确认；只有身份阶段设为 `AUTO_IF_ELIGIBLE`、总闸已开启且候选通过分数、差值、类型、标题/年份或 TMDB ID 精确绑定等全部硬条件时才会自动确认。
 - PT 搜索与审阅：AvistaZ 支持 TMDB/IMDb/标题降级搜索、限速和稳定错误；候选展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告。目录中的 AvistaZ 声明为 `manual_only=false`，仅表示代码具备受保守策略约束的自动化路径，不代表自动化或实时搜索已开启。默认仍只排序供人工选择；自动选种还要求 AvistaZ 站点绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、有效 info hash/大小、做种数和电视剧季集覆盖全部满足策略。IMDb-only 候选转人工确认。
 - 多 PT 扩展底座：API、普通 Worker 和下载执行器共享不含 Secret 的 `PtSiteCatalog`；`GET /api/pt-sites/catalog` 只公开站点名称、可用性、搜索模式、媒体类型和能力标记。创建搜索必须显式提交 `site_id`，目录中的 `default_site_id` 只是界面提示，不是服务端回退。搜索任务、Worker、候选、审批、计划和执行均绑定同一站点；`PtSiteRegistry` 与 `PtExecutionRegistry` 分别选择搜索工厂和可选取种工厂，未知、禁用、未就绪、能力或绑定不一致时失败关闭。生产目录和两类生产工厂仍只接入 `avistaz`；`synthetic-two` 仅用于完全离线测试，没有任何真实 NexusPHP/国内 PT 站点经过验证。
@@ -287,7 +287,7 @@ stat -c '%a %n' secrets secrets/*.txt
 
 Secret 可见范围随已叠加的层增加，但服务边界固定：discovery 层只让 API 读取 6 个、普通 Worker 读取 NextFind/TMDB 3 个；AvistaZ 层只向 API、普通 Worker 和下载执行器各增加 AvistaZ 3 个；qB 层只向 API、`automation-preflight`、下载执行器和只读监控器各增加 qB 3 个；前端始终为 0。三层全部叠加后，权限矩阵与原全量 override 相同：API=12、普通 Worker=6、`automation-preflight`=3、下载执行器=6、监控器=3、前端=0。非 Secret 的主机白名单、目标引用和安全策略仍按职责传入对应服务。
 
-认证、NextFind 主机边界与 qB 的非密钥策略仍在本机 `.env` 中配置。NextFind 的 `NEXTFIND_BASE_URL` 必须同时命中全局 `ALLOWED_EXTERNAL_HOSTS` 和独立的 `NEXTFIND_ALLOWED_HOSTS`；第一轮保持后者默认仅为 `nextfind.example`。认证策略包括 `AUTH_LOCAL_ROLE`、会话/CSRF TTL 和 `AUTH_COOKIE_SECURE`；使用 Secret 启动器时，`AUTH_LOCAL_*` 三项、NextFind 两项、TMDB Token、AvistaZ 三项及 qB 三项共 12 个凭据键必须全部为空，即使某一层尚未启用也不能把凭据遗留在 `.env`。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
+认证、NextFind 主机边界与 qB 的非密钥策略仍在本机 `.env` 中配置。NextFind 的 `NEXTFIND_BASE_URL` 必须同时命中全局 `ALLOWED_EXTERNAL_HOSTS` 和独立的 `NEXTFIND_ALLOWED_HOSTS`，后者应设置为服务 URL 的精确主机名；公开示例中的 `nextfind.example` 只是保留的占位域名。认证策略包括 `AUTH_LOCAL_ROLE`、会话/CSRF TTL 和 `AUTH_COOKIE_SECURE`；使用 Secret 启动器时，`AUTH_LOCAL_*` 三项、NextFind 两项、TMDB Token、AvistaZ 三项及 qB 三项共 12 个凭据键必须全部为空，即使某一层尚未启用也不能把凭据遗留在 `.env`。`QB_ALLOWED_HOSTS` 必须是 `qb_base_url.txt` 中 URL 的精确主机名；默认只允许 HTTPS。仅在明确接受受信内网明文 HTTP 风险时设置 `QB_ALLOW_INSECURE_HTTP=true`。下载计划需要配置 `QB_TARGET_CATEGORY`、后端预检使用的 `QB_TARGET_SAVE_PATH`、逗号分隔的 `QB_ALLOWED_SAVE_PATHS`、可公开显示的 `QB_SAVE_PATH_REF`、`MAX_CANDIDATE_SIZE_BYTES` 和 `AVISTAZ_FORBIDDEN_QB_VERSIONS`。真实路径只参与后端预检，API 与下载计划只返回 `QB_SAVE_PATH_REF`。
 
 阶段 7A 的目标根配置与 qB 保存路径相互独立。用户只在本机 `.env` 录入经过约定的不透明 `MEDIA_IMPORT_TARGET_ROOT_REFS`；通过页面或 API 提交的也只能是源/目标相对路径和文件大小提案。现阶段不需要录入真实媒体根路径，也不要给 Compose 添加媒体目录 volume。只有后续引入受信只读 inspection 时，才需要先向用户说明将读取的实际下载根和目标根、挂载模式及检查范围并取得确认；引入复制/硬链接执行器还需要新的独立阶段和文件写入授权。
 
@@ -319,7 +319,7 @@ docker --context desktop-linux compose --project-directory D:\project\unin --env
     exec -T api python -m app.tools.nextfind_contract_probe --confirm-read-only
 ```
 
-本次探针固定只向 `https://nextfind.example` 发出一次登录请求，并用 `page=1&page_size=100` 请求 `/api/discover` 的“未入库”第一页；响应体仍以 1 MiB 为硬上限，不把 `page_size=100` 误当成上游一定遵守的条目上限。不继续分页、不访问 TMDB 或 AvistaZ、不获取 `.torrent`、不连接 qBittorrent，也不写入 UNIN 数据库或媒体文件。登录或 discover 响应发生跳转时都会直接拒绝。`--confirm-read-only` 是必需的一次性确认参数；缺少该参数时，程序会在加载配置和访问网络前退出。
+本次探针只向本机配置的 `NEXTFIND_BASE_URL` 发出一次登录请求，并用 `page=1&page_size=100` 请求 `/api/discover` 的“未入库”第一页；响应体仍以 1 MiB 为硬上限，不把 `page_size=100` 误当成上游一定遵守的条目上限。不继续分页、不访问 TMDB 或 AvistaZ、不获取 `.torrent`、不连接 qBittorrent，也不写入 UNIN 数据库或媒体文件。登录或 discover 响应发生跳转时都会直接拒绝。`--confirm-read-only` 是必需的一次性确认参数；缺少该参数时，程序会在加载配置和访问网络前退出。
 
 标准输出只包含响应格式、已知字段路径、字段类型、出现次数、存在率、envelope/分页字段是否存在以及限制事件计数；不会输出标题、任何 ID 的值、Cookie、凭据或原始响应。错误输出也只包含稳定 `error_code`。先根据这份脱敏结果确认真实 Content-Type、分页结构及 `id`/`tmdb_id` 语义，再决定是否修改正式 NextFind 解析规则；在此之前不得调整当前 ID 优先级。
 
