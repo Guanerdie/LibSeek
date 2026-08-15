@@ -125,6 +125,27 @@ function Set-SafeDotEnv {
     )
 }
 
+function Set-BootstrapDotEnv {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $safeLines = @(
+        'POSTGRES_PASSWORD=NON_SECRET_SAFE_DB_VALUE',
+        'DATABASE_URL=postgresql+psycopg://unin:NON_SECRET_SAFE_DB_VALUE@postgres:5432/unin',
+        'AUTH_LOCAL_USERNAME=',
+        'AUTH_LOCAL_PASSWORD=',
+        'AUTH_SESSION_SIGNING_KEY=',
+        'COMPOSE_PROFILES='
+    )
+    foreach ($flag in $DangerousFlags) {
+        $safeLines += "${flag}=false"
+    }
+    [IO.File]::WriteAllLines(
+        $Path,
+        [string[]]$safeLines,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 function Set-SafeSecretDotEnv {
     param(
         [Parameter(Mandatory = $true)]
@@ -207,21 +228,35 @@ function Assert-ValidateOnlyDockerCall {
         [string]$ExpectedComposeFile,
         [Parameter(Mandatory = $true)]
         [string]$Label,
-        [string]$ExpectedDockerContext = 'desktop-linux'
+        [string]$ExpectedDockerContext = 'desktop-linux',
+        [string[]]$ExpectedProfiles = @(),
+        [switch]$FullStart
     )
 
-    Assert-True ($Calls.Count -eq 1) "$Label must invoke docker exactly once in validate-only mode."
-    $expected = @(
+    $expectedPrefix = @(
         '--context', $ExpectedDockerContext,
         'compose',
         '--project-directory', $ExpectedRoot,
         '--env-file', $ExpectedEnvFile,
-        '-f', $ExpectedComposeFile,
-        'config', '--quiet'
+        '-f', $ExpectedComposeFile
     )
-    Assert-True (
-        (($Calls[0] | ConvertTo-Json -Compress) -eq ($expected | ConvertTo-Json -Compress))
-    ) "$Label did not pin compose config to the repository .env and compose.yaml."
+    foreach ($profile in $ExpectedProfiles) {
+        $expectedPrefix += @('--profile', $profile)
+    }
+    $expectedCalls = @(,@($expectedPrefix + @('config', '--quiet')))
+    if ($FullStart) {
+        $expectedCalls += ,@($expectedPrefix + @('up', '-d', '--build', '--wait', '--wait-timeout', '180'))
+        $expectedCalls += ,@($expectedPrefix + @('ps'))
+    }
+
+    Assert-True ($Calls.Count -eq $expectedCalls.Count) `
+        "$Label invoked docker $($Calls.Count) times; expected $($expectedCalls.Count)."
+    for ($index = 0; $index -lt $expectedCalls.Count; $index++) {
+        Assert-True (
+            (($Calls[$index] | ConvertTo-Json -Compress) -eq
+             ($expectedCalls[$index] | ConvertTo-Json -Compress))
+        ) "$Label docker call $($index + 1) did not use the expected compose profile order."
+    }
 }
 
 function Assert-SecretDockerCalls {
@@ -382,7 +417,8 @@ exit /b %errorlevel%
         function Invoke-TestStart {
             param(
                 [string]$DockerContext = 'desktop-linux',
-                [switch]$OmitDockerContext
+                [switch]$OmitDockerContext,
+                [switch]$FullStart
             )
 
             Remove-Item -LiteralPath $dockerLog -Force -ErrorAction SilentlyContinue
@@ -395,7 +431,9 @@ exit /b %errorlevel%
             if (-not $OmitDockerContext) {
                 $arguments += @('-DockerContext', $DockerContext)
             }
-            $arguments += '-ValidateOnly'
+            if (-not $FullStart) {
+                $arguments += '-ValidateOnly'
+            }
             $previousErrorActionPreference = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
             try {
@@ -416,6 +454,50 @@ exit /b %errorlevel%
         $result = Invoke-TestStart
         Assert-True ($result.ExitCode -eq 0) 'start.ps1 validate-only rejected a safe non-secret fixture.'
         Assert-ValidateOnlyDockerCall $result.Calls $TestRoot $envFile $composeFile 'start.ps1'
+
+        Set-SafeDotEnv $envFile -Suffix @('ENABLE_DOWNLOAD_EXECUTOR=true')
+        $result = Invoke-TestStart
+        Assert-True ($result.ExitCode -eq 0) 'start.ps1 rejected ENABLE_DOWNLOAD_EXECUTOR=true.'
+        Assert-ValidateOnlyDockerCall `
+            $result.Calls $TestRoot $envFile $composeFile 'start.ps1 download executor profile' `
+            -ExpectedProfiles @('download-execution')
+
+        Set-SafeDotEnv $envFile -Suffix @('ENABLE_DOWNLOAD_MONITOR=true')
+        $result = Invoke-TestStart
+        Assert-True ($result.ExitCode -eq 0) 'start.ps1 rejected ENABLE_DOWNLOAD_MONITOR=true.'
+        Assert-ValidateOnlyDockerCall `
+            $result.Calls $TestRoot $envFile $composeFile 'start.ps1 download monitor profile' `
+            -ExpectedProfiles @('download-monitor')
+
+        Set-SafeDotEnv $envFile -Suffix @(
+            'ENABLE_DOWNLOAD_EXECUTOR=true',
+            'ENABLE_DOWNLOAD_MONITOR=true'
+        )
+        $result = Invoke-TestStart -FullStart
+        Assert-True ($result.ExitCode -eq 0) 'start.ps1 rejected both download service switches.'
+        Assert-ValidateOnlyDockerCall `
+            $result.Calls $TestRoot $envFile $composeFile 'start.ps1 download service profiles' `
+            -ExpectedProfiles @('download-execution', 'download-monitor') `
+            -FullStart
+        Set-SafeDotEnv $envFile
+
+        Set-BootstrapDotEnv $envFile
+        $result = Invoke-TestStart
+        Assert-True ($result.ExitCode -eq 0) 'start.ps1 rejected browser-based administrator bootstrap.'
+        Assert-ValidateOnlyDockerCall $result.Calls $TestRoot $envFile $composeFile 'start.ps1 browser bootstrap'
+
+        Remove-Item -LiteralPath $envFile -Force
+        $result = Invoke-TestStart
+        Assert-True ($result.ExitCode -eq 0) 'start.ps1 did not initialize a missing local .env.'
+        Assert-True (Test-Path -LiteralPath $envFile -PathType Leaf) `
+            'start.ps1 did not create .env.'
+        $generatedDotEnv = Get-Content -Raw -LiteralPath $envFile -Encoding UTF8
+        Assert-True (-not $generatedDotEnv.Contains('change-me-before-production')) `
+            'start.ps1 retained the example PostgreSQL password.'
+        Assert-True ($generatedDotEnv.Contains("AUTH_LOCAL_USERNAME=`n")) `
+            'start.ps1 preconfigured a local administrator instead of using browser setup.'
+        Assert-ValidateOnlyDockerCall $result.Calls $TestRoot $envFile $composeFile 'start.ps1 first run'
+        Set-SafeDotEnv $envFile
 
         $result = Invoke-TestStart -OmitDockerContext
         Assert-True ($result.ExitCode -ne 0) 'start.ps1 accepted a missing Docker context.'
@@ -906,7 +988,8 @@ printf '\n' >> "$START_GATE_DOCKER_LOG"
             [string]$OverrideName,
             [AllowEmptyString()][string]$OverrideValue,
             [string]$DockerContext = 'default',
-            [switch]$OmitDockerContext
+            [switch]$OmitDockerContext,
+            [switch]$FullStart
         )
 
         Remove-Item -LiteralPath $dockerLog -Force -ErrorAction SilentlyContinue
@@ -924,7 +1007,9 @@ printf '\n' >> "$START_GATE_DOCKER_LOG"
         if (-not $OmitDockerContext) {
             $arguments += @('--docker-context', $DockerContext)
         }
-        $arguments += '--validate-only'
+        if (-not $FullStart) {
+            $arguments += '--validate-only'
+        }
 
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
@@ -952,6 +1037,77 @@ printf '\n' >> "$START_GATE_DOCKER_LOG"
         "$wslRoot/compose.yaml" `
         'start.sh' `
         -ExpectedDockerContext 'default'
+
+    Set-SafeDotEnv $envFile -Suffix @('ENABLE_DOWNLOAD_EXECUTOR=true')
+    $result = Invoke-TestShellStart
+    Assert-True ($result.ExitCode -eq 0) 'start.sh rejected ENABLE_DOWNLOAD_EXECUTOR=true.'
+    Assert-ValidateOnlyDockerCall `
+        $result.Calls `
+        $wslRoot `
+        "$wslRoot/.env" `
+        "$wslRoot/compose.yaml" `
+        'start.sh download executor profile' `
+        -ExpectedDockerContext 'default' `
+        -ExpectedProfiles @('download-execution')
+
+    Set-SafeDotEnv $envFile -Suffix @('ENABLE_DOWNLOAD_MONITOR=true')
+    $result = Invoke-TestShellStart
+    Assert-True ($result.ExitCode -eq 0) 'start.sh rejected ENABLE_DOWNLOAD_MONITOR=true.'
+    Assert-ValidateOnlyDockerCall `
+        $result.Calls `
+        $wslRoot `
+        "$wslRoot/.env" `
+        "$wslRoot/compose.yaml" `
+        'start.sh download monitor profile' `
+        -ExpectedDockerContext 'default' `
+        -ExpectedProfiles @('download-monitor')
+
+    Set-SafeDotEnv $envFile -Suffix @(
+        'ENABLE_DOWNLOAD_EXECUTOR=true',
+        'ENABLE_DOWNLOAD_MONITOR=true'
+    )
+    $result = Invoke-TestShellStart -FullStart
+    Assert-True ($result.ExitCode -eq 0) 'start.sh rejected both download service switches.'
+    Assert-ValidateOnlyDockerCall `
+        $result.Calls `
+        $wslRoot `
+        "$wslRoot/.env" `
+        "$wslRoot/compose.yaml" `
+        'start.sh download service profiles' `
+        -ExpectedDockerContext 'default' `
+        -ExpectedProfiles @('download-execution', 'download-monitor') `
+        -FullStart
+    Set-SafeDotEnv $envFile
+
+    Set-BootstrapDotEnv $envFile
+    $result = Invoke-TestShellStart
+    Assert-True ($result.ExitCode -eq 0) 'start.sh rejected browser-based administrator bootstrap.'
+    Assert-ValidateOnlyDockerCall `
+        $result.Calls `
+        $wslRoot `
+        "$wslRoot/.env" `
+        "$wslRoot/compose.yaml" `
+        'start.sh browser bootstrap' `
+        -ExpectedDockerContext 'default'
+
+    Remove-Item -LiteralPath $envFile -Force
+    $result = Invoke-TestShellStart
+    Assert-True ($result.ExitCode -eq 0) 'start.sh did not initialize a missing local .env.'
+    Assert-True (Test-Path -LiteralPath $envFile -PathType Leaf) `
+        'start.sh did not create .env.'
+    $generatedDotEnv = Get-Content -Raw -LiteralPath $envFile -Encoding UTF8
+    Assert-True (-not $generatedDotEnv.Contains('change-me-before-production')) `
+        'start.sh retained the example PostgreSQL password.'
+    Assert-True ($generatedDotEnv.Contains("AUTH_LOCAL_USERNAME=`n")) `
+        'start.sh preconfigured a local administrator instead of using browser setup.'
+    Assert-ValidateOnlyDockerCall `
+        $result.Calls `
+        $wslRoot `
+        "$wslRoot/.env" `
+        "$wslRoot/compose.yaml" `
+        'start.sh first run' `
+        -ExpectedDockerContext 'default'
+    Set-SafeDotEnv $envFile
 
     $result = Invoke-TestShellStart -OmitDockerContext
     Assert-True ($result.ExitCode -ne 0) 'start.sh accepted a missing Docker context.'

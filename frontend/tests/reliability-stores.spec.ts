@@ -15,6 +15,7 @@ import type {
 const mocks = vi.hoisted(() => ({
   approvalApprove: vi.fn(),
   approvalPlan: vi.fn(),
+  approvalConfirmDownload: vi.fn(),
   mediaGet: vi.fn(),
   ptSiteCatalog: vi.fn(),
   torrentList: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('../src/api/client', () => ({
   approvalApi: {
     approve: mocks.approvalApprove,
     plan: mocks.approvalPlan,
+    confirmDownload: mocks.approvalConfirmDownload,
   },
   mediaApi: { get: mocks.mediaGet },
   ptSiteApi: { catalog: mocks.ptSiteCatalog },
@@ -47,6 +49,7 @@ const mediaItem: MediaItem = {
   title: '测试剧集',
   original_title: 'Test Series',
   year: 2026,
+  country_codes: null,
   poster_path: null,
   raw_type: 'tv',
   local_episodes: 2,
@@ -177,6 +180,42 @@ beforeEach(() => {
 })
 
 describe('torrent search selection reliability', () => {
+  it('automatically refreshes a queued identity-triggered search until candidates arrive', async () => {
+    vi.useFakeTimers()
+    try {
+      const pendingRun = {
+        ...makeRun('search-auto'),
+        status: 'PT_SEARCH_PENDING' as const,
+        candidate_count: 0,
+        finished_at: null,
+      }
+      const completedRun = makeRun('search-auto')
+      const candidate = makeCandidate('candidate-auto', 'search-auto')
+      mocks.torrentList.mockResolvedValueOnce([pendingRun])
+      mocks.torrentGet
+        .mockResolvedValueOnce(pendingRun)
+        .mockResolvedValueOnce(completedRun)
+      mocks.torrentCandidates
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([candidate])
+
+      const store = useTorrentStore()
+      await store.load('media-1')
+
+      expect(store.autoRefreshing).toBe(true)
+      expect(store.candidates).toEqual([])
+      await vi.advanceTimersByTimeAsync(1_500)
+
+      expect(store.autoRefreshing).toBe(false)
+      expect(store.selectedRun?.status).toBe('TORRENT_REVIEW')
+      expect(store.candidates.map((item) => item.id)).toEqual(['candidate-auto'])
+      expect(store.notice).toContain('找到 1 个候选')
+    } finally {
+      useTorrentStore().cancelRunPolling()
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps media, run and candidate identities scoped to the second PT site', async () => {
     const secondSiteRun = makeRun('search-two', 'synthetic-two')
     const secondSiteCandidate = makeCandidate(
@@ -398,9 +437,7 @@ describe('torrent search selection reliability', () => {
       search_run_id: 'search-two',
       candidate: { site_id: 'synthetic-two' },
     })
-    expect(store.notice).toBe(
-      'Synthetic Two 只读搜索已创建；任务异步执行，可刷新查看最新结果',
-    )
+    expect(store.notice).toBe('Synthetic Two 搜索完成，找到 1 个候选。')
     expect(store.actionError).toBeNull()
   })
 
@@ -431,6 +468,69 @@ describe('torrent search selection reliability', () => {
     expect(store.notice).toBeNull()
     expect(store.actionError).toContain('响应身份不一致')
   })
+
+  it('keeps preflight blockers visible and uses a fresh idempotency key for retry', async () => {
+    const run = makeRun('search-1')
+    const candidate = makeCandidate('candidate-1', 'search-1')
+    mocks.torrentList.mockResolvedValueOnce([run])
+    mocks.torrentGet.mockResolvedValueOnce(run)
+    mocks.torrentCandidates.mockResolvedValueOnce([candidate])
+    const blockedPreflight = {
+      overall_status: 'BLOCKED',
+      checks: [
+        {
+          code: 'QB_CONNECTION',
+          status: 'BLOCKED',
+          message: 'qBittorrent 连接失败',
+          details: {},
+        },
+      ],
+      checked_at: '2026-08-10T00:02:00Z',
+      policy_fingerprint: 'a'.repeat(64),
+    }
+    const approval = {
+      id: 'approval-1',
+      media_item_id: 'media-1',
+      torrent_candidate_id: 'candidate-1',
+      preflight_result: blockedPreflight,
+    }
+    mocks.approvalConfirmDownload
+      .mockResolvedValueOnce({
+        outcome: 'PREFLIGHT_BLOCKED',
+        approval,
+        preflight: blockedPreflight,
+        execution: null,
+        approval_created: true,
+        execution_created: false,
+      })
+      .mockResolvedValueOnce({
+        outcome: 'EXECUTION_CREATED',
+        approval: {
+          ...approval,
+          preflight_result: { ...blockedPreflight, overall_status: 'PASS' },
+        },
+        preflight: { ...blockedPreflight, overall_status: 'PASS' },
+        execution: { id: 'execution-1', approval_id: 'approval-1', status: 'PENDING' },
+        approval_created: false,
+        execution_created: true,
+      })
+
+    const store = useTorrentStore()
+    await store.load('media-1')
+    await store.confirmDownload('candidate-1')
+
+    expect(store.downloadResult?.outcome).toBe('PREFLIGHT_BLOCKED')
+    expect(store.downloadResult?.preflight.checks[0]?.message).toContain('连接失败')
+    expect(store.notice).toBeNull()
+    const firstKey = mocks.approvalConfirmDownload.mock.calls[0]?.[2]
+
+    await store.confirmDownload('candidate-1')
+
+    const secondKey = mocks.approvalConfirmDownload.mock.calls[1]?.[2]
+    expect(secondKey).not.toBe(firstKey)
+    expect(store.downloadResult?.outcome).toBe('EXECUTION_CREATED')
+    expect(store.notice).toContain('加入下载队列')
+  })
 })
 
 describe('approval partial-success handling', () => {
@@ -439,7 +539,7 @@ describe('approval partial-success handling', () => {
     mocks.approvalPlan.mockRejectedValueOnce(new Error('计划服务暂时不可用'))
 
     const store = useApprovalStore()
-    await store.approve('approval-1')
+    await store.approve('approval-1', true)
 
     expect(store.approval?.status).toBe('APPROVED')
     expect(store.notice).toContain('审批已通过')
@@ -447,6 +547,38 @@ describe('approval partial-success handling', () => {
     expect(store.plan).toBeNull()
     expect(store.planError).toContain('审批状态已保存')
     expect(store.planError).toContain('计划服务暂时不可用')
+  })
+
+  it('keeps the fresh failed preflight visible when combined approval stays pending', async () => {
+    mocks.approvalApprove.mockResolvedValueOnce({
+      id: 'approval-avistaz',
+      status: 'PENDING',
+      preflight_result: {
+        overall_status: 'BLOCKED',
+        checks: [
+          {
+            code: 'DUPLICATE_INFO_HASH',
+            status: 'BLOCKED',
+            message: 'qBittorrent 已存在相同 info_hash',
+            details: {},
+          },
+        ],
+      },
+    })
+
+    const store = useApprovalStore()
+    await store.approve('approval-avistaz', false)
+
+    expect(mocks.approvalApprove).toHaveBeenCalledWith('approval-avistaz', {
+      acknowledges_hnr: false,
+      acknowledges_seeding: true,
+      acknowledges_plan_only: true,
+    })
+    expect(store.approval?.status).toBe('PENDING')
+    expect(store.notice).toBeNull()
+    expect(store.error).toContain('最新预检未通过')
+    expect(store.error).toContain('qBittorrent 已存在相同 info_hash')
+    expect(store.plan).toBeNull()
   })
 })
 

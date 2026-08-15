@@ -48,6 +48,7 @@ def record(
     *,
     media_type: MediaType = MediaType.MOVIE,
     episode_matrix: dict[int, list[int]] | None = None,
+    country_codes: list[str] | None = None,
 ) -> MetadataRecord:
     return MetadataRecord(
         tmdb_id=tmdb_id,
@@ -59,6 +60,7 @@ def record(
         original_title="Original",
         year=2026,
         episode_matrix=episode_matrix,
+        country_codes=country_codes,
         confidence=1,
     )
 
@@ -132,8 +134,142 @@ async def test_existing_tmdb_id_uses_exact_details_without_fuzzy_search(
     async with session_factory() as session:
         refreshed = await session.get(MediaItem, item.id)
         match = await session.scalar(select(MetadataMatch))
-        assert refreshed is not None and refreshed.workflow_status == WorkflowStatus.IDENTITY_REVIEW
+        review = await session.scalar(select(IdentityReview))
+        assert refreshed is not None
+        assert refreshed.workflow_status == WorkflowStatus.IDENTITY_CONFIRMED
+        assert refreshed.metadata_status == MetadataStatus.RESOLVED
         assert match is not None and "TMDB_ID_EXACT" in match.match_reasons
+        assert review is not None
+        assert review.metadata_match_id == match.id
+        assert review.status == "CONFIRMED"
+        assert review.confirmed_by == "system:strict-identity"
+
+        run, search_job, deduplicated = await enqueue_torrent_search(
+            session,
+            refreshed,
+            TorrentSearchCreateRequest(site_id="avistaz"),
+            max_attempts=3,
+        )
+        assert deduplicated is False
+        assert run.media_id == refreshed.id
+        assert search_job.payload["media_id"] == refreshed.id
+
+
+@pytest.mark.asyncio
+async def test_identity_confirmation_persists_candidate_country_codes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    item = media(tmdb_id=None)
+    candidate = record(12, country_codes=["JP", "US"])
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        match = MetadataMatch(
+            media_id=item.id,
+            tmdb_id=candidate.tmdb_id,
+            rank=1,
+            score=1,
+            match_reasons=["TITLE_EXACT"],
+            conflicts=[],
+            candidate_snapshot=candidate.model_dump(mode="json"),
+        )
+        session.add(match)
+        await session.flush()
+        await confirm_identity(
+            session,
+            item,
+            IdentityConfirmationRequest(metadata_match_id=match.id),
+            actor="test-operator",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.country_codes == ["JP", "US"]
+
+
+@pytest.mark.asyncio
+async def test_identity_confirmation_preserves_nextfind_country_for_same_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    item = media(tmdb_id=11)
+    item.country_codes = ["JP"]
+    candidate = record(11, country_codes=["US"])
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        match = MetadataMatch(
+            media_id=item.id,
+            tmdb_id=candidate.tmdb_id,
+            rank=1,
+            score=1,
+            match_reasons=["TMDB_ID_EXACT"],
+            conflicts=[],
+            candidate_snapshot=candidate.model_dump(mode="json"),
+        )
+        session.add(match)
+        await session.flush()
+        await confirm_identity(
+            session,
+            item,
+            IdentityConfirmationRequest(metadata_match_id=match.id),
+            actor="test-operator",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.country_codes == ["JP"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("candidate_tmdb_id", "candidate_type", "expected_country_codes"),
+    (
+        (12, MediaType.MOVIE, None),
+        (11, MediaType.TV, None),
+        (11, MediaType.MOVIE, ["JP"]),
+    ),
+)
+async def test_identity_confirmation_does_not_keep_country_from_another_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+    candidate_tmdb_id: int,
+    candidate_type: MediaType,
+    expected_country_codes: list[str] | None,
+) -> None:
+    item = media(tmdb_id=11)
+    item.country_codes = ["JP"]
+    candidate = record(candidate_tmdb_id, media_type=candidate_type)
+    async with session_factory() as session:
+        session.add(item)
+        await session.flush()
+        match = MetadataMatch(
+            media_id=item.id,
+            tmdb_id=candidate.tmdb_id,
+            rank=1,
+            score=1,
+            match_reasons=["TITLE_EXACT"],
+            conflicts=[],
+            candidate_snapshot=candidate.model_dump(mode="json"),
+        )
+        session.add(match)
+        await session.flush()
+        await confirm_identity(
+            session,
+            item,
+            IdentityConfirmationRequest(metadata_match_id=match.id),
+            actor="test-operator",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        assert refreshed is not None
+        assert refreshed.tmdb_id == candidate_tmdb_id
+        assert refreshed.media_type == candidate_type
+        assert refreshed.country_codes == expected_country_codes
 
 
 @pytest.mark.asyncio
@@ -155,9 +291,68 @@ async def test_type_conflict_enters_manual_review(
     )
     assert await processor.run_once() is True
     async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
         match = await session.scalar(select(MetadataMatch))
+        review_count = await session.scalar(select(func.count()).select_from(IdentityReview))
+        assert refreshed is not None
+        assert refreshed.workflow_status == WorkflowStatus.IDENTITY_REVIEW
+        assert refreshed.metadata_status == MetadataStatus.NEEDS_CONFIRMATION
         assert match is not None
         assert "MEDIA_TYPE_CONFLICT" in match.conflicts
+        assert review_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_updates", "candidate_updates"),
+    (
+        ({"year": None}, {}),
+        ({}, {"year": None}),
+        ({}, {"year": 2025}),
+        ({"title": "错误片名"}, {}),
+        (
+            {"original_title": "NextFind Original"},
+            {"original_title": "Different Original"},
+        ),
+        ({"identity_confidence": IdentityConfidence.NEEDS_CONFIRMATION}, {}),
+    ),
+)
+async def test_strict_identity_auto_confirmation_keeps_incomplete_or_conflicting_signals_manual(
+    session_factory: async_sessionmaker[AsyncSession],
+    media_updates: dict[str, object],
+    candidate_updates: dict[str, object],
+) -> None:
+    item = media(tmdb_id=13)
+    for field, value in media_updates.items():
+        setattr(item, field, value)
+    candidate = record(13).model_copy(update=candidate_updates)
+    async with session_factory() as session:
+        session.add(item)
+        await session.commit()
+        await enqueue_metadata_resolution(session, item, max_attempts=3)
+        await session.commit()
+    processor = JobProcessor(
+        session_factory,
+        "worker-strict-identity-manual",
+        FakeMediaSource,
+        lambda: RecordingProvider([candidate]),
+    )
+
+    assert await processor.run_once() is True
+
+    async with session_factory() as session:
+        refreshed = await session.get(MediaItem, item.id)
+        review_count = await session.scalar(select(func.count()).select_from(IdentityReview))
+        ready_event = await session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "METADATA_CANDIDATES_READY")
+        )
+        assert refreshed is not None
+        assert refreshed.workflow_status == WorkflowStatus.IDENTITY_REVIEW
+        assert refreshed.metadata_status == MetadataStatus.NEEDS_CONFIRMATION
+        assert review_count == 0
+        assert ready_event is not None
+        assert ready_event.sanitized_details["manual_confirmation_required"] is True
+        assert ready_event.sanitized_details["strict_auto_confirmed"] is False
 
 
 @pytest.mark.asyncio
@@ -287,9 +482,11 @@ async def test_missing_tmdb_id_returns_candidates_without_auto_writing_identity(
     async with session_factory() as session:
         refreshed = await session.get(MediaItem, item.id)
         count = await session.scalar(select(func.count()).select_from(MetadataMatch))
+        review_count = await session.scalar(select(func.count()).select_from(IdentityReview))
         assert refreshed is not None and refreshed.tmdb_id is None
         assert refreshed.workflow_status == WorkflowStatus.IDENTITY_REVIEW
         assert count == 2
+        assert review_count == 0
 
 
 @pytest.mark.asyncio

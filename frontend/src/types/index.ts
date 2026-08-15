@@ -21,6 +21,128 @@ export interface CsrfResponse {
   csrf_token: string
 }
 
+export interface AuthSetupStatus {
+  admin_initialized: boolean
+  configuration_complete: boolean
+}
+
+export type PtSiteArchitecture = 'avistaz' | 'nexusphp'
+
+export interface PtSiteArchitectureField {
+  name: string
+  label: string
+  input_type: 'text' | 'url' | 'password'
+  required: boolean
+  secret: boolean
+}
+
+export interface PtSiteArchitectureOption {
+  architecture: PtSiteArchitecture
+  label: string
+  runtime_supported: boolean
+  connection_test_supported?: boolean
+  fields: PtSiteArchitectureField[]
+}
+
+export interface AvistaZConfigurationSnapshot {
+  architecture: 'avistaz'
+  base_url: string
+  username: string
+  password_configured: boolean
+  pid_configured: boolean
+  configured: boolean
+  runtime_supported: boolean
+  search_ready: boolean
+}
+
+export interface NexusPhpConfigurationSnapshot {
+  architecture: 'nexusphp'
+  site_id: string
+  display_name: string
+  base_url: string
+  profile_id: string | null
+  cookie_configured: boolean
+  passkey_configured: boolean
+  configured: boolean
+  runtime_supported: boolean
+  search_ready: boolean
+}
+
+export type PtSiteConfigurationSnapshot =
+  | AvistaZConfigurationSnapshot
+  | NexusPhpConfigurationSnapshot
+
+export interface ConfigurationSnapshot {
+  nextfind: {
+    base_url: string
+    username: string
+    password_configured: boolean
+    configured: boolean
+  }
+  tmdb: {
+    configured: boolean
+  }
+  pt_site: PtSiteConfigurationSnapshot | null
+  pt_sites?: {
+    avistaz: AvistaZConfigurationSnapshot | null
+    nexusphp: NexusPhpConfigurationSnapshot | null
+  }
+  pt_site_architectures?: PtSiteArchitectureOption[]
+  qbittorrent: {
+    url: string
+    username: string
+    save_path: string
+    category: string
+    configured: boolean
+    allow_insecure_http: boolean
+  }
+  configuration_complete: boolean
+}
+
+export interface ConfigurationUpdateRequest {
+  nextfind?: {
+    base_url: string
+    username: string
+    password?: string
+  }
+  tmdb?: {
+    token?: string
+  }
+  pt_site?:
+    | {
+        architecture: 'avistaz'
+        base_url: string
+        username: string
+        pid?: string
+        password?: string
+      }
+    | {
+        architecture: 'nexusphp'
+        site_id: string
+        display_name: string
+        base_url: string
+        cookie?: string
+        passkey?: string
+      }
+  qbittorrent?: {
+    url: string
+    username: string
+    save_path: string
+    category: string
+    allow_insecure_http: boolean
+    password?: string
+  }
+}
+
+export type ConfigurationSection = 'nextfind' | 'tmdb' | 'pt_site' | 'qbittorrent'
+
+export interface ConfigurationTestResult {
+  target: ConfigurationSection
+  healthy: boolean
+  error_code: string | null
+  message: string
+}
+
 export interface Page<T> {
   items: T[]
   page: number
@@ -41,12 +163,24 @@ export interface SystemStatus {
   nextfind_configured: boolean
   tmdb_configured: boolean
   tmdb_live_enabled: boolean
+  pt_site_architecture: string
+  pt_site_label: string
+  pt_site_configured: boolean
+  pt_site_runtime_supported: boolean
+  pt_site_search_ready: boolean
+  pt_site_status: string
   avistaz_configured: boolean
   avistaz_live_enabled: boolean
   avistaz_status: string
   qb_configured: boolean
   qb_read_only_enabled: boolean
   qb_status: string
+  download_control_plane_enabled: boolean
+  download_executor_enabled: boolean
+  avistaz_torrent_fetch_enabled: boolean
+  qb_write_enabled: boolean
+  download_monitor_enabled: boolean
+  automation_engine_enabled: boolean
 }
 
 export interface MediaItem {
@@ -58,6 +192,7 @@ export interface MediaItem {
   title: string
   original_title: string | null
   year: number | null
+  country_codes: string[] | null
   poster_path: string | null
   raw_type: string | null
   local_episodes: number | null
@@ -126,6 +261,7 @@ export interface MetadataRecord {
   english_title: string | null
   original_title: string | null
   original_language: string | null
+  country_codes: string[] | null
   aliases: string[]
   year: number | null
   number_of_seasons: number | null
@@ -158,6 +294,23 @@ export interface IdentityReview {
   confirmed_by: string
   candidate: MetadataRecord
   created_at: string
+}
+
+export interface ResolveAccepted {
+  media_id: string
+  job_id: string
+  status: MediaItem['workflow_status']
+  deduplicated: boolean
+}
+
+export interface MetadataResolutionJob {
+  media_id: string
+  job_id: string
+  status: JobStatus
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface PtSiteCatalogItem {
@@ -329,6 +482,20 @@ export interface ApprovalRequest {
   preflight_result: PreflightResult | null
   preflight_checked_at: string | null
   events: ApprovalEvent[]
+}
+
+export type ConfirmDownloadOutcome =
+  | 'EXECUTION_CREATED'
+  | 'EXECUTION_REPLAYED'
+  | 'PREFLIGHT_BLOCKED'
+
+export interface ConfirmDownloadResponse {
+  outcome: ConfirmDownloadOutcome
+  approval: ApprovalRequest
+  preflight: PreflightResult
+  execution: DownloadExecution | null
+  approval_created: boolean
+  execution_created: boolean
 }
 
 export interface DownloadPlan {

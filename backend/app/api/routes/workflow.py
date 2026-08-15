@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from app.api.dependencies import DbSession, OperatorPrincipal, PtCatalog, ViewerPrincipal
 from app.core.config import get_settings
 from app.errors import AppError
-from app.models.entities import MediaItem, TorrentSearchRun
+from app.models.entities import Job, MediaItem, TorrentSearchRun
 from app.models.enums import AutomationStage
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
 from app.schemas.entities import (
     IdentityConfirmationRequest,
     IdentityReviewResponse,
     MetadataMatchResponse,
+    MetadataResolutionJobResponse,
     ResolveAccepted,
     TorrentCandidateResponse,
     TorrentSearchAccepted,
@@ -65,6 +66,44 @@ async def resolve_media(
         job_id=job.id,
         status=media.workflow_status,
         deduplicated=deduplicated,
+    )
+
+
+@router.get(
+    "/media/{media_id}/resolve-jobs/{job_id}",
+    response_model=MetadataResolutionJobResponse,
+)
+async def get_metadata_resolution_job(
+    media_id: str,
+    job_id: str,
+    response: Response,
+    session: DbSession,
+    _principal: ViewerPrincipal,
+) -> MetadataResolutionJobResponse:
+    await _media_or_404(session, media_id)
+    job = await session.get(Job, job_id)
+    if job is None or job.job_type != f"RESOLVE_METADATA:{media_id}":
+        raise AppError(
+            "METADATA_RESOLUTION_JOB_NOT_FOUND",
+            "TMDB 解析任务不存在",
+            status_code=404,
+        )
+    payload_media_id = job.payload.get("media_id") if isinstance(job.payload, dict) else None
+    if payload_media_id != media_id:
+        raise AppError(
+            "METADATA_RESOLUTION_JOB_BINDING_INVALID",
+            "TMDB 解析任务与当前影视绑定无效",
+            status_code=409,
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return MetadataResolutionJobResponse(
+        media_id=media_id,
+        job_id=job.id,
+        status=job.status,
+        error_code=job.error_code,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
     )
 
 

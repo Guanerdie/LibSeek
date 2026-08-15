@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   forApproval: vi.fn(),
   list: vi.fn(),
   get: vi.fn(),
+  downloadJob: vi.fn(),
   reconcile: vi.fn(),
 }))
 
@@ -28,6 +29,7 @@ vi.mock('../src/api/client', () => ({
     forApproval: mocks.forApproval,
     list: mocks.list,
     get: mocks.get,
+    downloadJob: mocks.downloadJob,
     reconcile: mocks.reconcile,
   },
 }))
@@ -78,6 +80,35 @@ const execution = {
   updated_at: '2026-08-11T00:55:00Z',
 }
 
+const downloadJob = {
+  id: 'download-job-1',
+  execution_id: 'execution-1',
+  approval_id: 'approval-1',
+  media_item_id: 'media-1',
+  status: 'QUEUED' as const,
+  release_title: 'Test Series S01E03 1080p WEB-DL',
+  info_hash_v1: 'd'.repeat(40),
+  info_hash_v2: null,
+  save_path_ref: 'media-library',
+  category: 'media',
+  size_bytes: 1024,
+  file_count: 1,
+  progress: 0,
+  download_speed_bps: 0,
+  upload_speed_bps: 0,
+  downloaded_bytes: 0,
+  uploaded_bytes: 0,
+  ratio: 0,
+  hnr_status: 'UNKNOWN' as const,
+  started_at: null,
+  completed_at: null,
+  last_seen_at: null,
+  error_code: null,
+  error_message: null,
+  created_at: '2026-08-11T00:56:00Z',
+  updated_at: '2026-08-11T00:56:00Z',
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve: (value: T) => void = () => undefined
   const promise = new Promise<T>((promiseResolve) => {
@@ -89,6 +120,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  mocks.downloadJob.mockRejectedValue(new Error('关联下载任务接口暂不可用'))
 })
 
 describe('execution store', () => {
@@ -215,6 +247,68 @@ describe('execution store', () => {
     expect(mocks.forApproval).toHaveBeenCalledWith('approval-1')
     expect(store.selected?.id).toBe('execution-1')
     expect(store.error).toBeNull()
+  })
+
+  it('retries only while the execution exists but its download job is not created yet', async () => {
+    vi.useFakeTimers()
+    try {
+      const { ApiError } = await import('../src/api/client')
+      mocks.downloadJob
+        .mockRejectedValueOnce(
+          new ApiError('DOWNLOAD_JOB_NOT_CREATED', '下载执行尚未生成下载任务', 404),
+        )
+        .mockResolvedValueOnce(downloadJob)
+      const store = useExecutionStore()
+
+      const polling = store.pollDownloadJobForExecution('execution-1', 'PENDING')
+      await Promise.resolve()
+      expect(mocks.downloadJob).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      await expect(polling).resolves.toBe(true)
+      expect(mocks.downloadJob).toHaveBeenCalledTimes(2)
+      expect(store.downloadJob?.id).toBe('download-job-1')
+      expect(store.downloadJobLookupStatus).toBe('found')
+      expect(store.downloadJobError).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['FAILED', '下载执行已失败'],
+    ['CANCELLED', '下载执行已取消'],
+    ['OUTCOME_UNKNOWN', '下载提交结果不确定'],
+    ['RECONCILIATION_REQUIRED', '需要人工对账'],
+    ['RECONCILIATION_PENDING', '人工对账仍在处理'],
+  ] as const)('queries a %s execution once and reports why no job exists', async (status, message) => {
+    const { ApiError } = await import('../src/api/client')
+    mocks.downloadJob.mockRejectedValueOnce(
+      new ApiError('DOWNLOAD_JOB_NOT_CREATED', '下载执行尚未生成下载任务', 404),
+    )
+    const store = useExecutionStore()
+
+    await expect(store.pollDownloadJobForExecution('execution-1', status)).resolves.toBe(false)
+
+    expect(mocks.downloadJob).toHaveBeenCalledTimes(1)
+    expect(store.downloadJobLookupStatus).toBe('not_created')
+    expect(store.downloadJobError).toContain(message)
+  })
+
+  it.each([
+    ['DOWNLOAD_EXECUTION_NOT_FOUND', '下载执行记录不存在'],
+    ['DOWNLOAD_JOB_NOT_FOUND', '下载任务不存在'],
+  ])('surfaces %s instead of treating every 404 as a pending job', async (errorCode, message) => {
+    const { ApiError } = await import('../src/api/client')
+    mocks.downloadJob.mockRejectedValueOnce(new ApiError(errorCode, message, 404))
+    const store = useExecutionStore()
+
+    await expect(store.pollDownloadJobForExecution('execution-1')).resolves.toBe(false)
+
+    expect(mocks.downloadJob).toHaveBeenCalledTimes(1)
+    expect(store.downloadJob).toBeNull()
+    expect(store.downloadJobLookupStatus).toBe('error')
+    expect(store.downloadJobError).toBe(message)
   })
 
   it('only treats the stable no-execution error code as an empty approval lookup', async () => {

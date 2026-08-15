@@ -64,6 +64,34 @@ def load_media_import_migration() -> ModuleType:
     return module
 
 
+def load_media_country_codes_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260813_0010_media_country_codes.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_20260813_0010", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_approval_json_guard_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "20260813_0011_fix_approval_json_guard.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_20260813_0011", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_local_episode_matrix_migration_adds_and_drops_json_column() -> None:
     migration = load_local_episode_matrix_migration()
     assert migration.revision == "20260811_0005"
@@ -203,6 +231,12 @@ def test_conservative_automation_migration_is_seeded_guarded_and_reversible() ->
     sql = "\n".join(str(call.args[0]) for call in mocks[5].call_args_list)
     assert migration.DEFAULT_POLICY_HASH in sql
     assert "'MANUAL', 'MANUAL', 'MANUAL', 'MANUAL'" in sql
+    seed_sql = next(
+        str(call.args[0])
+        for call in mocks[5].call_args_list
+        if "INSERT INTO automation_policy_revisions" in str(call.args[0])
+    )
+    assert sa.text(seed_sql).compile().params == {}
     assert "trg_automation_policy_revision_immutable" in sql
     assert "trg_automation_policy_head_guard" in sql
     assert "trg_download_execution_automation_binding_immutable" in sql
@@ -353,3 +387,49 @@ def test_media_import_migration_is_append_only_rerunnable_and_fail_closed() -> N
     ):
         assert f"SELECT 1 FROM {table}" in downgrade_sql
     assert "cannot downgrade while append-preserved media import records exist" in downgrade_sql
+
+
+def test_media_country_codes_migration_adds_and_drops_json_column() -> None:
+    migration = load_media_country_codes_migration()
+    assert migration.revision == "20260813_0010"
+    assert migration.down_revision == "20260811_0009"
+
+    with patch.object(migration.op, "add_column") as add_column:
+        migration.upgrade()
+    table_name, column = add_column.call_args.args
+    assert table_name == "media_items"
+    assert column.name == "country_codes"
+    assert isinstance(column.type, sa.JSON)
+    assert column.nullable is True
+
+    with patch.object(migration.op, "drop_column") as drop_column:
+        migration.downgrade()
+    drop_column.assert_called_once_with("media_items", "country_codes")
+
+
+def test_approval_json_guard_migration_casts_json_without_replacing_trigger() -> None:
+    migration = load_approval_json_guard_migration()
+    assert migration.revision == "20260813_0011"
+    assert migration.down_revision == "20260813_0010"
+
+    with patch.object(migration.op, "execute") as execute:
+        migration.upgrade()
+    execute.assert_called_once()
+    upgrade_sql = str(execute.call_args.args[0])
+    assert "CREATE OR REPLACE FUNCTION unin_guard_approval_request_immutable()" in upgrade_sql
+    assert "NEW.candidate_snapshot::jsonb IS DISTINCT FROM" in upgrade_sql
+    assert "OLD.candidate_snapshot::jsonb" in upgrade_sql
+    assert "approval_requests are append-preserved" in upgrade_sql
+    assert "approval immutable fields cannot change" in upgrade_sql
+    assert "CREATE TRIGGER" not in upgrade_sql
+    assert "DROP TRIGGER" not in upgrade_sql
+
+    with patch.object(migration.op, "execute") as execute:
+        migration.downgrade()
+    execute.assert_called_once()
+    downgrade_sql = str(execute.call_args.args[0])
+    assert "CREATE OR REPLACE FUNCTION unin_guard_approval_request_immutable()" in downgrade_sql
+    assert "NEW.candidate_snapshot IS DISTINCT FROM OLD.candidate_snapshot" in downgrade_sql
+    assert "candidate_snapshot::jsonb" not in downgrade_sql
+    assert "CREATE TRIGGER" not in downgrade_sql
+    assert "DROP TRIGGER" not in downgrade_sql

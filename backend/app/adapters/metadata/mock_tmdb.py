@@ -47,5 +47,10 @@ class MockTmdbProvider(MetadataProvider):
     async def get_external_ids(self, media_type: MediaType, tmdb_id: int) -> dict[str, str]:
         return (await self.get_by_tmdb_id(media_type, tmdb_id)).external_ids
 
+    async def get_country_codes(
+        self, media_type: MediaType, tmdb_id: int
+    ) -> list[str] | None:
+        return (await self.get_by_tmdb_id(media_type, tmdb_id)).country_codes
+
     async def get_tv_episode_matrix(self, tmdb_id: int) -> dict[int, list[int]] | None:
         return (await self.get_by_tmdb_id(MediaType.TV, tmdb_id)).episode_matrix

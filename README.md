@@ -4,10 +4,18 @@ UNIN 当前版本为 `0.8.0`。系统已实现从 NextFind 发现未入库影视
 
 真实外部能力和阶段 7A 媒体入库规划控制面仍然默认关闭，且当前只完成 Mock、fixture、静态检查和离线迁移验收；尚未使用真实 TMDB、AvistaZ、qBittorrent、NexusPHP 站点或媒体文件完成端到端冒烟测试。只有用户明确批准具体动作、目标和影响，并在本机安全录入运行时 Secret 后，才允许启用相应外部开关。阶段 7A 固定为 `PLAN_ONLY_NO_FILE_OPERATION`：系统不扫描、移动、复制、重命名、硬链接、覆盖或删除媒体文件，也不执行媒体库写回。
 
+## 最简单的使用顺序
+
+1. 在 Windows PowerShell 运行 `.\scripts\start.cmd`，打开本机管理页面，先创建管理员，再可视化录入所有真实账号和 Token。
+2. 先做 NextFind、TMDB、AvistaZ 和 qBittorrent 的只读验证。每次访问真实服务前仍需确认目标和读取范围。
+3. 从首页点击“获取未入库影视”。页面会等待异步任务并自动刷新结果，再按“确认影视信息”到“选择 PT 种子”处理人工节点。
+4. 下载执行门禁与只读连接分开显示，默认保持关闭。只有明确批准 AvistaZ 取种和 qBittorrent 写入后，才启用人工下载执行；自动化仍需单独批准。
+5. 执行记录生成下载任务后，可直接进入“下载任务总结”查看进度、错误、审批和执行时间线。
+
 ## 已实现
 
 - Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、httpx；前端为 Vue 3、Pinia、Vue Router、Vite 和 Vitest。
-- 本地单账号认证与分级授权：签名会话 Cookie、登录前 bootstrap CSRF、所有状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级；认证材料缺失时受保护 API fail closed。
+- 本地管理员认证与分级授权：首次页面创建管理员、PBKDF2 密码哈希、签名会话 Cookie、登录前 bootstrap CSRF、所有已登录状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级。
 - NextFind 只读发现：从 `https://nextfind.example/#/discover` 对应服务获取未入库条目，使用独立 Cookie、默认仅含 `nextfind.example` 的专用 HTTPS 主机白名单、重定向复验、NDJSON 坏行隔离、分页循环检测和响应大小限制；不能借用全局 TMDB/AvistaZ 白名单发送 NextFind 凭据。
 - TMDB 只读补全：优先使用 NextFind 提供的 TMDB ID，否则按标题、年份和类型返回最多 5 个候选；保存中英文名、IMDb 等外部 ID、已播季集矩阵和冲突。默认由人工确认；只有身份阶段设为 `AUTO_IF_ELIGIBLE`、总闸已开启且候选通过分数、差值、类型、标题/年份或 TMDB ID 精确绑定等全部硬条件时才会自动确认。
 - PT 搜索与审阅：AvistaZ 支持 TMDB/IMDb/标题降级搜索、限速和稳定错误；候选展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告。目录中的 AvistaZ 声明为 `manual_only=false`，仅表示代码具备受保守策略约束的自动化路径，不代表自动化或实时搜索已开启。默认仍只排序供人工选择；自动选种还要求 AvistaZ 站点绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、有效 info hash/大小、做种数和电视剧季集覆盖全部满足策略。IMDb-only 候选转人工确认。
@@ -22,7 +30,7 @@ UNIN 当前版本为 `0.8.0`。系统已实现从 NextFind 发现未入库影视
 - 未知提交结果不会自动重试：写入可能发生时进入 `OUTCOME_UNKNOWN`，已预留但无法验证时进入 `RECONCILIATION_REQUIRED`；人工对账请求只记录为 `RECONCILIATION_PENDING`，不会冒充成功或再次 add。
 - 独立只读监控器：读取 qB 状态并更新任务进度、速度、上传量、Ratio 和完成时间；它不推断 H&R，未知值保持 `UNKNOWN`，已有人工或外部写入的 `AT_RISK`/`SATISFIED` 不会被覆盖。
 - 阶段 7A 媒体入库规划控制面：只允许为进度 100% 且处于 `SEEDING`、`COMPLETED` 或 `PAUSED` 的已核验下载任务创建 `HARDLINK`/`COPY` 提案。客户端清单和目标映射始终是不受信提案；不可变计划、追加式只读预检和人工决定以 SHA-256 绑定，固定保留源文件并禁止覆盖目标。当前没有真实媒体路径挂载、文件检查 Worker 或文件执行器。
-- Vue 管理端读取无 Secret PT 目录，创建搜索时要求选择站点，并在历史运行、候选表格和移动端候选卡中显示站点；还包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、执行列表/详情、人工对账、下载任务列表/总结，以及媒体入库规划列表、创建和详情页。各页面始终显示“仅规划，不操作媒体文件”，`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
+- Vue 管理端读取无 Secret PT 目录，创建搜索时要求选择站点，并在历史运行、候选表格和移动端候选卡中显示站点；发现、TMDB 解析和 PT 搜索提供有界自动刷新及可见错误，失效审批可重新发起，执行记录可直接进入关联下载总结。管理端还包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、人工对账和媒体入库规划页面。各页面始终显示“仅规划，不操作媒体文件”，`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
 - Docker Compose 默认启动 API、普通 Worker、前端和 PostgreSQL；`automation-preflight`、`download-execution` 与 `download-monitor` profile 分别启用独立自动预检 Worker、下载执行器和只读监控器。API 与前端端口只绑定 `127.0.0.1`。
 
 架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)，PT Profile 接入约束见 [docs/pt-site-profiles.md](docs/pt-site-profiles.md)。
@@ -42,18 +50,16 @@ compose.yaml             4 个默认服务及 3 个 opt-in profile 服务
 
 ## 启动
 
-Windows PowerShell：
+Windows（推荐）：
 
 ```powershell
 Set-Location D:\project\unin
-Copy-Item .env.example .env
-notepad .env
-.\scripts\start.ps1 -DockerContext desktop-linux -ValidateOnly
-.\scripts\start.ps1 -DockerContext desktop-linux
-docker --context desktop-linux compose --env-file .env -f compose.yaml ps
+.\scripts\start.cmd
 ```
 
-先同时修改 `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的同一个密码。本机快速启动还需在 `.env` 填写 `AUTH_LOCAL_USERNAME`、`AUTH_LOCAL_PASSWORD` 和至少 32 个字符的 `AUTH_SESSION_SIGNING_KEY`；此方式只把值传给 API。生产部署必须让下文列出的 12 个凭据键在 `.env` 全部保持空白，改用分层 Docker Secret 和安全启动器。NextFind 凭据留空时系统仍可启动，但不会创建真实发现任务；认证材料缺失时健康检查仍可用，但受保护 API 会返回 `AUTH_NOT_CONFIGURED`。不要把任何密码、签名密钥、PID、Cookie、Token 或 TMDB Key 发送到聊天或提交到版本库。
+首次运行会自动创建 `.env` 并生成随机 PostgreSQL 密码，不要求预先填写登录账号。启动后打开 `http://127.0.0.1:9527`，先创建本地管理员，再在“连接配置”页面录入 NextFind、TMDB、AvistaZ 和 qBittorrent。密码、Token 和 PID 永不回显；留空表示保留现有值。
+
+页面保存只更新本机 Docker 持久卷，不会测试或访问任何真实连接。保存完整信息后只开启相应的只读能力；下载写入、取种、自动化和下载监控仍保持关闭。每次真实读取 NextFind、TMDB、AvistaZ 或 qBittorrent，以及任何 qB 写入前，仍需先说明目标、读写对象和可能影响，并取得明确批准。不要把任何密码、签名密钥、PID、Cookie、Token 或 TMDB Key 发送到聊天或提交到版本库。
 
 启动脚本要求显式指定 Docker context，并将 `config`、`up` 和 `ps` 固定到该 context、项目根目录的 `.env` 与 `compose.yaml`；Windows Docker Desktop 示例使用 `-DockerContext desktop-linux`。`-ValidateOnly` 只执行门禁和 Compose 配置解析，不启动容器。为防止 Docker/Compose 优先采用父进程值，脚本拒绝 `DOCKER_HOST`、`DOCKER_CONTEXT`、`DOCKER_TLS_VERIFY`、`DOCKER_CERT_PATH`、`DOCKER_CONFIG`、所有已导出的项目配置变量、`*_FILE` Secret 来源和 `COMPOSE_*` 控制变量，即使它们的值为空也会拒绝。请使用 `Remove-Item Env:<NAME>` 真正移除 PowerShell 进程变量；`.env` 只接受空行、注释或严格的大写 `KEY=VALUE`，拒绝 `export KEY=VALUE`、键周围空格、冒号赋值及小写/混合大小写键，也不允许 `$VAR` 或 `${VAR}` 二次插值及非空 `COMPOSE_*` 键。违规时只报告行号，不回显配置值。
 
@@ -61,32 +67,30 @@ Linux / Docker：
 
 ```bash
 cd /path/to/unin
-cp .env.example .env
-chmod 600 .env
-${EDITOR:-vi} .env
-sh ./scripts/start.sh --docker-context default --validate-only
 sh ./scripts/start.sh --docker-context default
 docker --context default compose --env-file .env -f compose.yaml ps
 ```
 
-Linux 本机 Docker Engine 示例显式使用 `--docker-context default`。Linux 中同样必须用 `unset NAME` 移除父进程配置变量；`export NAME=` 仍会被门禁拒绝。
+Linux 本机 Docker Engine 示例显式使用 `--docker-context default`。首次运行同样会自动生成 `.env` 和数据库密码。Linux 中必须用 `unset NAME` 移除父进程配置变量；`export NAME=` 仍会被门禁拒绝。
 
-验收：打开 `http://127.0.0.1:8080`；API 文档位于 `http://127.0.0.1:8000/api/docs`；Windows Docker Desktop 的 `docker --context desktop-linux compose --env-file .env -f compose.yaml ps` 或 Linux 本机的 `docker --context default compose --env-file .env -f compose.yaml ps` 中四个服务应为 healthy。
+验收：打开 `http://127.0.0.1:9527`；API 文档位于 `http://127.0.0.1:8000/api/docs`；Windows Docker Desktop 的 `docker --context desktop-linux compose --env-file .env -f compose.yaml ps` 或 Linux 本机的 `docker --context default compose --env-file .env -f compose.yaml ps` 中四个服务应为 healthy。
 
 ## 本地登录与权限
 
-系统只配置一个本地账号。`AUTH_LOCAL_ROLE` 决定该账号的最高权限：`viewer` 只能读取影视、候选、审批、执行、下载任务、媒体入库计划、自动化策略/决策和 qB 只读状态；`operator` 继承读取权限，并可创建发现/解析/搜索/审批申请、执行下载预检、确认身份、拒绝下载审批和创建媒体入库规划请求；`admin` 继承前两级权限，并可批准/撤销下载审批、发布自动化策略修订、创建执行意图、提交执行请求、请求人工对账，以及批准、拒绝或撤销媒体入库规划请求。服务端始终以登录会话中的用户名写人工操作 actor，自动动作使用 `system:automation` 命名空间，客户端伪造的操作者字段不会生效。
+系统只配置一个本地管理员账号。首次打开页面时创建账号；密码以带随机盐的单向哈希保存，不保存明文。服务端始终以登录会话中的用户名写人工操作 actor，自动动作使用 `system:automation` 命名空间，客户端伪造的操作者字段不会生效。已有通过环境变量或 Docker Secret 配置账号的部署仍保持兼容。
 
 认证接口：
 
-- `GET /api/auth/csrf`：登录前获取 bootstrap CSRF；响应同时设置可由前端读取的 `unin_csrf` Cookie。
+- `GET /api/auth/setup-status`：检查是否需要创建首次管理员，以及四项连接配置是否完整。
+- `POST /api/auth/setup`：仅在未初始化时创建首次本地管理员，成功后直接建立登录会话。
+- `GET /api/auth/csrf`：已有管理员时获取登录前 bootstrap CSRF；响应同时设置可由前端读取的 `unin_csrf` Cookie。
 - `POST /api/auth/login`：提交用户名和密码，同时让 `unin_csrf` Cookie 与 `X-CSRF-Token` 请求头携带相同 token。
 - `GET /api/auth/me`：读取当前账号与角色。
 - `POST /api/auth/logout`：必须携带当前会话 CSRF，并清除认证 Cookie。
 
 登录成功后，`unin_session` 为 `HttpOnly`，两个 Cookie 均为 `SameSite=Strict`、`Path=/api`；浏览器端不得把会话或密码写入 Web Storage。所有状态变更请求都必须同时携带 CSRF Cookie 和同值的 `X-CSRF-Token`。`AUTH_SESSION_TTL_SECONDS` 默认 28800 秒，登录前 token 的 `AUTH_BOOTSTRAP_CSRF_TTL_SECONDS` 默认 600 秒。本机 HTTP 保持 `AUTH_COOKIE_SECURE=false`；经 HTTPS 反向代理的生产部署必须设为 `true`。
 
-三个认证材料应通过下文 Docker Secret 提供：`auth_local_username`、`auth_local_password`、`auth_session_signing_key`。签名密钥至少 32 个字符且应为独立高熵随机值。任一材料缺失、文件不可读或签名密钥过短时，系统 fail closed，不允许匿名降级。
+普通本机流程会把管理员哈希和随机会话签名密钥保存在 API 专属持久卷中；普通 Worker 无权读取。旧部署可继续通过下文三个 Docker Secret 提供认证材料：`auth_local_username`、`auth_local_password`、`auth_session_signing_key`。旧配置必须三项完整，部分配置或不可读文件仍会失败关闭，不会降级为可抢注状态。
 
 ## 工作流 API
 
@@ -128,7 +132,7 @@ qBittorrent 公开命名空间始终只有以上两个 `GET`。系统没有直�
 
 策略和决策查询允许 `viewer`，发布新修订只允许 `admin` 且必须携带当前 `base_revision_no`。四阶段默认均为 `MANUAL`；`DISABLED` 会由后端阻止该阶段新的人工和自动正向动作；`AUTO_IF_ELIGIBLE` 只在总闸开启且全部硬条件满足时行动，否则记录 `MANUAL_REQUIRED`、`BLOCKED`、`STALE` 或 `NOOP` 等审计结果并允许人工接管。策略不扫描、不追溯处理 `effective_from` 之前的积压条目。
 
-默认资格阈值为身份最低分 `0.5`、身份前两名最小差值 `0.1`、种子最低分 `0.75`、种子前两名最小差值 `0.1`、最少做种数 `1`。阈值只是必要条件，不会绕过类型/年份/TMDB ID/季集覆盖、候选警告、H&R、预检或执行能力闸门。启用自动审批必须确认 H&R、继续做种和“仅生成计划”；启用自动执行必须另行确认 H&R、继续做种和“只允许 `ADD_PAUSED`”，确认项按策略修订不可变保存。执行阶段为 `AUTO_IF_ELIGIBLE` 时，人工或自动批准后都会立即评估独立执行资格；只有总闸、执行策略、能力心跳和全部资格同时通过才会创建 `ADD_PAUSED` 执行记录。
+默认资格阈值为身份最低分 `0.5`、身份前两名最小差值 `0.1`、种子最低分 `0.75`、种子前两名最小差值 `0.1`、最少做种数 `1`。阈值只是必要条件，不会绕过类型/年份/TMDB ID/季集覆盖、候选警告、H&R、预检或执行能力闸门。AvistaZ 固定采用站点默认 7 天 H&R 规则，不再要求单独确认；其他站点在 H&R 信息未知或需要确认时仍保持原有门禁。启用自动审批必须确认继续做种和“仅生成计划”；启用自动执行必须另行确认继续做种和“只允许 `ADD_PAUSED`”，确认项按策略修订不可变保存。执行阶段为 `AUTO_IF_ELIGIBLE` 时，人工或自动批准后都会立即评估独立执行资格；只有总闸、执行策略、能力心跳和全部资格同时通过才会创建 `ADD_PAUSED` 执行记录。
 
 ## 执行控制面与下载任务 API
 
@@ -193,7 +197,9 @@ ENABLE_MEDIA_IMPORT_CONTROL_PLANE=false
 
 所有 Secret 部署必须通过 `scripts/start-secrets.ps1` 或 `scripts/start-secrets.sh` 启动，不要手写 Compose `up`。启动器要求显式指定 Docker context、显式选择 discovery，并按固定顺序追加 AvistaZ、qB 和允许的 profile；Windows Docker Desktop 使用 `-DockerContext desktop-linux`，Linux 本机 Docker Engine 使用 `--docker-context default`。它拒绝父进程 Docker/Compose 配置覆盖、`COMPOSE_PROFILES`、`.env` 变量插值及全部 12 个凭据键的任何非空明文，只检查所选层固定 Secret 文件是否存在而不读取或打印内容。启动器在指定 context 上先执行 Compose `config --quiet`，通过后才执行带 `--wait` 的启动；`-ValidateOnly`/`--validate-only` 只做相同门禁和配置解析。启动器不会替用户修改 `.env`，也不会默认启用任何 `ENABLE_*`。
 
-以下 PowerShell 片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。第一轮只执行 discovery 分组；AvistaZ 和 qB 分组等取得对应授权时再执行。
+### 手工备用：PowerShell 隐藏输入
+
+仅在需要兼容旧版 Docker Secret 部署时采用以下手工备用方案。片段使用隐藏输入，不会把值打印到终端；它会在本机 `D:\project\unin\secrets` 创建明文 Secret 文件，因此该目录必须仅允许当前用户读取，且不得同步或提交。普通本机使用不需要执行本节。不要把任何实际值粘贴到聊天。`auth_session_signing_key.txt` 必须至少 32 个字符，建议由本机密码管理器或安全随机生成器创建，不要复用登录密码。
 
 ```powershell
 Set-Location D:\project\unin

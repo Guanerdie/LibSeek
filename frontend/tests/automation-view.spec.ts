@@ -55,7 +55,7 @@ function makePolicy(): AutomationPolicy {
   return { scope: 'global', version: 1, engine_enabled: false, revision: makeRevision() }
 }
 
-function makeDecision(): AutomationDecision {
+function makeDecision(overrides: Partial<AutomationDecision> = {}): AutomationDecision {
   return {
     id: 'decision-1',
     policy_revision_id: 'revision-4',
@@ -72,6 +72,7 @@ function makeDecision(): AutomationDecision {
     evidence_hash: 'e'.repeat(64),
     actor: 'automation-engine',
     created_at: '2026-08-11T06:10:00Z',
+    ...overrides,
   }
 }
 
@@ -217,5 +218,36 @@ describe('AutomationView', () => {
     expect(mocks.decision).toHaveBeenCalledWith('decision-1')
     expect(wrapper.text()).toContain('脱敏证据快照')
     expect(wrapper.get('.decision-evidence pre').text()).toContain('"score": 0.7')
+  })
+
+  it('links an automatic action to its media, approval and execution records', async () => {
+    const decision = makeDecision({
+      outcome: 'ACTION_CREATED',
+      approval_request_id: 'approval-1',
+      download_execution_id: 'execution-1',
+      reason_codes: [],
+    })
+    mocks.decisions.mockResolvedValueOnce({
+      items: [decision],
+      page: 1,
+      page_size: 20,
+      total: 1,
+    })
+    mocks.decision.mockResolvedValueOnce(decision)
+
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    expect(wrapper.get('a[href="/media/media-1/torrents"]').text()).toBe('media-1')
+    expect(wrapper.get('a[href="/executions/execution-1"]').text()).toBe('进入结果')
+    await wrapper.get('.automation-decision-table button.table-action').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.automation-decision-detail a[href="/approvals/approval-1"]').text()).toBe(
+      'approval-1',
+    )
+    expect(wrapper.get('.automation-decision-detail a[href="/executions/execution-1"]').text()).toBe(
+      'execution-1',
+    )
   })
 })

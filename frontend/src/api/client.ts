@@ -6,6 +6,11 @@ import type {
   AutomationPolicyRevision,
   AutomationStage,
   ApprovalRequest,
+  AuthSetupStatus,
+  ConfigurationSnapshot,
+  ConfigurationTestResult,
+  ConfigurationUpdateRequest,
+  ConfirmDownloadResponse,
   CsrfResponse,
   DiscoveryRun,
   DownloadExecution,
@@ -26,17 +31,20 @@ import type {
   MediaImportStatus,
   MediaItem,
   MetadataMatch,
+  MetadataResolutionJob,
   Page,
   Principal,
   PtSiteCatalog,
   SystemStatus,
   QbStatus,
   QbTorrent,
+  ResolveAccepted,
   TorrentCandidateResult,
   TorrentSearchCreateRequest,
   TorrentSearchRun,
   CreateAutomationPolicyRevision,
 } from '../types'
+import type { MediaRegion } from '../utils/mediaRegions'
 
 interface ErrorPayload {
   error_code?: string
@@ -67,16 +75,21 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
   unauthorizedHandler = handler
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  options?: { csrf?: 'required' | 'omit' },
+): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase()
   const mutatesState = !['GET', 'HEAD', 'OPTIONS'].includes(method)
-  if (mutatesState && !csrfToken) {
+  const requiresCsrf = mutatesState && options?.csrf !== 'omit'
+  if (requiresCsrf && !csrfToken) {
     throw new ApiError('CSRF_TOKEN_REQUIRED', '状态变更请求缺少 CSRF 令牌', 0)
   }
 
   const headers = new Headers(init?.headers)
   if (!headers.has('Accept')) headers.set('Accept', 'application/json')
-  if (mutatesState && csrfToken) headers.set('X-CSRF-Token', csrfToken)
+  if (requiresCsrf && csrfToken) headers.set('X-CSRF-Token', csrfToken)
 
   let response: Response
   try {
@@ -123,6 +136,17 @@ export const systemApi = {
 }
 
 export const authApi = {
+  setupStatus: () => request<AuthSetupStatus>('/api/auth/setup-status'),
+  setup: (username: string, password: string) =>
+    request<LoginResponse>(
+      '/api/auth/setup',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      },
+      { csrf: 'omit' },
+    ),
   csrf: () => request<CsrfResponse>('/api/auth/csrf'),
   login: (username: string, password: string) =>
     request<LoginResponse>('/api/auth/login', {
@@ -134,31 +158,65 @@ export const authApi = {
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
 }
 
+export const configurationApi = {
+  get: () => request<ConfigurationSnapshot>('/api/configuration'),
+  update: (payload: ConfigurationUpdateRequest) =>
+    request<ConfigurationSnapshot>('/api/configuration', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  testNextFind: () =>
+    request<ConfigurationTestResult>('/api/configuration/tests/nextfind', { method: 'POST' }),
+  testTmdb: () =>
+    request<ConfigurationTestResult>('/api/configuration/tests/tmdb', { method: 'POST' }),
+  testPtSite: (architecture: string) =>
+    request<ConfigurationTestResult>(
+      `/api/configuration/tests/pt-sites/${encodeURIComponent(architecture)}`,
+      { method: 'POST' },
+    ),
+  testQbittorrent: () =>
+    request<ConfigurationTestResult>('/api/configuration/tests/qbittorrent', {
+      method: 'POST',
+    }),
+}
+
 export const mediaApi = {
   list: (params: {
     page: number
     pageSize: number
     mediaType?: string
     confidence?: string
+    region?: MediaRegion
     query?: string
-  }) =>
+  }, signal?: AbortSignal) =>
     request<Page<MediaItem>>(
       `/api/media?${queryString({
         page: params.page,
         page_size: params.pageSize,
         media_type: params.mediaType,
         identity_confidence: params.confidence,
+        region: params.region,
         query: params.query,
       })}`,
+      { signal },
     ),
-  get: (id: string) => request<MediaItem>(`/api/media/${encodeURIComponent(id)}`),
+  get: (id: string, signal?: AbortSignal) =>
+    request<MediaItem>(`/api/media/${encodeURIComponent(id)}`, { signal }),
   resolve: (id: string) =>
-    request<{ media_id: string; job_id: string; status: string; deduplicated: boolean }>(
+    request<ResolveAccepted>(
       `/api/media/${encodeURIComponent(id)}/resolve`,
       { method: 'POST' },
     ),
-  metadataCandidates: (id: string) =>
-    request<MetadataMatch[]>(`/api/media/${encodeURIComponent(id)}/metadata-candidates`),
+  resolveJob: (mediaId: string, jobId: string, signal?: AbortSignal) =>
+    request<MetadataResolutionJob>(
+      `/api/media/${encodeURIComponent(mediaId)}/resolve-jobs/${encodeURIComponent(jobId)}`,
+      { cache: 'no-store', signal },
+    ),
+  metadataCandidates: (id: string, signal?: AbortSignal) =>
+    request<MetadataMatch[]>(`/api/media/${encodeURIComponent(id)}/metadata-candidates`, {
+      signal,
+    }),
   confirmIdentity: (id: string, metadataMatchId: string) =>
     request<IdentityReview>(`/api/media/${encodeURIComponent(id)}/identity-confirmations`, {
       method: 'POST',
@@ -168,11 +226,13 @@ export const mediaApi = {
 }
 
 export const discoveryApi = {
-  list: (page: number, pageSize: number) =>
+  list: (page: number, pageSize: number, signal?: AbortSignal) =>
     request<Page<DiscoveryRun>>(
       `/api/discovery-runs?${queryString({ page, page_size: pageSize })}`,
+      { signal },
     ),
-  get: (id: string) => request<DiscoveryRun>(`/api/discovery-runs/${encodeURIComponent(id)}`),
+  get: (id: string, signal?: AbortSignal) =>
+    request<DiscoveryRun>(`/api/discovery-runs/${encodeURIComponent(id)}`, { signal }),
   create: () => request<DiscoveryRun>('/api/discovery-runs', { method: 'POST' }),
 }
 
@@ -209,6 +269,29 @@ export const torrentApi = {
 }
 
 export const approvalApi = {
+  confirmDownload: (
+    candidateId: string,
+    launchMode: DownloadLaunchMode,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) =>
+    request<ConfirmDownloadResponse>(
+      `/api/candidates/${encodeURIComponent(candidateId)}/confirm-download`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          acknowledges_hnr: true,
+          acknowledges_seeding: true,
+          acknowledges_plan_only: true,
+          launch_mode: launchMode,
+        }),
+        signal,
+      },
+    ),
   create: (candidateId: string, expiresInMinutes: number) =>
     request<ApprovalRequest>(
       `/api/candidates/${encodeURIComponent(candidateId)}/approval-requests`,
@@ -220,7 +303,7 @@ export const approvalApi = {
     ),
   list: (candidateId?: string) =>
     request<ApprovalRequest[]>(
-      `/api/approval-requests${candidateId ? `?${queryString({ candidate_id: candidateId })}` : ''}`,
+      `/api/approval-requests?${queryString({ candidate_id: candidateId })}`,
     ),
   get: (approvalId: string) =>
     request<ApprovalRequest>(`/api/approval-requests/${encodeURIComponent(approvalId)}`),
@@ -325,6 +408,11 @@ export const executionApi = {
     ),
   get: (executionId: string) =>
     request<DownloadExecution>(`/api/download-executions/${encodeURIComponent(executionId)}`),
+  downloadJob: (executionId: string, signal?: AbortSignal) =>
+    request<DownloadJob>(
+      `/api/download-executions/${encodeURIComponent(executionId)}/download-job`,
+      { signal },
+    ),
   reconcile: (executionId: string, reason?: string) =>
     request<DownloadExecution>(
       `/api/download-executions/${encodeURIComponent(executionId)}/reconcile`,

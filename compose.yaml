@@ -3,8 +3,32 @@ name: unin
 x-backend-environment: &backend_environment
   APP_ENV: production
   DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://unin:change-me-before-production@postgres:5432/unin}
+  UNIN_RUNTIME_CONFIG_DIR: /var/lib/unin
+
+x-backend-dns: &backend_dns
+  - 172.21.0.53
 
 services:
+  dns-forwarder:
+    image: cloudflare/cloudflared@sha256:21f3607baf2384c54d592b0efe76dd5f548c0dbc083e62fa22c7fac3923d077f
+    restart: unless-stopped
+    command:
+      - proxy-dns
+      - --address
+      - 0.0.0.0
+      - --port
+      - "53"
+      - --upstream
+      - https://1.1.1.1/dns-query
+      - --upstream
+      - https://1.0.0.1/dns-query
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      internal:
+        ipv4_address: 172.21.0.53
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -103,10 +127,16 @@ services:
       WORKER_HEARTBEAT_STALE_SECONDS: ${WORKER_HEARTBEAT_STALE_SECONDS:-30}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
     depends_on:
+      dns-forwarder:
+        condition: service_started
       postgres:
         condition: service_healthy
+    dns: *backend_dns
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - unin_auth_config:/var/lib/unin/auth
+      - unin_integration_config:/var/lib/unin/integrations
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
       interval: 10s
@@ -175,6 +205,9 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+    dns: *backend_dns
+    volumes:
+      - unin_integration_config:/var/lib/unin/integrations:ro
     healthcheck:
       test: ["CMD", "python", "-m", "app.workers.healthcheck"]
       interval: 10s
@@ -237,6 +270,9 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+    dns: *backend_dns
+    volumes:
+      - unin_integration_config:/var/lib/unin/integrations:ro
     read_only: true
     tmpfs: [/tmp]
     networks: [internal]
@@ -281,6 +317,9 @@ services:
       QB_ALLOWED_SAVE_PATHS: ${QB_ALLOWED_SAVE_PATHS:-}
       QB_PLAN_TAGS: ${QB_PLAN_TAGS:-}
       QB_TARGET_INSTANCE_REF: ${QB_TARGET_INSTANCE_REF:-qb-primary}
+      AVISTAZ_FORBIDDEN_QB_VERSIONS: ${AVISTAZ_FORBIDDEN_QB_VERSIONS:-}
+      APPROVAL_PREFLIGHT_MAX_AGE_SECONDS: ${APPROVAL_PREFLIGHT_MAX_AGE_SECONDS:-300}
+      MAX_CANDIDATE_SIZE_BYTES: ${MAX_CANDIDATE_SIZE_BYTES:-}
       DOWNLOAD_EXECUTION_LEASE_SECONDS: ${DOWNLOAD_EXECUTION_LEASE_SECONDS:-300}
       DOWNLOAD_EXECUTION_LEASE_RENEW_INTERVAL_SECONDS: ${DOWNLOAD_EXECUTION_LEASE_RENEW_INTERVAL_SECONDS:-60}
       DOWNLOAD_EXECUTION_RETRY_BASE_SECONDS: ${DOWNLOAD_EXECUTION_RETRY_BASE_SECONDS:-30}
@@ -294,6 +333,9 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+    dns: *backend_dns
+    volumes:
+      - unin_integration_config:/var/lib/unin/integrations:ro
     read_only: true
     tmpfs: [/tmp]
     networks: [internal]
@@ -328,6 +370,9 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+    dns: *backend_dns
+    volumes:
+      - unin_integration_config:/var/lib/unin/integrations:ro
     read_only: true
     tmpfs: [/tmp]
     networks: [internal]
@@ -340,7 +385,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-9527}:80"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
       interval: 10s
@@ -355,6 +400,11 @@ services:
 networks:
   internal:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
 
 volumes:
   postgres_data:
+  unin_auth_config:
+  unin_integration_config:

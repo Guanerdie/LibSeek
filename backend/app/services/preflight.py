@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from app.adapters.base import ReadOnlyDownloaderAdapter
 from app.core.config import Settings
+from app.core.pt_site_rules import AVISTAZ_DEFAULT_HNR_DAYS, effective_hnr_rule
 from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import PreflightStatus
@@ -30,6 +31,7 @@ PREFLIGHT_CHECK_CODES = (
     "CANDIDATE_SEEDERS",
     "HNR_KNOWN",
 )
+PREFLIGHT_RECENT_TORRENT_LIMIT = 200
 
 
 def preflight_policy_fingerprint(settings: Settings) -> str:
@@ -38,7 +40,7 @@ def preflight_policy_fingerprint(settings: Settings) -> str:
         {host.strip().casefold() for host in settings.qb_allowed_hosts if host.strip()}
     )
     policy = {
-        "version": 2,
+        "version": 5,
         "downloader": "qbittorrent",
         "base_url": normalized_base_url,
         "target_instance_ref": settings.qb_target_instance_ref,
@@ -50,7 +52,16 @@ def preflight_policy_fingerprint(settings: Settings) -> str:
         "save_path_ref": settings.qb_save_path_ref,
         "plan_tags": list(settings.qb_plan_tags),
         "max_candidate_size_bytes": settings.max_candidate_size_bytes,
+        "qb_query_policy": {
+            "duplicate_release_recent_limit": PREFLIGHT_RECENT_TORRENT_LIMIT,
+        },
         "avistaz_forbidden_qb_versions": sorted(settings.avistaz_forbidden_qb_versions),
+        "pt_site_hnr_policy": {
+            "avistaz": {
+                "applies": True,
+                "minimum_seeding_days": AVISTAZ_DEFAULT_HNR_DAYS,
+            }
+        },
         "preflight_max_age_seconds": settings.approval_preflight_max_age_seconds,
     }
     canonical = json.dumps(
@@ -139,7 +150,12 @@ async def evaluate_preflight(
     policy_fingerprint = preflight_policy_fingerprint(settings)
     checks: list[PreflightCheck] = []
     application_version: str | None = None
-    torrents: list[QbTorrent] | None = None
+    hash_matches: list[QbTorrent] | None = None
+    recent_torrents: list[QbTorrent] | None = None
+    has_active_seeding: bool | None = None
+    hash_lookup_error: str | None = None
+    recent_lookup_error: str | None = None
+    active_seeding_error: str | None = None
     categories: dict[str, QbCategory] | None = None
 
     try:
@@ -193,10 +209,27 @@ async def evaluate_preflight(
                     error_code=exc.error_code,
                 )
             )
+        if snapshot.info_hash:
+            try:
+                hash_matches = await adapter.find_torrents_by_hashes(
+                    (snapshot.info_hash,)
+                )
+            except AppError as exc:
+                hash_matches = None
+                hash_lookup_error = exc.error_code
+        if snapshot.size_bytes is not None:
+            try:
+                recent_torrents = await adapter.list_recent_torrents(
+                    PREFLIGHT_RECENT_TORRENT_LIMIT
+                )
+            except AppError as exc:
+                recent_torrents = None
+                recent_lookup_error = exc.error_code
         try:
-            torrents = await adapter.list_torrents()
-        except AppError:
-            torrents = None
+            has_active_seeding = await adapter.has_active_seeding()
+        except AppError as exc:
+            has_active_seeding = None
+            active_seeding_error = exc.error_code
         try:
             categories = await adapter.get_categories()
         except AppError:
@@ -204,13 +237,31 @@ async def evaluate_preflight(
 
     checks.append(_avistaz_version_check(application_version, settings))
     checks.append(_category_check(categories, settings.qb_target_category))
-    checks.append(_info_hash_check(torrents, snapshot.info_hash))
-    checks.append(_duplicate_release_check(torrents, snapshot))
+    checks.append(
+        _info_hash_check(
+            hash_matches,
+            snapshot.info_hash,
+            error_code=hash_lookup_error,
+        )
+    )
+    checks.append(
+        _duplicate_release_check(
+            recent_torrents,
+            snapshot,
+            sample_limit=PREFLIGHT_RECENT_TORRENT_LIMIT,
+            error_code=recent_lookup_error,
+        )
+    )
     checks.append(_save_path_check(settings))
     checks.append(_size_limit_check(snapshot.size_bytes, settings.max_candidate_size_bytes))
-    checks.append(_active_seeding_check(torrents))
+    checks.append(
+        _active_seeding_check(
+            has_active_seeding,
+            error_code=active_seeding_error,
+        )
+    )
     checks.append(_candidate_seeders_check(snapshot.seeders))
-    checks.append(_hnr_check(snapshot.hit_and_run))
+    checks.append(_hnr_check(snapshot.site_id, snapshot.hit_and_run))
 
     statuses = {check.status for check in checks}
     overall = next(
@@ -279,9 +330,10 @@ def _category_check(
     if target_category not in categories:
         return _check(
             "TARGET_CATEGORY",
-            PreflightStatus.BLOCKED,
-            "qBittorrent 中不存在目标分类",
+            PreflightStatus.WARNING,
+            "qBittorrent 中尚不存在目标分类，下载提交时将自动创建",
             category=target_category,
+            will_create_on_submit=True,
         )
     return _check(
         "TARGET_CATEGORY",
@@ -291,11 +343,27 @@ def _category_check(
     )
 
 
-def _info_hash_check(torrents: list[QbTorrent] | None, info_hash: str | None) -> PreflightCheck:
+def _info_hash_check(
+    torrents: list[QbTorrent] | None,
+    info_hash: str | None,
+    *,
+    error_code: str | None,
+) -> PreflightCheck:
     if not info_hash:
-        return _check("DUPLICATE_INFO_HASH", PreflightStatus.UNKNOWN, "候选没有可校验的 info_hash")
+        return _check(
+            "DUPLICATE_INFO_HASH",
+            PreflightStatus.WARNING,
+            "候选未提供 info_hash，将在写入前从种子文件校验",
+            deferred_validation="TORRENT_FILE",
+            duplicate_check_deferred=True,
+        )
     if torrents is None:
-        return _check("DUPLICATE_INFO_HASH", PreflightStatus.UNKNOWN, "无法读取 qBittorrent 任务")
+        return _check(
+            "DUPLICATE_INFO_HASH",
+            PreflightStatus.UNKNOWN,
+            "无法按 info_hash 查询 qBittorrent 任务",
+            **({"error_code": error_code} if error_code else {}),
+        )
     normalized_hash = info_hash.casefold()
     duplicate = any(normalized_hash in item.identity_hashes for item in torrents)
     if duplicate:
@@ -308,19 +376,26 @@ def _info_hash_check(torrents: list[QbTorrent] | None, info_hash: str | None) ->
 
 
 def _duplicate_release_check(
-    torrents: list[QbTorrent] | None, snapshot: ApprovalCandidateSnapshot
+    torrents: list[QbTorrent] | None,
+    snapshot: ApprovalCandidateSnapshot,
+    *,
+    sample_limit: int,
+    error_code: str | None,
 ) -> PreflightCheck:
     if snapshot.size_bytes is None:
         return _check(
             "POSSIBLE_DUPLICATE_RELEASE",
-            PreflightStatus.UNKNOWN,
-            "候选大小未知，无法判断发布名和大小重复",
+            PreflightStatus.WARNING,
+            "候选大小未知，将在写入前从种子文件校验",
+            deferred_validation="TORRENT_FILE",
+            duplicate_check_deferred=True,
         )
     if torrents is None:
         return _check(
             "POSSIBLE_DUPLICATE_RELEASE",
             PreflightStatus.UNKNOWN,
-            "无法读取 qBittorrent 任务以判断疑似重复",
+            "无法读取近期 qBittorrent 任务以判断疑似重复",
+            **({"error_code": error_code} if error_code else {}),
         )
     duplicate = any(
         item.name.casefold().strip() == snapshot.release_title.casefold().strip()
@@ -332,11 +407,15 @@ def _duplicate_release_check(
             "POSSIBLE_DUPLICATE_RELEASE",
             PreflightStatus.WARNING,
             "存在相同发布名和大小的疑似重复任务",
+            sample_limit=sample_limit,
+            sample_count=len(torrents),
         )
     return _check(
         "POSSIBLE_DUPLICATE_RELEASE",
-        PreflightStatus.PASS,
-        "未发现相同发布名和大小的任务",
+        PreflightStatus.WARNING,
+        "近期任务样本中未发现相同发布名和大小的任务，未扫描完整任务库",
+        sample_limit=sample_limit,
+        sample_count=len(torrents),
     )
 
 
@@ -377,10 +456,16 @@ def is_allowed_save_path(target: str, roots: tuple[str, ...]) -> bool:
 
 
 def _size_limit_check(size: int | None, limit: int | None) -> PreflightCheck:
-    if size is None:
-        return _check("SIZE_LIMIT", PreflightStatus.UNKNOWN, "候选下载大小未知")
     if limit is None:
         return _check("SIZE_LIMIT", PreflightStatus.UNKNOWN, "尚未配置用户下载大小限制")
+    if size is None:
+        return _check(
+            "SIZE_LIMIT",
+            PreflightStatus.WARNING,
+            "候选下载大小未知，将在写入前从种子文件校验",
+            limit_bytes=limit,
+            deferred_validation="TORRENT_FILE",
+        )
     if size > limit:
         return _check(
             "SIZE_LIMIT",
@@ -398,22 +483,36 @@ def _size_limit_check(size: int | None, limit: int | None) -> PreflightCheck:
     )
 
 
-def _active_seeding_check(torrents: list[QbTorrent] | None) -> PreflightCheck:
-    if torrents is None:
-        return _check("ACTIVE_SEEDING", PreflightStatus.UNKNOWN, "无法读取当前做种任务")
-    count = sum(
-        item.progress == 1
-        and (item.upspeed > 0 or item.state.casefold() in {"uploading", "forcedup"})
-        for item in torrents
-    )
-    if count == 0:
+def _active_seeding_check(
+    has_active_seeding: bool | None,
+    *,
+    error_code: str | None,
+) -> PreflightCheck:
+    if has_active_seeding is None:
+        return _check(
+            "ACTIVE_SEEDING",
+            PreflightStatus.UNKNOWN,
+            "无法确认当前是否存在活跃做种任务",
+            **({"error_code": error_code} if error_code else {}),
+        )
+    if not has_active_seeding:
         return _check("ACTIVE_SEEDING", PreflightStatus.WARNING, "当前没有活跃做种任务", count=0)
-    return _check("ACTIVE_SEEDING", PreflightStatus.PASS, "当前存在活跃做种任务", count=count)
+    return _check(
+        "ACTIVE_SEEDING",
+        PreflightStatus.PASS,
+        "当前存在活跃做种任务",
+        count_at_least=1,
+    )
 
 
 def _candidate_seeders_check(seeders: int | None) -> PreflightCheck:
     if seeders is None:
-        return _check("CANDIDATE_SEEDERS", PreflightStatus.UNKNOWN, "候选做种数未知")
+        return _check(
+            "CANDIDATE_SEEDERS",
+            PreflightStatus.WARNING,
+            "候选做种数未知，将在下载执行前重新读取站点候选",
+            deferred_validation="PT_RESEARCH",
+        )
     if seeders == 0:
         return _check("CANDIDATE_SEEDERS", PreflightStatus.BLOCKED, "候选当前没有做种者")
     return _check(
@@ -421,12 +520,23 @@ def _candidate_seeders_check(seeders: int | None) -> PreflightCheck:
     )
 
 
-def _hnr_check(hit_and_run: bool | None) -> PreflightCheck:
-    if hit_and_run is None:
+def _hnr_check(site_id: str, hit_and_run: bool | None) -> PreflightCheck:
+    rule = effective_hnr_rule(site_id, hit_and_run)
+    if not rule.known:
         return _check("HNR_KNOWN", PreflightStatus.UNKNOWN, "候选 H&R 规则未知")
+    if rule.source == "SITE_DEFAULT":
+        return _check(
+            "HNR_KNOWN",
+            PreflightStatus.PASS,
+            "AvistaZ 使用站点默认 H&R 规则（7 天）",
+            hit_and_run=rule.applies,
+            source=rule.source,
+            minimum_seeding_days=rule.minimum_seeding_days,
+        )
     return _check(
         "HNR_KNOWN",
         PreflightStatus.PASS,
         "候选 H&R 信息已知",
-        hit_and_run=hit_and_run,
+        hit_and_run=rule.applies,
+        source=rule.source,
     )

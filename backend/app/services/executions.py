@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.pt_site_rules import effective_hnr_rule
 from app.core.security import sanitize_details, sanitize_public_text
 from app.core.time import utc_now
 from app.errors import AppError
@@ -42,10 +43,16 @@ from app.models.enums import (
 from app.schemas.executions import (
     DownloadExecutionCreateRequest,
     DownloadExecutionReconcileRequest,
+    DownloadExecutionResponse,
     ExecutionIntentCreateRequest,
 )
 from app.schemas.qbittorrent import QbTorrent
-from app.services.approvals import consume_approval, verify_download_plan, verify_snapshot
+from app.services.approvals import (
+    build_qb_plan_tags,
+    consume_approval,
+    verify_download_plan,
+    verify_snapshot,
+)
 from app.services.automation_policy import (
     get_current_policy,
     verify_automation_decision,
@@ -72,6 +79,7 @@ def qb_target_fingerprint(
     settings: Settings,
     plan: DownloadPlan,
     launch_mode: DownloadLaunchMode,
+    media_title: str,
 ) -> str:
     try:
         base_url = settings.qb_base_url_value()
@@ -89,10 +97,11 @@ def qb_target_fingerprint(
             "qBittorrent 执行目标尚未完整配置",
             status_code=409,
         )
+    expected_tags = build_qb_plan_tags(settings.qb_plan_tags, media_title)
     if (
         plan.save_path_ref != settings.qb_save_path_ref
         or plan.category != category
-        or tuple(plan.tags) != settings.qb_plan_tags
+        or tuple(plan.tags) != expected_tags
     ):
         raise AppError(
             "EXECUTION_TARGET_CONFIG_CHANGED",
@@ -158,7 +167,7 @@ async def create_execution_intent(
     automation_policy_revision_id: str | None = None,
     automation_decision_id: str | None = None,
 ) -> tuple[ExecutionIntent, str]:
-    _require_control_plane_enabled(settings)
+    require_execution_control_plane_enabled(settings)
     _require_origin_binding(
         origin,
         request.launch_mode,
@@ -168,12 +177,14 @@ async def create_execution_intent(
     approval = await _get_locked_approval(session, approval_id)
     now = utc_now()
     _require_approved(approval, session, now)
+    snapshot = verify_snapshot(approval)
     plan = await _get_verified_plan(session, approval)
     require_preflight_policy_current(plan.preflight_policy_fingerprint, settings)
     current_target_fingerprint = qb_target_fingerprint(
         settings,
         plan,
         request.launch_mode,
+        snapshot.media_title,
     )
 
     existing_execution = await session.scalar(
@@ -303,7 +314,7 @@ async def execute_approved_plan(
         )
         return existing, False
 
-    _require_control_plane_enabled(settings)
+    require_execution_control_plane_enabled(settings)
     approval = await _get_locked_approval(session, approval_id)
     now = utc_now()
 
@@ -323,6 +334,7 @@ async def execute_approved_plan(
         return existing, False
 
     _require_approved(approval, session, now)
+    snapshot = verify_snapshot(approval)
     plan = await _get_verified_plan(session, approval)
     require_preflight_policy_current(plan.preflight_policy_fingerprint, settings)
     approval_execution = await session.scalar(
@@ -388,7 +400,12 @@ async def execute_approved_plan(
             status_code=409,
         )
 
-    current_target_fingerprint = qb_target_fingerprint(settings, plan, intent.launch_mode)
+    current_target_fingerprint = qb_target_fingerprint(
+        settings,
+        plan,
+        intent.launch_mode,
+        snapshot.media_title,
+    )
     if (
         intent.approval_snapshot_hash != approval.snapshot_hash
         or intent.plan_hash != plan.plan_hash
@@ -917,11 +934,18 @@ async def finalize_download_submission(
     await _require_final_automation_submission_cas(
         session,
         execution,
-        snapshot_hit_and_run=snapshot.hit_and_run,
+        snapshot_hit_and_run=effective_hnr_rule(
+            snapshot.site_id, snapshot.hit_and_run
+        ).applies,
         settings=settings,
     )
     plan = await _get_verified_plan(session, approval)
-    if qb_target_fingerprint(settings, plan, execution.launch_mode) != (
+    if qb_target_fingerprint(
+        settings,
+        plan,
+        execution.launch_mode,
+        snapshot.media_title,
+    ) != (
         execution.qb_target_fingerprint
     ):
         raise AppError(
@@ -1361,6 +1385,71 @@ def requires_reconciliation(execution: DownloadExecution) -> bool:
     return execution.status in _RECONCILIATION_STATES
 
 
+def download_execution_response(
+    execution: DownloadExecution,
+) -> DownloadExecutionResponse:
+    return DownloadExecutionResponse(
+        id=execution.id,
+        approval_id=execution.approval_id,
+        intent_id=execution.intent_id,
+        status=execution.status,
+        requires_reconciliation=requires_reconciliation(execution),
+        approval_snapshot_hash=execution.approval_snapshot_hash,
+        plan_hash=execution.plan_hash,
+        qb_target_fingerprint=execution.qb_target_fingerprint,
+        launch_mode=execution.launch_mode,
+        attempts=execution.attempts,
+        max_attempts=execution.max_attempts,
+        next_retry_at=execution.next_retry_at,
+        locked_at=execution.locked_at,
+        actual_info_hash=execution.actual_info_hash,
+        actual_info_hash_v1=execution.actual_info_hash_v1,
+        actual_info_hash_v2=execution.actual_info_hash_v2,
+        actual_size_bytes=execution.actual_size_bytes,
+        actual_file_count=execution.actual_file_count,
+        validated_at=execution.validated_at,
+        submitted_at=execution.submitted_at,
+        verified_at=execution.verified_at,
+        error_code=execution.error_code,
+        error_message=execution.error_message,
+        requested_by=execution.requested_by,
+        requested_at=execution.requested_at,
+        reconciliation_requested_by=execution.reconciliation_requested_by,
+        reconciliation_requested_at=execution.reconciliation_requested_at,
+        reconciliation_reason=execution.reconciliation_reason,
+        created_at=execution.created_at,
+        updated_at=execution.updated_at,
+    )
+
+
+async def find_idempotent_candidate_execution(
+    session: AsyncSession,
+    candidate_id: str,
+    idempotency_key: str,
+    launch_mode: DownloadLaunchMode,
+) -> DownloadExecution | None:
+    key_digest = idempotency_key_digest(idempotency_key)
+    execution = await session.scalar(
+        select(DownloadExecution)
+        .where(DownloadExecution.idempotency_key_sha256 == key_digest)
+        .limit(1)
+    )
+    if execution is None:
+        return None
+    approval = await session.get(ApprovalRequest, execution.approval_id)
+    if (
+        approval is None
+        or approval.torrent_candidate_id != candidate_id
+        or execution.launch_mode != launch_mode
+    ):
+        raise AppError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Idempotency-Key 已被其他确认下载请求使用",
+            status_code=409,
+        )
+    return await verify_download_execution(session, execution)
+
+
 def idempotency_key_digest(value: str) -> str:
     if not _IDEMPOTENCY_KEY.fullmatch(value):
         raise AppError(
@@ -1651,7 +1740,7 @@ def _completion_time(observed: QbTorrent, now: datetime) -> datetime | None:
     return None
 
 
-def _require_control_plane_enabled(settings: Settings) -> None:
+def require_execution_control_plane_enabled(settings: Settings) -> None:
     if not settings.enable_download_execution_control_plane:
         raise AppError(
             "DOWNLOAD_EXECUTION_CONTROL_PLANE_DISABLED",

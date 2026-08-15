@@ -19,6 +19,8 @@ const ROLE_LABEL: Record<AuthRole, string> = {
 export const useAuthStore = defineStore('auth', () => {
   const principal = ref<Principal | null>(null)
   const csrfToken = ref<string | null>(null)
+  const adminInitialized = ref<boolean | null>(null)
+  const configurationComplete = ref(false)
   const initialized = ref(false)
   const loading = ref(false)
   const working = ref(false)
@@ -47,6 +49,13 @@ export const useAuthStore = defineStore('auth', () => {
     error.value = null
     principal.value = null
     try {
+      const setupStatus = await authApi.setupStatus()
+      adminInitialized.value = setupStatus.admin_initialized
+      configurationComplete.value = setupStatus.configuration_complete
+      if (!setupStatus.admin_initialized) {
+        replaceCsrfToken(null)
+        return
+      }
       const csrf = await authApi.csrf()
       replaceCsrfToken(csrf.csrf_token)
       try {
@@ -90,11 +99,33 @@ export const useAuthStore = defineStore('auth', () => {
       const response = await authApi.login(username, password)
       principal.value = { username: response.username, role: response.role }
       replaceCsrfToken(response.csrf_token)
+      adminInitialized.value = true
       initialized.value = true
       return true
     } catch (caught) {
       principal.value = null
       error.value = caught instanceof Error ? caught.message : '登录失败'
+      return false
+    } finally {
+      working.value = false
+    }
+  }
+
+  async function setupAdmin(username: string, password: string): Promise<boolean> {
+    working.value = true
+    error.value = null
+    try {
+      const response = await authApi.setup(username, password)
+      principal.value = { username: response.username, role: response.role }
+      replaceCsrfToken(response.csrf_token)
+      adminInitialized.value = true
+      configurationComplete.value = false
+      initialized.value = true
+      return true
+    } catch (caught) {
+      principal.value = null
+      replaceCsrfToken(null)
+      error.value = caught instanceof Error ? caught.message : '创建管理员失败'
       return false
     } finally {
       working.value = false
@@ -124,12 +155,15 @@ export const useAuthStore = defineStore('auth', () => {
     principal,
     roleLabel,
     csrfToken,
+    adminInitialized,
+    configurationComplete,
     initialized,
     loading,
     working,
     error,
     initialize,
     login,
+    setupAdmin,
     logout,
     expireSession,
     hasRole,

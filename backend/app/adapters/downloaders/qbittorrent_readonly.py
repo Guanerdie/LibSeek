@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Sequence
+from itertools import pairwise
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -16,6 +17,13 @@ from app.schemas.qbittorrent import QbCategory, QbTorrent, QbTorrentFile
 
 class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
     _INFO_HASH = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+    _TORRENT_PAGE_SIZE = 500
+    _TORRENT_MIN_PAGE_SIZE = 2
+    _TORRENT_MAX_ITEMS = 100_000
+    _HASH_QUERY_BATCH_SIZE = 75
+    _RECENT_TORRENT_MAX_ITEMS = 500
+    _FORCED_UP_PAGE_SIZE = 100
+    _FORCED_UP_MAX_ITEMS = 500
     _ALLOWED_REQUESTS = frozenset(
         {
             ("POST", "/api/v2/auth/login"),
@@ -56,7 +64,10 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
             transport=transport,
             follow_redirects=False,
             trust_env=False,
-            headers={"Accept": "application/json, text/plain;q=0.9"},
+            headers={
+                "Accept": "application/json, text/plain;q=0.9",
+                "Accept-Encoding": "identity",
+            },
         )
 
     def set_before_request_guard(
@@ -129,11 +140,322 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
         )
 
     async def list_torrents(self) -> list[QbTorrent]:
-        payload = self._json(await self._request("GET", "/api/v2/torrents/info"), list)
+        page_size = self._TORRENT_PAGE_SIZE
+        while True:
+            try:
+                return await self._list_torrents_paginated(page_size)
+            except AppError as exc:
+                if (
+                    exc.error_code != "QB_RESPONSE_TOO_LARGE"
+                    or page_size <= self._TORRENT_MIN_PAGE_SIZE
+                ):
+                    raise
+                page_size = max(self._TORRENT_MIN_PAGE_SIZE, page_size // 2)
+
+    async def find_torrents_by_hashes(
+        self, hashes: Collection[str]
+    ) -> list[QbTorrent]:
+        normalized: set[str] = set()
+        for value in hashes:
+            info_hash = self._normalize_hash(value)
+            normalized.add(info_hash)
+            if len(info_hash) == 64:
+                normalized.add(info_hash[:40])
+        ordered_hashes = sorted(normalized)
+        if not ordered_hashes:
+            return []
+
+        torrents: dict[str, QbTorrent] = {}
+        for start in range(0, len(ordered_hashes), self._HASH_QUERY_BATCH_SIZE):
+            batch = ordered_hashes[start : start + self._HASH_QUERY_BATCH_SIZE]
+            for torrent in await self._find_torrents_by_hash_batch(batch):
+                torrents[torrent.hash] = torrent
+        return list(torrents.values())
+
+    async def _find_torrents_by_hash_batch(
+        self, hashes: Sequence[str]
+    ) -> list[QbTorrent]:
         try:
-            return [QbTorrent.model_validate(item) for item in payload]
-        except ValidationError as exc:
-            raise self._validation_error("qBittorrent 种子字段校验失败", exc) from exc
+            payload = self._json(
+                await self._request(
+                    "GET",
+                    "/api/v2/torrents/info",
+                    params={
+                        "hashes": "|".join(hashes),
+                        # One extra result detects an upstream that ignored the filter.
+                        "limit": len(hashes) + 1,
+                    },
+                ),
+                list,
+            )
+        except AppError as exc:
+            if exc.error_code != "QB_RESPONSE_TOO_LARGE" or len(hashes) == 1:
+                raise
+            midpoint = len(hashes) // 2
+            return [
+                *await self._find_torrents_by_hash_batch(hashes[:midpoint]),
+                *await self._find_torrents_by_hash_batch(hashes[midpoint:]),
+            ]
+
+        page = self._parse_torrents(payload)
+        requested = set(hashes)
+        if len(page) > len(hashes) or any(
+            not requested.intersection(torrent.identity_hashes) for torrent in page
+        ):
+            raise AppError(
+                "QB_TORRENT_HASH_QUERY_INVALID",
+                "qBittorrent 未遵守 info_hash 查询条件",
+                status_code=502,
+            )
+        return page
+
+    async def list_recent_torrents(self, limit: int) -> list[QbTorrent]:
+        if not 1 <= limit <= self._RECENT_TORRENT_MAX_ITEMS:
+            raise AppError(
+                "QB_TORRENT_LIMIT_INVALID",
+                "qBittorrent 近期任务查询数量超出允许范围",
+                status_code=422,
+            )
+        payload = self._json(
+            await self._request(
+                "GET",
+                "/api/v2/torrents/info",
+                params={
+                    "sort": "added_on",
+                    "reverse": "true",
+                    "limit": limit,
+                    "offset": 0,
+                },
+            ),
+            list,
+        )
+        if len(payload) > limit:
+            raise AppError(
+                "QB_TORRENT_RECENT_QUERY_INVALID",
+                "qBittorrent 未遵守近期任务查询数量限制",
+                status_code=502,
+            )
+        torrents = self._parse_torrents(payload)
+        if any(
+            current.added_on < following.added_on
+            for current, following in pairwise(torrents)
+        ):
+            raise AppError(
+                "QB_TORRENT_RECENT_QUERY_INVALID",
+                "qBittorrent 未遵守近期任务排序条件",
+                status_code=502,
+            )
+        return torrents
+
+    async def has_active_seeding(self) -> bool:
+        fastest = await self._torrent_probe(
+            filter_name="seeding",
+            sort="upspeed",
+            reverse=True,
+            require_complete=True,
+        )
+        if fastest is not None and self._is_active_seeding(fastest):
+            return True
+
+        last_state = await self._torrent_probe(
+            filter_name="seeding",
+            sort="state",
+            reverse=True,
+            require_complete=True,
+        )
+        if last_state is not None and self._is_active_seeding(last_state):
+            return True
+
+        return await self._has_forced_up_seeding()
+
+    async def _has_forced_up_seeding(self) -> bool:
+        inspected = 0
+        boundary_hash: str | None = None
+        previous_state: str | None = None
+        while inspected < self._FORCED_UP_MAX_ITEMS:
+            overlap = 1 if boundary_hash is not None else 0
+            request_limit = min(
+                self._FORCED_UP_PAGE_SIZE,
+                self._FORCED_UP_MAX_ITEMS - inspected + overlap,
+            )
+            payload = self._json(
+                await self._request(
+                    "GET",
+                    "/api/v2/torrents/info",
+                    params={
+                        "filter": "seeding",
+                        "sort": "state",
+                        "reverse": "false",
+                        "limit": request_limit,
+                        "offset": max(0, inspected - overlap),
+                    },
+                ),
+                list,
+            )
+            if len(payload) > request_limit:
+                raise AppError(
+                    "QB_ACTIVE_SEEDING_QUERY_INVALID",
+                    "qBittorrent 未遵守活跃做种探测数量限制",
+                    status_code=502,
+                )
+            torrents = self._parse_torrents(payload)
+            if boundary_hash is not None:
+                if not torrents or torrents[0].hash != boundary_hash:
+                    raise AppError(
+                        "QB_ACTIVE_SEEDING_QUERY_CHANGED",
+                        "qBittorrent 做种任务在探测期间发生变化，请重试",
+                        status_code=409,
+                        retryable=True,
+                    )
+                torrents = torrents[1:]
+
+            for torrent in torrents:
+                state = torrent.state.casefold()
+                if previous_state is not None and state < previous_state:
+                    raise AppError(
+                        "QB_ACTIVE_SEEDING_QUERY_INVALID",
+                        "qBittorrent 未遵守做种任务状态排序条件",
+                        status_code=502,
+                    )
+                if torrent.progress != 1:
+                    raise AppError(
+                        "QB_ACTIVE_SEEDING_QUERY_INVALID",
+                        "qBittorrent 未遵守做种任务筛选条件",
+                        status_code=502,
+                    )
+                if self._is_active_seeding(torrent):
+                    return True
+                if state > "forcedup":
+                    return False
+                previous_state = state
+
+            inspected += len(torrents)
+            if len(payload) < request_limit:
+                return False
+            if not torrents:
+                raise AppError(
+                    "QB_ACTIVE_SEEDING_QUERY_CHANGED",
+                    "qBittorrent 做种任务在探测期间发生变化，请重试",
+                    status_code=409,
+                    retryable=True,
+                )
+            boundary_hash = torrents[-1].hash
+
+        raise AppError(
+            "QB_ACTIVE_SEEDING_QUERY_LIMIT",
+            "活跃做种检查达到有界扫描上限",
+            status_code=502,
+        )
+
+    async def _torrent_probe(
+        self,
+        *,
+        filter_name: str,
+        sort: str,
+        reverse: bool,
+        require_complete: bool = False,
+    ) -> QbTorrent | None:
+        payload = self._json(
+            await self._request(
+                "GET",
+                "/api/v2/torrents/info",
+                params={
+                    "filter": filter_name,
+                    "sort": sort,
+                    "reverse": str(reverse).lower(),
+                    "limit": 1,
+                    "offset": 0,
+                },
+            ),
+            list,
+        )
+        if len(payload) > 1:
+            raise AppError(
+                "QB_ACTIVE_SEEDING_QUERY_INVALID",
+                "qBittorrent 未遵守活跃做种探测数量限制",
+                status_code=502,
+            )
+        page = self._parse_torrents(payload)
+        torrent = page[0] if page else None
+        if require_complete and torrent is not None and torrent.progress != 1:
+            raise AppError(
+                "QB_ACTIVE_SEEDING_QUERY_INVALID",
+                "qBittorrent 未遵守做种任务筛选条件",
+                status_code=502,
+            )
+        return torrent
+
+    @staticmethod
+    def _is_active_seeding(torrent: QbTorrent) -> bool:
+        return torrent.progress == 1 and (
+            torrent.upspeed > 0
+            or torrent.state.casefold() in {"uploading", "forcedup"}
+        )
+
+    async def _list_torrents_paginated(self, page_size: int) -> list[QbTorrent]:
+        torrents: list[QbTorrent] = []
+        boundary_hash: str | None = None
+
+        while True:
+            # Re-read the previous boundary item so concurrent list changes fail closed.
+            offset = max(0, len(torrents) - 1)
+            payload = self._json(
+                await self._request(
+                    "GET",
+                    "/api/v2/torrents/info",
+                    params={
+                        "sort": "hash",
+                        "reverse": "false",
+                        "limit": page_size,
+                        "offset": offset,
+                    },
+                ),
+                list,
+            )
+            if len(payload) > page_size:
+                raise AppError(
+                    "QB_TORRENT_PAGINATION_INVALID",
+                    "qBittorrent 未遵守任务列表分页大小限制",
+                    status_code=502,
+                )
+            page = self._parse_torrents(payload)
+
+            page_hashes = [item.hash for item in page]
+            if any(
+                current >= following
+                for current, following in pairwise(page_hashes)
+            ):
+                raise self._unstable_torrent_list()
+
+            if boundary_hash is not None:
+                if not page or page[0].hash != boundary_hash:
+                    raise self._unstable_torrent_list()
+                page = page[1:]
+
+            if page and torrents and page[0].hash <= torrents[-1].hash:
+                raise self._unstable_torrent_list()
+            if len(torrents) + len(page) > self._TORRENT_MAX_ITEMS:
+                raise AppError(
+                    "QB_TORRENT_LIST_LIMIT_EXCEEDED",
+                    "qBittorrent 任务数量超过安全处理上限",
+                    status_code=502,
+                )
+            torrents.extend(page)
+
+            if len(payload) < page_size:
+                return torrents
+            if not torrents:
+                raise self._unstable_torrent_list()
+            boundary_hash = torrents[-1].hash
+
+    @staticmethod
+    def _unstable_torrent_list() -> AppError:
+        return AppError(
+            "QB_TORRENT_LIST_CHANGED",
+            "qBittorrent 任务列表在分页读取期间发生变化，请重试",
+            status_code=409,
+            retryable=True,
+        )
 
     async def get_torrent_files(self, info_hash: str) -> list[QbTorrentFile]:
         normalized = self._normalize_hash(info_hash)
@@ -323,6 +645,13 @@ class QbittorrentReadOnlyAdapter(ReadOnlyDownloaderAdapter):
             status_code=502,
             details={"invalid_fields": fields[:20]},
         )
+
+    @classmethod
+    def _parse_torrents(cls, payload: list[Any]) -> list[QbTorrent]:
+        try:
+            return [QbTorrent.model_validate(item) for item in payload]
+        except ValidationError as exc:
+            raise cls._validation_error("qBittorrent 种子字段校验失败", exc) from exc
 
     @classmethod
     def _normalize_hash(cls, value: str) -> str:

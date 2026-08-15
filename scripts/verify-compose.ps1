@@ -568,6 +568,24 @@ try {
         'QB_ALLOWED_SAVE_PATHS' `
         '' `
         'base-all-profiles'
+    Assert-EnvironmentValue `
+        $renderings['base-all-profiles'] `
+        'download-executor' `
+        'AVISTAZ_FORBIDDEN_QB_VERSIONS' `
+        '' `
+        'base-all-profiles'
+    Assert-EnvironmentValue `
+        $renderings['base-all-profiles'] `
+        'download-executor' `
+        'APPROVAL_PREFLIGHT_MAX_AGE_SECONDS' `
+        '300' `
+        'base-all-profiles'
+    Assert-EnvironmentValue `
+        $renderings['base-all-profiles'] `
+        'download-executor' `
+        'MAX_CANDIDATE_SIZE_BYTES' `
+        '' `
+        'base-all-profiles'
 }
 finally {
     foreach ($variableName in $variablesToRestore) {

@@ -1,6 +1,4 @@
 from app.adapters.downloaders import DisabledDownloaderAdapter
-from app.adapters.metadata import MockTmdbProvider
-from app.adapters.pt_sites import AvistaZMockAdapter
 from app.adapters.pt_sites.catalog import PtSiteCatalog, build_pt_site_catalog
 from app.core.config import Settings
 from app.schemas.adapters import AdapterManifest, PtSearchMode
@@ -86,7 +84,5 @@ def adapter_manifests(
         tmdb,
         *pt_sites,
         qbittorrent,
-        MockTmdbProvider().manifest(),
-        AvistaZMockAdapter().manifest(),
         DisabledDownloaderAdapter().manifest(),
     ]

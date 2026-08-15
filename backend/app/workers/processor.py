@@ -5,13 +5,12 @@ import inspect
 import math
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.base import MediaSourceAdapter, MetadataProvider, PtSiteAdapter
@@ -44,12 +43,15 @@ from app.schemas.adapters import (
 from app.schemas.entities import TorrentSearchCreateRequest
 from app.services.automation import (
     maybe_automate_identity,
-    maybe_automate_torrent_selection,
+    maybe_automate_torrent_search_after_identity,
     require_automatic_torrent_search_current,
 )
 from app.services.matching import MatchPreferences, score_metadata_match, score_torrent_candidate
 from app.services.workflow import (
+    auto_confirm_strict_identity,
+    cancel_active_metadata_resolution_jobs,
     cancel_metadata_resolution_job,
+    enqueue_metadata_resolution,
     identity_finalization_evidence,
     metadata_resolution_input_fingerprint,
     refresh_media_search_workflow_status,
@@ -78,11 +80,18 @@ class JobProcessor:
         pt_site_registry: PtSiteRegistry | None = None,
         lease_seconds: int = 300,
         lease_renew_interval_seconds: float = 60,
+        heartbeat_interval_seconds: float = 10,
+        country_checkpoint_batch_size: int = 100,
+        auto_enqueue_metadata_resolution: bool = False,
     ) -> None:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         if not 0 < lease_renew_interval_seconds < lease_seconds:
             raise ValueError("lease renewal interval must be shorter than the lease")
+        if heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat interval must be positive")
+        if country_checkpoint_batch_size <= 0:
+            raise ValueError("country checkpoint batch size must be positive")
         self.session_factory = session_factory
         self.worker_id = worker_id
         self.adapter_factory = adapter_factory
@@ -94,6 +103,9 @@ class JobProcessor:
             self.pt_site_registry = default_pt_site_registry(pt_site_factory)
         self.lease_seconds = lease_seconds
         self.lease_renew_interval_seconds = lease_renew_interval_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.country_checkpoint_batch_size = country_checkpoint_batch_size
+        self.auto_enqueue_metadata_resolution = auto_enqueue_metadata_resolution
 
     async def heartbeat(self) -> None:
         async with self.session_factory() as session:
@@ -179,45 +191,69 @@ class JobProcessor:
         if job is None:
             return False
         stop_renewal = asyncio.Event()
+        work = asyncio.create_task(self._run_claimed_job(job))
         renewal = asyncio.create_task(
             self._renew_lease_loop(job.id, job.lease_token, stop_renewal)
         )
         try:
-            if job.job_type == "DISCOVER_NEXTFIND" and job.run_id:
-                await self._run_discovery(job)
-                return True
-            if job.job_type.startswith("RESOLVE_METADATA:"):
-                await self._run_metadata_resolution(job)
-                return True
-            if job.job_type.startswith("TORRENT_SEARCH:"):
-                await self._run_torrent_search(job)
-                return True
-            await self._fail(
-                job.id,
-                AppError("UNKNOWN_JOB_TYPE", "无法识别的任务类型"),
-                lease_token=job.lease_token,
+            done, _ = await asyncio.wait(
+                {work, renewal}, return_when=asyncio.FIRST_COMPLETED
             )
-            return True
+            if work in done:
+                return await work
+
+            lease_maintained = await renewal
+            if not lease_maintained:
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                return True
+            return await work
         finally:
             stop_renewal.set()
-            renewal.cancel()
-            with suppress(asyncio.CancelledError):
-                await renewal
+            for task in (work, renewal):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(work, renewal, return_exceptions=True)
+
+    async def _run_claimed_job(self, job: Job) -> bool:
+        if job.job_type == "DISCOVER_NEXTFIND" and job.run_id:
+            await self._run_discovery(job)
+            return True
+        if job.job_type.startswith("RESOLVE_METADATA:"):
+            await self._run_metadata_resolution(job)
+            return True
+        if job.job_type.startswith("TORRENT_SEARCH:"):
+            await self._run_torrent_search(job)
+            return True
+        await self._fail(
+            job.id,
+            AppError("UNKNOWN_JOB_TYPE", "无法识别的任务类型"),
+            lease_token=job.lease_token,
+        )
+        return True
 
     async def _renew_lease_loop(
         self, job_id: str, lease_token: str | None, stop: asyncio.Event
-    ) -> None:
+    ) -> bool:
         if lease_token is None:
-            return
+            return False
+        loop = asyncio.get_running_loop()
+        next_renewal = loop.time() + self.lease_renew_interval_seconds
         while True:
+            timeout = min(
+                self.heartbeat_interval_seconds,
+                max(0.0, next_renewal - loop.time()),
+            )
             try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=self.lease_renew_interval_seconds
-                )
-                return
+                await asyncio.wait_for(stop.wait(), timeout=timeout)
+                return True
             except TimeoutError:
+                await self.heartbeat()
+                if loop.time() < next_renewal:
+                    continue
                 if not await self.renew_lease(job_id, lease_token):
-                    return
+                    return False
+                next_renewal = loop.time() + self.lease_renew_interval_seconds
 
     async def renew_lease(self, job_id: str, lease_token: str) -> bool:
         async with self.session_factory() as session:
@@ -245,6 +281,21 @@ class JobProcessor:
             result = await adapter.list_missing_media()
             items, warnings = await self._enrich_library_details(
                 adapter, result.items, result.warnings
+            )
+            items = await self._reuse_persisted_country_codes(items)
+            async def checkpoint_country_codes(
+                values: dict[tuple[MediaType, int], list[str]]
+            ) -> None:
+                await self._checkpoint_country_codes(
+                    job.id,
+                    job.lease_token,
+                    values,
+                )
+
+            items, warnings = await self._enrich_country_codes(
+                items,
+                warnings,
+                checkpoint=checkpoint_country_codes,
             )
             if job.run_id is not None:
                 await self._complete_discovery(
@@ -428,19 +479,20 @@ class JobProcessor:
                     media.local_episode_matrix,
                     media.missing_episodes,
                 )
+            stored_matches: list[MetadataMatch] = []
             for rank, (candidate, match) in enumerate(ranked, start=1):
-                session.add(
-                    MetadataMatch(
-                        media_id=media.id,
-                        resolution_job_id=job.id,
-                        tmdb_id=candidate.tmdb_id,
-                        rank=rank,
-                        score=match.score,
-                        match_reasons=match.reasons,
-                        conflicts=match.conflicts,
-                        candidate_snapshot=candidate.model_dump(mode="json"),
-                    )
+                stored_match = MetadataMatch(
+                    media_id=media.id,
+                    resolution_job_id=job.id,
+                    tmdb_id=candidate.tmdb_id,
+                    rank=rank,
+                    score=match.score,
+                    match_reasons=match.reasons,
+                    conflicts=match.conflicts,
+                    candidate_snapshot=candidate.model_dump(mode="json"),
                 )
+                stored_matches.append(stored_match)
+                session.add(stored_match)
             job.status = JobStatus.SUCCEEDED
             job.locked_at = None
             job.locked_by = None
@@ -449,6 +501,28 @@ class JobProcessor:
             job.error_message = None
             media.workflow_status = WorkflowStatus.IDENTITY_REVIEW
             media.metadata_status = MetadataStatus.NEEDS_CONFIRMATION
+            await session.flush()
+            strict_review = await auto_confirm_strict_identity(
+                session,
+                media,
+                stored_matches,
+                resolution_job_id=job.id,
+            )
+            review = strict_review
+            if review is None:
+                review = await maybe_automate_identity(
+                    session,
+                    job=job,
+                    media=media,
+                    settings=get_settings(),
+                )
+            else:
+                await maybe_automate_torrent_search_after_identity(
+                    session,
+                    media=media,
+                    trigger_created_at=review.created_at,
+                    settings=get_settings(),
+                )
             session.add(
                 AuditEvent(
                     event_type="METADATA_CANDIDATES_READY",
@@ -457,16 +531,10 @@ class JobProcessor:
                     sanitized_details={
                         "candidate_count": len(ranked),
                         "used_exact_tmdb_id": media.tmdb_id is not None,
-                        "manual_confirmation_required": True,
+                        "manual_confirmation_required": review is None,
+                        "strict_auto_confirmed": strict_review is not None,
                     },
                 )
-            )
-            await session.flush()
-            await maybe_automate_identity(
-                session,
-                job=job,
-                media=media,
-                settings=get_settings(),
             )
             await session.commit()
 
@@ -525,7 +593,7 @@ class JobProcessor:
                     )
                 if review is None:
                     raise AppError(
-                        "IDENTITY_CONFIRMATION_REQUIRED", "影视身份尚未人工确认", status_code=409
+                        "IDENTITY_CONFIRMATION_REQUIRED", "影视身份尚未确认", status_code=409
                     )
                 metadata = MetadataRecord.model_validate(review.candidate_snapshot)
                 requested = self._torrent_search_request_from_snapshot(
@@ -651,22 +719,31 @@ class JobProcessor:
             )
         if PtSearchMode.TEXT in search_modes:
             text_values = [
-                ("ENGLISH_TITLE_YEAR", metadata.english_title),
-                ("ORIGINAL_TITLE_YEAR", metadata.original_title),
+                ("ENGLISH_TITLE", metadata.english_title),
+                ("ORIGINAL_TITLE", metadata.original_title),
                 (
                     "CHINESE_OR_ALIAS",
                     metadata.chinese_title or next(iter(metadata.aliases), None),
                 ),
+                ("CANONICAL_TITLE", metadata.title),
             ]
             seen_queries: set[str] = set()
             for name, value in text_values:
                 if not value:
                     continue
-                query = f"{value} {metadata.year}" if metadata.year else value
-                if query.casefold() in seen_queries:
-                    continue
-                seen_queries.add(query.casefold())
-                strategies.append((name, TorrentSearchRequest(search=query, **common)))
+                queries = (
+                    [(f"{name}_YEAR", f"{value} {metadata.year}")]
+                    if metadata.year
+                    else []
+                )
+                queries.append((name, value))
+                for strategy_name, query in queries:
+                    if query.casefold() in seen_queries:
+                        continue
+                    seen_queries.add(query.casefold())
+                    strategies.append(
+                        (strategy_name, TorrentSearchRequest(search=query, **common))
+                    )
         log: list[dict[str, object]] = []
         for name, request in strategies:
             if before_request is not None:
@@ -860,14 +937,6 @@ class JobProcessor:
                     },
                 )
             )
-            await session.flush()
-            await maybe_automate_torrent_selection(
-                session,
-                job=job,
-                run=run,
-                media=media,
-                settings=get_settings(),
-            )
             await session.commit()
 
     @staticmethod
@@ -890,14 +959,12 @@ class JobProcessor:
             needs_details = (
                 item.media_type.value == "tv"
                 and item.tmdb_id is not None
-                and any(
+                and all(
                     value is None
                     for value in (
                         item.local_episodes,
-                        item.local_episode_matrix,
                         item.total_episodes,
                         item.aired_episodes,
-                        item.missing_episodes,
                     )
                 )
             )
@@ -944,6 +1011,186 @@ class JobProcessor:
             enriched.append(item.model_copy(update=updates))
         return enriched, result_warnings
 
+    async def _enrich_country_codes(
+        self,
+        items: list[MediaItemData],
+        warnings: list[DiscoveryWarning],
+        *,
+        checkpoint: Callable[
+            [dict[tuple[MediaType, int], list[str]]], Awaitable[None]
+        ]
+        | None = None,
+    ) -> tuple[list[MediaItemData], list[DiscoveryWarning]]:
+        pending_keys: list[tuple[MediaType, int]] = []
+        seen_keys: set[tuple[MediaType, int]] = set()
+        for item in items:
+            if item.country_codes is not None or item.tmdb_id is None:
+                continue
+            key = (item.media_type, item.tmdb_id)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                pending_keys.append(key)
+        if not pending_keys:
+            return items, warnings
+
+        result_warnings = list(warnings)
+        if self.metadata_provider_factory is None:
+            result_warnings.append(
+                DiscoveryWarning(
+                    error_code="COUNTRY_METADATA_UNAVAILABLE",
+                    message="TMDB 未启用，部分影视的国家/地区暂时未知",
+                )
+            )
+            return items, result_warnings
+
+        provider: MetadataProvider | None = None
+        try:
+            try:
+                provider = self.metadata_provider_factory()
+            except AppError as exc:
+                if exc.error_code not in {"TMDB_LIVE_DISABLED", "TMDB_NOT_CONFIGURED"}:
+                    raise
+                result_warnings.append(
+                    DiscoveryWarning(
+                        error_code="COUNTRY_METADATA_UNAVAILABLE",
+                        message="TMDB 未启用，部分影视的国家/地区暂时未知",
+                    )
+                )
+                return items, result_warnings
+
+            country_codes_by_key: dict[tuple[MediaType, int], list[str] | None] = {}
+            checkpoint_values: dict[tuple[MediaType, int], list[str]] = {}
+            for index, (media_type, tmdb_id) in enumerate(pending_keys, start=1):
+                try:
+                    country_codes_by_key[(media_type, tmdb_id)] = (
+                        await provider.get_country_codes(media_type, tmdb_id)
+                    )
+                except AppError as exc:
+                    if exc.error_code != "TMDB_NOT_FOUND":
+                        raise
+                    result_warnings.append(
+                        DiscoveryWarning(
+                            error_code="COUNTRY_METADATA_ISOLATED",
+                            message="单个影视的国家/地区无法确认，已保留为未知",
+                        )
+                    )
+                    country_codes_by_key[(media_type, tmdb_id)] = None
+                except (ValidationError, ValueError) as exc:
+                    raise AppError(
+                        "TMDB_VALIDATION_ERROR",
+                        "TMDB 国家/地区字段校验失败",
+                        status_code=502,
+                    ) from exc
+                country_codes = country_codes_by_key[(media_type, tmdb_id)]
+                if country_codes is not None:
+                    checkpoint_values[(media_type, tmdb_id)] = country_codes
+                if (
+                    checkpoint is not None
+                    and index % self.country_checkpoint_batch_size == 0
+                    and checkpoint_values
+                ):
+                    await checkpoint(checkpoint_values)
+                    checkpoint_values = {}
+
+            if checkpoint is not None and checkpoint_values:
+                await checkpoint(checkpoint_values)
+
+            enriched: list[MediaItemData] = []
+            for item in items:
+                if item.country_codes is not None or item.tmdb_id is None:
+                    enriched.append(item)
+                    continue
+                country_codes = country_codes_by_key[(item.media_type, item.tmdb_id)]
+                enriched.append(item.model_copy(update={"country_codes": country_codes}))
+            return enriched, result_warnings
+        finally:
+            await self._close_adapter(provider)
+
+    async def _checkpoint_country_codes(
+        self,
+        job_id: str,
+        lease_token: str | None,
+        values: dict[tuple[MediaType, int], list[str]],
+    ) -> None:
+        if not values:
+            return
+        async with self.session_factory() as session:
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None or not self._owns_lease(job, lease_token):
+                raise AppError(
+                    "JOB_LEASE_LOST",
+                    "任务租约已失效",
+                    status_code=409,
+                    retryable=True,
+                )
+            for (media_type, tmdb_id), country_codes in values.items():
+                await session.execute(
+                    update(MediaItem)
+                    .where(
+                        MediaItem.media_type == media_type,
+                        MediaItem.tmdb_id == tmdb_id,
+                        MediaItem.country_codes.is_(None),
+                    )
+                    .values(country_codes=country_codes)
+                )
+            await session.commit()
+
+    async def _reuse_persisted_country_codes(
+        self, items: list[MediaItemData]
+    ) -> list[MediaItemData]:
+        unresolved = [item for item in items if item.country_codes is None]
+        if not unresolved:
+            return items
+
+        tmdb_ids = {item.tmdb_id for item in unresolved if item.tmdb_id is not None}
+        source_item_ids = {
+            item.source_item_id for item in unresolved if item.tmdb_id is None
+        }
+        predicates = []
+        if tmdb_ids:
+            predicates.append(MediaItem.tmdb_id.in_(tmdb_ids))
+        if source_item_ids:
+            predicates.append(MediaItem.source_item_id.in_(source_item_ids))
+        if not predicates:
+            return items
+
+        async with self.session_factory() as session:
+            existing_items = (
+                await session.scalars(
+                    select(MediaItem).where(
+                        MediaItem.country_codes.is_not(None),
+                        or_(*predicates),
+                    )
+                )
+            ).all()
+
+        persisted: dict[tuple[str, str, int | str], list[str]] = {}
+        for existing in existing_items:
+            if existing.country_codes is None:
+                continue
+            identity: int | str = (
+                existing.tmdb_id
+                if existing.tmdb_id is not None
+                else existing.source_item_id
+            )
+            persisted[(existing.source, existing.media_type.value, identity)] = (
+                existing.country_codes
+            )
+
+        enriched: list[MediaItemData] = []
+        for item in items:
+            if item.country_codes is not None:
+                enriched.append(item)
+                continue
+            identity = item.tmdb_id if item.tmdb_id is not None else item.source_item_id
+            country_codes = persisted.get((item.source, item.media_type.value, identity))
+            enriched.append(
+                item
+                if country_codes is None
+                else item.model_copy(update={"country_codes": country_codes})
+            )
+        return enriched
+
     async def _complete_discovery(
         self,
         job_id: str,
@@ -965,6 +1212,7 @@ class JobProcessor:
                 return
             created_count = 0
             updated_count = 0
+            resolution_candidates: list[tuple[MediaItem, bool]] = []
             for item in unique_items.values():
                 if item.tmdb_id is not None:
                     statement = select(MediaItem).where(
@@ -982,12 +1230,49 @@ class JobProcessor:
                 existing = await session.scalar(statement)
                 values = item.model_dump(exclude={"discovered_at"})
                 if existing is None:
-                    session.add(MediaItem(**item.model_dump()))
+                    media = MediaItem(**item.model_dump())
+                    session.add(media)
+                    resolution_candidates.append((media, False))
                     created_count += 1
                 else:
+                    previous_identity_fingerprint = metadata_resolution_input_fingerprint(existing)
                     for key, value in values.items():
+                        if key == "country_codes" and value is None:
+                            continue
                         setattr(existing, key, value)
+                    if (
+                        previous_identity_fingerprint
+                        != metadata_resolution_input_fingerprint(existing)
+                    ):
+                        resolution_candidates.append((existing, True))
                     updated_count += 1
+            await session.flush()
+
+            metadata_resolution_queued_count = 0
+            metadata_resolution_deduplicated_count = 0
+            if self.auto_enqueue_metadata_resolution:
+                for media, identity_input_changed in resolution_candidates:
+                    if media.discovery_status.casefold() != "missing":
+                        continue
+                    if await identity_finalization_evidence(session, media) is not None:
+                        continue
+                    if identity_input_changed:
+                        cancelled_count = await cancel_active_metadata_resolution_jobs(
+                            session,
+                            media.id,
+                            evidence="DISCOVERY_IDENTITY_INPUT_CHANGED",
+                        )
+                        if cancelled_count:
+                            await session.flush()
+                    _, deduplicated = await enqueue_metadata_resolution(
+                        session,
+                        media,
+                        max_attempts=job.max_attempts,
+                    )
+                    if deduplicated:
+                        metadata_resolution_deduplicated_count += 1
+                    else:
+                        metadata_resolution_queued_count += 1
             now = utc_now()
             job.status = JobStatus.SUCCEEDED
             job.locked_at = None
@@ -1012,6 +1297,12 @@ class JobProcessor:
                         "created_count": created_count,
                         "updated_count": updated_count,
                         "isolated_warning_count": len(warnings),
+                        "metadata_resolution_queued_count": (
+                            metadata_resolution_queued_count
+                        ),
+                        "metadata_resolution_deduplicated_count": (
+                            metadata_resolution_deduplicated_count
+                        ),
                     },
                 )
             )

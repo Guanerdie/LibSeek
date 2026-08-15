@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.base import ReadOnlyDownloaderAdapter
 from app.core.config import Settings
+from app.core.pt_site_rules import effective_hnr_rule
 from app.core.time import utc_now
 from app.errors import AppError
 from app.models.entities import (
@@ -106,6 +107,32 @@ class GuardedReadOnlyDownloader(ReadOnlyDownloaderAdapter):
         await self.guard()
         try:
             return await self.delegate.list_torrents()
+        except AppError as exc:
+            self._remember(exc)
+            raise
+
+    async def find_torrents_by_hashes(
+        self, hashes: Collection[str]
+    ) -> list[QbTorrent]:
+        await self.guard()
+        try:
+            return await self.delegate.find_torrents_by_hashes(hashes)
+        except AppError as exc:
+            self._remember(exc)
+            raise
+
+    async def list_recent_torrents(self, limit: int) -> list[QbTorrent]:
+        await self.guard()
+        try:
+            return await self.delegate.list_recent_torrents(limit)
+        except AppError as exc:
+            self._remember(exc)
+            raise
+
+    async def has_active_seeding(self) -> bool:
+        await self.guard()
+        try:
+            return await self.delegate.has_active_seeding()
         except AppError as exc:
             self._remember(exc)
             raise
@@ -410,7 +437,7 @@ class AutomationPreflightWorker:
                 "审批预检结果已被其他请求更新，当前结果已丢弃",
                 status_code=409,
             )
-        if snapshot.hit_and_run is None:
+        if not effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known:
             raise AppError("HNR_UNKNOWN", "H&R 信息未知，禁止自动预检", status_code=409)
         decision = await session.get(AutomationDecision, decision_id)
         if decision is None:

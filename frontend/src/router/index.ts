@@ -7,6 +7,7 @@ import AdaptersView from '../views/AdaptersView.vue'
 import AutomationView from '../views/AutomationView.vue'
 import ApprovalListView from '../views/ApprovalListView.vue'
 import ApprovalView from '../views/ApprovalView.vue'
+import ConfigurationView from '../views/ConfigurationView.vue'
 import DiscoveryView from '../views/DiscoveryView.vue'
 import DownloadJobDetailView from '../views/DownloadJobDetailView.vue'
 import DownloadJobListView from '../views/DownloadJobListView.vue'
@@ -19,7 +20,6 @@ import MediaImportCreateView from '../views/MediaImportCreateView.vue'
 import MediaImportDetailView from '../views/MediaImportDetailView.vue'
 import MediaImportListView from '../views/MediaImportListView.vue'
 import QbittorrentView from '../views/QbittorrentView.vue'
-import SystemView from '../views/SystemView.vue'
 import TorrentCandidatesView from '../views/TorrentCandidatesView.vue'
 
 declare module 'vue-router' {
@@ -33,7 +33,8 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', component: LoginView, meta: { public: true } },
-    { path: '/', component: SystemView },
+    { path: '/', redirect: '/media' },
+    { path: '/configuration', component: ConfigurationView, meta: { requiredRole: 'admin' } },
     { path: '/media', component: MediaView },
     { path: '/media/:id/identity', component: IdentityView },
     { path: '/media/:id/torrents', component: TorrentCandidatesView },
@@ -67,7 +68,7 @@ router.beforeEach(async (to) => {
 
   if (to.meta.public) {
     if (to.path === '/login' && auth.principal) {
-      return safeInternalRedirect(to.query.redirect) ?? '/'
+      return safeInternalRedirect(to.query.redirect) ?? '/media'
     }
     return true
   }
@@ -77,7 +78,7 @@ router.beforeEach(async (to) => {
   }
 
   if (to.meta.requiredRole && !auth.hasRole(to.meta.requiredRole)) {
-    return '/'
+    return '/media'
   }
 
   return true

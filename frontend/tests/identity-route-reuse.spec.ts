@@ -39,6 +39,7 @@ function media(id: string, title: string): MediaItem {
     title,
     original_title: title,
     year: 2026,
+    country_codes: null,
     poster_path: null,
     raw_type: 'tv',
     local_episodes: 2,

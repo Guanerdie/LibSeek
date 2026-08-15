@@ -20,6 +20,18 @@ def login_ok() -> httpx.Response:
     )
 
 
+def torrent_payload(index: int) -> dict[str, object]:
+    return {
+        "hash": f"{index:040x}",
+        "name": f"Release {index}",
+        "size": 2048 + index,
+        "progress": 1,
+        "ratio": 1,
+        "state": "uploading",
+        "added_on": 1_700_000_000 + index,
+    }
+
+
 def adapter(
     transport: httpx.AsyncBaseTransport, *, max_response_bytes: int = 10 * 1024 * 1024
 ) -> QbittorrentReadOnlyAdapter:
@@ -316,3 +328,428 @@ async def test_torrent_numeric_ranges_are_strict(field: str, value: object) -> N
         await client.aclose()
     assert caught.value.error_code == "QB_RESPONSE_INVALID"
     assert "Unsafe upstream" not in str(caught.value.details)
+
+
+@pytest.mark.asyncio
+async def test_torrent_list_uses_stable_overlapping_pages() -> None:
+    source = [torrent_payload(index) for index in range(7)]
+    observed_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        assert request.url.path == "/api/v2/torrents/info"
+        query = dict(request.url.params)
+        observed_queries.append(query)
+        assert query["sort"] == "hash"
+        assert query["reverse"] == "false"
+        offset = int(query["offset"])
+        limit = int(query["limit"])
+        return httpx.Response(200, json=source[offset : offset + limit])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._TORRENT_PAGE_SIZE = 3
+    try:
+        await client.authenticate()
+        torrents = await client.list_torrents()
+    finally:
+        await client.aclose()
+
+    assert [item.hash for item in torrents] == [f"{index:040x}" for index in range(7)]
+    assert [int(query["offset"]) for query in observed_queries] == [0, 2, 4, 6]
+    assert all(int(query["limit"]) == 3 for query in observed_queries)
+
+
+@pytest.mark.asyncio
+async def test_torrent_list_retries_with_smaller_pages_when_a_page_is_too_large() -> None:
+    source = [torrent_payload(index) for index in range(5)]
+    observed_limits: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        limit = int(request.url.params["limit"])
+        observed_limits.append(limit)
+        if limit > 2:
+            return httpx.Response(200, content=b"x" * 1001)
+        offset = int(request.url.params["offset"])
+        return httpx.Response(200, json=source[offset : offset + limit])
+
+    client = adapter(httpx.MockTransport(handler), max_response_bytes=1000)
+    client._TORRENT_PAGE_SIZE = 4
+    try:
+        await client.authenticate()
+        torrents = await client.list_torrents()
+    finally:
+        await client.aclose()
+
+    assert [item.hash for item in torrents] == [f"{index:040x}" for index in range(5)]
+    assert observed_limits == [4, 2, 2, 2, 2, 2]
+
+
+@pytest.mark.asyncio
+async def test_torrent_list_fails_closed_when_page_boundary_changes() -> None:
+    source = [torrent_payload(index) for index in range(4)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        if request.url.params["offset"] == "0":
+            return httpx.Response(200, json=source[:3])
+        return httpx.Response(200, json=source[:3])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._TORRENT_PAGE_SIZE = 3
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.list_torrents()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_TORRENT_LIST_CHANGED"
+    assert caught.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_torrent_list_rejects_unsorted_or_duplicate_pages() -> None:
+    source = [torrent_payload(2), torrent_payload(1)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        return httpx.Response(200, json=source)
+
+    client = adapter(httpx.MockTransport(handler))
+    client._TORRENT_PAGE_SIZE = 3
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.list_torrents()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_TORRENT_LIST_CHANGED"
+
+
+@pytest.mark.asyncio
+async def test_torrent_list_never_returns_a_truncated_safety_limit_result() -> None:
+    source = [torrent_payload(index) for index in range(5)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        offset = int(request.url.params["offset"])
+        limit = int(request.url.params["limit"])
+        return httpx.Response(200, json=source[offset : offset + limit])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._TORRENT_PAGE_SIZE = 3
+    client._TORRENT_MAX_ITEMS = 4
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.list_torrents()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_TORRENT_LIST_LIMIT_EXCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_find_torrents_by_hashes_uses_bounded_exact_query_batches() -> None:
+    source = {f"{index:040x}": torrent_payload(index) for index in range(1, 5)}
+    observed_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        query = dict(request.url.params)
+        observed_queries.append(query)
+        requested = query["hashes"].split("|")
+        return httpx.Response(200, json=[source[value] for value in requested])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._HASH_QUERY_BATCH_SIZE = 2
+    try:
+        await client.authenticate()
+        torrents = await client.find_torrents_by_hashes(
+            [f"{index:040X}" for index in (3, 1, 2, 1)]
+        )
+    finally:
+        await client.aclose()
+
+    assert {torrent.hash for torrent in torrents} == {
+        f"{index:040x}" for index in (1, 2, 3)
+    }
+    assert [query["hashes"] for query in observed_queries] == [
+        f"{1:040x}|{2:040x}",
+        f"{3:040x}",
+    ]
+    assert [query["limit"] for query in observed_queries] == ["3", "2"]
+    assert all("offset" not in query for query in observed_queries)
+
+
+@pytest.mark.asyncio
+async def test_find_torrents_by_hashes_rejects_an_ignored_filter() -> None:
+    unrelated = torrent_payload(99)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        return httpx.Response(200, json=[unrelated])
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.find_torrents_by_hashes([INFO_HASH])
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_TORRENT_HASH_QUERY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_find_torrents_by_hashes_queries_v2_truncated_alias() -> None:
+    v2_hash = "a" * 64
+    truncated = v2_hash[:40]
+    observed_hashes = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_hashes
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        observed_hashes = request.url.params["hashes"]
+        payload = torrent_payload(1)
+        payload["hash"] = truncated
+        payload["infohash_v2"] = v2_hash
+        return httpx.Response(200, json=[payload])
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        torrents = await client.find_torrents_by_hashes([v2_hash])
+    finally:
+        await client.aclose()
+
+    assert observed_hashes == f"{truncated}|{v2_hash}"
+    assert torrents[0].infohash_v2 == v2_hash
+
+
+@pytest.mark.asyncio
+async def test_list_recent_torrents_is_bounded_and_sorted_by_added_time() -> None:
+    source = [torrent_payload(index) for index in (4, 3, 2)]
+    observed_query: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal observed_query
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        observed_query = dict(request.url.params)
+        return httpx.Response(200, json=source)
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        torrents = await client.list_recent_torrents(3)
+    finally:
+        await client.aclose()
+
+    assert [torrent.hash for torrent in torrents] == [
+        f"{index:040x}" for index in (4, 3, 2)
+    ]
+    assert observed_query == {
+        "sort": "added_on",
+        "reverse": "true",
+        "limit": "3",
+        "offset": "0",
+    }
+
+
+@pytest.mark.asyncio
+async def test_has_active_seeding_stops_after_fastest_upload_probe_matches() -> None:
+    active = torrent_payload(1)
+    active["upspeed"] = 128
+    observed_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        query = dict(request.url.params)
+        observed_queries.append(query)
+        return httpx.Response(200, json=[active])
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        assert await client.has_active_seeding() is True
+    finally:
+        await client.aclose()
+
+    assert observed_queries == [
+        {
+            "filter": "seeding",
+            "sort": "upspeed",
+            "reverse": "true",
+            "limit": "1",
+            "offset": "0",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_has_active_seeding_probes_seeding_state_extremes() -> None:
+    inactive = torrent_payload(1)
+    inactive["state"] = "stalledUP"
+    inactive["upspeed"] = 0
+    uploading = torrent_payload(2)
+    uploading["state"] = "uploading"
+    uploading["upspeed"] = 0
+    observed_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        query = dict(request.url.params)
+        observed_queries.append(query)
+        if query["sort"] == "upspeed":
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[uploading])
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        assert await client.has_active_seeding() is True
+    finally:
+        await client.aclose()
+
+    assert observed_queries == [
+        {
+            "filter": "seeding",
+            "sort": "upspeed",
+            "reverse": "true",
+            "limit": "1",
+            "offset": "0",
+        },
+        {
+            "filter": "seeding",
+            "sort": "state",
+            "reverse": "true",
+            "limit": "1",
+            "offset": "0",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_has_active_seeding_finds_forced_up_after_checking_tasks() -> None:
+    checking = torrent_payload(1)
+    checking["state"] = "checkingUP"
+    checking["upspeed"] = 0
+    forced = torrent_payload(2)
+    forced["state"] = "forcedUP"
+    forced["upspeed"] = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        query = dict(request.url.params)
+        if query["sort"] == "upspeed":
+            return httpx.Response(200, json=[checking])
+        if query["reverse"] == "true":
+            return httpx.Response(200, json=[forced])
+        return httpx.Response(200, json=[checking, forced])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._FORCED_UP_PAGE_SIZE = 3
+    try:
+        await client.authenticate()
+        assert await client.has_active_seeding() is True
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_has_active_seeding_fails_when_forced_up_probe_is_truncated() -> None:
+    checking = [torrent_payload(index) for index in range(4)]
+    for item in checking:
+        item["state"] = "checkingUP"
+        item["upspeed"] = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        query = dict(request.url.params)
+        if query["sort"] == "upspeed" or query["reverse"] == "true":
+            return httpx.Response(200, json=[checking[0]])
+        offset = int(query["offset"])
+        limit = int(query["limit"])
+        return httpx.Response(200, json=checking[offset : offset + limit])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._FORCED_UP_PAGE_SIZE = 2
+    client._FORCED_UP_MAX_ITEMS = 3
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.has_active_seeding()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_ACTIVE_SEEDING_QUERY_LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_has_active_seeding_fails_closed_when_page_boundary_changes() -> None:
+    checking = [torrent_payload(index) for index in range(4)]
+    for item in checking:
+        item["state"] = "checkingUP"
+        item["upspeed"] = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        query = dict(request.url.params)
+        if query["sort"] == "upspeed" or query["reverse"] == "true":
+            return httpx.Response(200, json=[checking[0]])
+        if query["offset"] == "0":
+            return httpx.Response(200, json=checking[:2])
+        return httpx.Response(200, json=checking[2:])
+
+    client = adapter(httpx.MockTransport(handler))
+    client._FORCED_UP_PAGE_SIZE = 2
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.has_active_seeding()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_ACTIVE_SEEDING_QUERY_CHANGED"
+    assert caught.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_has_active_seeding_rejects_an_ignored_seeding_filter() -> None:
+    incomplete = torrent_payload(1)
+    incomplete["progress"] = 0.5
+    incomplete["state"] = "downloading"
+    incomplete["upspeed"] = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return login_ok()
+        if request.url.params["sort"] == "upspeed":
+            return httpx.Response(200, json=[incomplete])
+        return httpx.Response(200, json=[incomplete])
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.has_active_seeding()
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_ACTIVE_SEEDING_QUERY_INVALID"

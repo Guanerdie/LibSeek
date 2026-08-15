@@ -28,6 +28,7 @@ def test_example_dotenv_uses_supported_comma_separated_and_empty_values(
     assert settings.media_import_target_root_refs == ()
     assert settings.max_candidate_size_bytes is None
     assert settings.auth_material() is None
+    assert settings.tmdb_configured is False
 
 
 def test_tuple_settings_parse_compose_style_environment(

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.pt_site_rules import effective_hnr_rule, hnr_acknowledgement_required
 from app.core.security import sanitize_details
 from app.core.time import utc_now
 from app.errors import AppError
@@ -33,6 +34,60 @@ from app.schemas.approvals import (
     validate_internal_torrent_ref,
 )
 from app.services.preflight import PREFLIGHT_CHECK_CODES, preflight_policy_fingerprint
+
+QB_TAG_MAX_COUNT = 20
+QB_TAG_MAX_LENGTH = 100
+
+
+def media_title_qb_tag(media_title: str) -> str:
+    normalized = "".join(
+        "，" if character == "," else character if character.isprintable() else " "
+        for character in media_title
+    )
+    normalized = " ".join(normalized.split())[:QB_TAG_MAX_LENGTH].strip()
+    if not normalized:
+        raise AppError(
+            "QB_MEDIA_TITLE_TAG_INVALID",
+            "影视中文名无法生成有效的 qBittorrent 标签",
+            status_code=409,
+        )
+    return normalized
+
+
+def build_qb_plan_tags(
+    configured_tags: tuple[str, ...],
+    media_title: str,
+) -> tuple[str, ...]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in configured_tags:
+        tag = raw_tag.strip()
+        if (
+            not tag
+            or not tag.isprintable()
+            or "," in tag
+            or len(tag) > QB_TAG_MAX_LENGTH
+        ):
+            raise AppError(
+                "QB_PLAN_TAGS_INVALID",
+                "qBittorrent 固定标签配置无效",
+                status_code=409,
+            )
+        normalized_key = tag.casefold()
+        if normalized_key not in seen:
+            tags.append(tag)
+            seen.add(normalized_key)
+
+    media_tag = media_title_qb_tag(media_title)
+    if media_tag.casefold() not in seen:
+        tags.append(media_tag)
+    if len(tags) > QB_TAG_MAX_COUNT:
+        raise AppError(
+            "QB_PLAN_TAGS_INVALID",
+            "qBittorrent 标签数量超过限制，无法加入影视中文名",
+            status_code=409,
+        )
+    return tuple(tags)
 
 
 def snapshot_hash(snapshot: dict[str, object]) -> str:
@@ -99,7 +154,7 @@ def download_plan_hash(plan: DownloadPlan) -> str:
 
 
 def verify_download_plan(plan: DownloadPlan, approval: ApprovalRequest) -> DownloadPlan:
-    verify_snapshot(approval)
+    snapshot = verify_snapshot(approval)
     if plan.plan_hash != download_plan_hash(plan):
         raise AppError(
             "DOWNLOAD_PLAN_TAMPERED", "下载计划完整性校验失败", status_code=409
@@ -133,6 +188,16 @@ def verify_download_plan(plan: DownloadPlan, approval: ApprovalRequest) -> Downl
     ):
         raise AppError(
             "DOWNLOAD_PLAN_BINDING_INVALID", "下载计划预检策略绑定无效", status_code=409
+        )
+    expected_media_tag = media_title_qb_tag(snapshot.media_title).casefold()
+    if not any(
+        isinstance(tag, str) and tag.casefold() == expected_media_tag
+        for tag in plan.tags
+    ):
+        raise AppError(
+            "DOWNLOAD_PLAN_BINDING_INVALID",
+            "下载计划缺少当前影视中文名标签",
+            status_code=409,
         )
     return plan
 
@@ -201,6 +266,10 @@ async def create_approval_request(
         raise AppError("APPROVAL_TTL_TOO_LONG", "审批有效期超过系统上限", status_code=422)
     expires_at = now + timedelta(minutes=ttl)
     candidate = TorrentCandidate.model_validate(candidate_record.candidate_snapshot)
+    hnr_rule = effective_hnr_rule(candidate.site_id, candidate.hit_and_run)
+    candidate_warnings = list(candidate_record.warnings)
+    if hnr_rule.known:
+        candidate_warnings = [warning for warning in candidate_warnings if warning != "HNR_UNKNOWN"]
     immutable = ApprovalCandidateSnapshot(
         media_item_id=media.id,
         media_title=media.title,
@@ -224,10 +293,10 @@ async def create_approval_request(
             download_factor=candidate.download_factor,
             upload_factor=candidate.upload_factor,
         ),
-        hit_and_run=candidate.hit_and_run,
+        hit_and_run=hnr_rule.applies,
         match_score=candidate.match_score or candidate_record.match_score,
         match_reasons=list(candidate_record.match_reasons),
-        warnings=list(candidate_record.warnings),
+        warnings=candidate_warnings,
         requested_at=now,
         expires_at=expires_at,
     )
@@ -256,6 +325,93 @@ async def create_approval_request(
     )
     await session.flush()
     return approval
+
+
+async def get_or_create_pending_approval_request(
+    session: AsyncSession,
+    candidate_id: str,
+    request: ApprovalCreateRequest,
+    settings: Settings,
+    *,
+    actor: str,
+) -> tuple[ApprovalRequest, bool]:
+    """Reuse only an unexpired, compatible pending approval for a candidate."""
+    existing = await session.scalar(
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.torrent_candidate_id == candidate_id,
+            ApprovalRequest.status.in_(
+                (
+                    ApprovalStatus.PENDING,
+                    ApprovalStatus.APPROVED,
+                    ApprovalStatus.EXECUTING,
+                )
+            ),
+        )
+        .with_for_update()
+        .limit(1)
+    )
+    now = utc_now()
+    if _pending_approval_is_reusable(existing, request, now):
+        assert existing is not None
+        return existing, False
+
+    try:
+        approval = await create_approval_request(
+            session,
+            candidate_id,
+            request,
+            settings,
+            actor=actor,
+        )
+    except AppError as exc:
+        if exc.error_code != "APPROVAL_REQUEST_DUPLICATE":
+            raise
+        winner = await session.scalar(
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.torrent_candidate_id == candidate_id,
+                ApprovalRequest.status == ApprovalStatus.PENDING,
+            )
+            .with_for_update()
+            .limit(1)
+        )
+        if not _pending_approval_is_reusable(winner, request, utc_now()):
+            raise
+        assert winner is not None
+        return winner, False
+    return approval, True
+
+
+def _pending_approval_is_reusable(
+    approval: ApprovalRequest | None,
+    request: ApprovalCreateRequest,
+    now: datetime,
+) -> bool:
+    if (
+        approval is None
+        or approval.status != ApprovalStatus.PENDING
+        or _is_expired(approval, now)
+    ):
+        return False
+    verify_snapshot(approval)
+    validate_approval_create_request_compatibility(approval, request)
+    return True
+
+
+def validate_approval_create_request_compatibility(
+    approval: ApprovalRequest,
+    request: ApprovalCreateRequest,
+) -> None:
+    if request.expires_in_minutes is not None:
+        existing_ttl = _as_utc(approval.expires_at) - _as_utc(approval.requested_at)
+        requested_ttl = timedelta(minutes=request.expires_in_minutes)
+        if existing_ttl != requested_ttl:
+            raise AppError(
+                "APPROVAL_REQUEST_INCOMPATIBLE",
+                "该候选已有使用其他有效期的待审批请求",
+                status_code=409,
+            )
 
 
 async def get_approval_or_404(
@@ -344,6 +500,27 @@ async def save_preflight_result(
     return approval
 
 
+def validate_manual_approval_acknowledgements(
+    snapshot: ApprovalCandidateSnapshot,
+    request: ApprovalApproveRequest,
+) -> None:
+    hnr_ack_required = hnr_acknowledgement_required(snapshot.site_id)
+    if not (
+        request.acknowledges_seeding
+        and request.acknowledges_plan_only
+        and (request.acknowledges_hnr or not hnr_ack_required)
+    ):
+        raise AppError(
+            "APPROVAL_ACKNOWLEDGEMENTS_REQUIRED",
+            "批准前必须完成当前站点要求的做种和计划确认",
+            status_code=422,
+        )
+
+
+def preflight_is_manually_passable(result: PreflightResult) -> bool:
+    return result.overall_status in {PreflightStatus.PASS, PreflightStatus.WARNING}
+
+
 async def approve_request(
     session: AsyncSession,
     approval: ApprovalRequest,
@@ -354,18 +531,7 @@ async def approve_request(
 ) -> tuple[ApprovalRequest, DownloadPlan]:
     now = utc_now()
     snapshot = require_pending_approval(session, approval, now)
-    if not all(
-        (
-            request.acknowledges_hnr,
-            request.acknowledges_seeding,
-            request.acknowledges_plan_only,
-        )
-    ):
-        raise AppError(
-            "APPROVAL_ACKNOWLEDGEMENTS_REQUIRED",
-            "批准前必须确认 H&R、继续做种和仅生成计划三项声明",
-            status_code=422,
-        )
+    validate_manual_approval_acknowledgements(snapshot, request)
     if approval.preflight_result is None or approval.preflight_checked_at is None:
         raise AppError("PREFLIGHT_REQUIRED", "批准前必须完成下载预检", status_code=409)
     preflight = validate_preflight_result(approval.preflight_result)
@@ -391,7 +557,7 @@ async def approve_request(
             "下载预检策略配置已变化，请重新预检",
             status_code=409,
         )
-    if preflight.overall_status in {PreflightStatus.BLOCKED, PreflightStatus.UNKNOWN}:
+    if not preflight_is_manually_passable(preflight):
         raise AppError(
             "PREFLIGHT_NOT_PASSABLE",
             "预检包含 BLOCKED 或 UNKNOWN，禁止批准",
@@ -409,6 +575,7 @@ async def approve_request(
         season=snapshot.season,
         episodes=snapshot.episodes,
     )
+    hnr_rule = effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run)
     _transition(
         session,
         approval,
@@ -418,7 +585,9 @@ async def approve_request(
         reason=None,
         now=now,
         details={
-            "acknowledges_hnr": True,
+            "acknowledges_hnr": request.acknowledges_hnr,
+            "hnr_policy_source": hnr_rule.source,
+            "hnr_minimum_seeding_days": hnr_rule.minimum_seeding_days,
             "acknowledges_seeding": True,
             "acknowledges_plan_only": True,
         },
@@ -437,11 +606,22 @@ async def approve_request(
         release_title=snapshot.release_title,
         save_path_ref=settings.qb_save_path_ref,
         category=settings.qb_target_category,
-        tags=list(settings.qb_plan_tags),
+        tags=list(build_qb_plan_tags(settings.qb_plan_tags, snapshot.media_title)),
         estimated_size_bytes=snapshot.size_bytes,
         media_destination_plan=destination.model_dump(mode="json"),
         preflight_result=preflight.model_dump(mode="json"),
-        warnings=list(dict.fromkeys([*snapshot.warnings, *warning_codes])),
+        warnings=list(
+            dict.fromkeys(
+                [
+                    *(
+                        warning
+                        for warning in snapshot.warnings
+                        if not (hnr_rule.known and warning == "HNR_UNKNOWN")
+                    ),
+                    *warning_codes,
+                ]
+            )
+        ),
     )
     plan.plan_hash = download_plan_hash(plan)
     session.add(plan)
@@ -471,7 +651,7 @@ async def approve_request_automatically(
     decision_id: str,
 ) -> tuple[ApprovalRequest, DownloadPlan]:
     snapshot = require_pending_approval(session, approval)
-    if snapshot.hit_and_run is None:
+    if not effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known:
         raise AppError("HNR_UNKNOWN", "H&R 信息未知，禁止自动批准", status_code=409)
     if approval.preflight_result is None:
         raise AppError("PREFLIGHT_REQUIRED", "自动批准前必须完成下载预检", status_code=409)
@@ -487,7 +667,7 @@ async def approve_request_automatically(
         session,
         approval,
         ApprovalApproveRequest(
-            acknowledges_hnr=True,
+            acknowledges_hnr=hnr_acknowledgement_required(snapshot.site_id),
             acknowledges_seeding=True,
             acknowledges_plan_only=True,
         ),

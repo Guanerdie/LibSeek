@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 
 from app.models.enums import MediaType
 from app.schemas.adapters import (
@@ -49,6 +50,11 @@ class MetadataProvider(ABC):
 
     @abstractmethod
     async def get_external_ids(self, media_type: MediaType, tmdb_id: int) -> dict[str, str]: ...
+
+    @abstractmethod
+    async def get_country_codes(
+        self, media_type: MediaType, tmdb_id: int
+    ) -> list[str] | None: ...
 
     @abstractmethod
     async def get_tv_episode_matrix(self, tmdb_id: int) -> dict[int, list[int]] | None: ...
@@ -112,6 +118,35 @@ class ReadOnlyDownloaderAdapter(ABC):
 
     @abstractmethod
     async def list_torrents(self) -> list[QbTorrent]: ...
+
+    async def find_torrents_by_hashes(self, hashes: Collection[str]) -> list[QbTorrent]:
+        normalized: set[str] = set()
+        for value in hashes:
+            info_hash = value.casefold()
+            normalized.add(info_hash)
+            if len(info_hash) == 64:
+                normalized.add(info_hash[:40])
+        return [
+            torrent
+            for torrent in await self.list_torrents()
+            if normalized.intersection(torrent.identity_hashes)
+        ]
+
+    async def list_recent_torrents(self, limit: int) -> list[QbTorrent]:
+        if limit <= 0:
+            return []
+        torrents = await self.list_torrents()
+        return sorted(torrents, key=lambda torrent: torrent.added_on, reverse=True)[:limit]
+
+    async def has_active_seeding(self) -> bool:
+        return any(
+            torrent.progress == 1
+            and (
+                torrent.upspeed > 0
+                or torrent.state.casefold() in {"uploading", "forcedup"}
+            )
+            for torrent in await self.list_torrents()
+        )
 
     @abstractmethod
     async def get_torrent_files(self, info_hash: str) -> list[QbTorrentFile]: ...

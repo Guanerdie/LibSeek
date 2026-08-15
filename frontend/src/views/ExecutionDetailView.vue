@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -17,6 +17,21 @@ const canAdmin = computed(() => auth.hasRole('admin'))
 const canRequestReconciliation = computed(
   () => store.selected?.requires_reconciliation === true && store.selected.status !== 'RECONCILIATION_PENDING',
 )
+const executionErrorMessage = computed(() => {
+  const execution = store.selected
+  if (!execution) return ''
+  if (execution.error_code === 'AVISTAZ_TORRENT_FETCH_FORBIDDEN') {
+    const attempt = `第 ${execution.attempts}/${execution.max_attempts} 次`
+    if (execution.status === 'RETRY_WAIT') {
+      return `AvistaZ 返回 HTTP 403，已安排自动重试（${attempt}）`
+    }
+    if (execution.attempts >= execution.max_attempts) {
+      return `AvistaZ 返回 HTTP 403，自动重试次数已耗尽（${attempt}）`
+    }
+    return `AvistaZ 返回 HTTP 403，未安排自动重试（${attempt}）`
+  }
+  return execution.error_message || '服务端未提供错误说明'
+})
 
 watch(
   () => String(route.params.id),
@@ -26,10 +41,16 @@ watch(
   },
   { immediate: true },
 )
+onBeforeUnmount(() => store.cancelDownloadJobPolling())
 
 async function reconcile(): Promise<void> {
   if (!store.selected || !canRequestReconciliation.value || !canAdmin.value) return
   if (await store.reconcile(store.selected.id, reason.value)) reason.value = ''
+}
+
+function refresh(): void {
+  reason.value = ''
+  void store.load(String(route.params.id))
 }
 
 function formatBytes(value: number | null): string {
@@ -52,12 +73,37 @@ function formatBytes(value: number | null): string {
       title="执行详情"
       description="执行状态来自服务端记录；结果未知时必须人工对账，不能直接重试写入。"
     >
-      <RouterLink class="button secondary" to="/executions">返回执行列表</RouterLink>
+      <div class="header-actions">
+        <RouterLink class="button secondary" to="/executions">返回执行列表</RouterLink>
+        <button class="button secondary" type="button" :disabled="store.loading" @click="refresh">刷新详情</button>
+      </div>
     </PageHeader>
 
     <PageState :loading="store.loading" :error="store.selected ? null : store.error" />
     <div v-if="store.selected && store.error" class="notice-state warning-state">{{ store.error }}</div>
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
+    <div v-if="store.downloadJobLookupStatus === 'polling'" class="notice-state" role="status">
+      正在等待执行器创建关联下载任务…
+    </div>
+    <div v-else-if="store.downloadJob" class="notice-state success-state">
+      <span>关联下载任务已创建。</span>
+      <RouterLink class="button primary small" :to="`/download-jobs/${store.downloadJob.id}`">查看下载任务总结</RouterLink>
+    </div>
+    <div
+      v-else-if="store.downloadJobError"
+      class="notice-state warning-state"
+      role="status"
+    >
+      <span>{{ store.downloadJobError }}</span>
+      <button
+        v-if="store.selected"
+        class="button secondary small"
+        type="button"
+        @click="store.pollDownloadJobForExecution(store.selected.id, store.selected.status)"
+      >
+        重新查询
+      </button>
+    </div>
 
     <template v-if="store.selected && !store.loading">
       <section class="source-strip execution-source">
@@ -73,7 +119,7 @@ function formatBytes(value: number | null): string {
           <section class="approval-section">
             <span class="eyebrow">INTEGRITY</span><h2>计划与目标指纹</h2>
             <dl class="approval-facts execution-facts">
-              <div><dt>审批 ID</dt><dd class="mono">{{ store.selected.approval_id }}</dd></div>
+              <div><dt>审批 ID</dt><dd><RouterLink class="inline-record-link mono" :to="`/approvals/${store.selected.approval_id}`">{{ store.selected.approval_id }}</RouterLink></dd></div>
               <div><dt>Intent ID</dt><dd class="mono">{{ store.selected.intent_id }}</dd></div>
               <div><dt>审批快照</dt><dd class="mono">{{ store.selected.approval_snapshot_hash }}</dd></div>
               <div><dt>计划哈希</dt><dd class="mono">{{ store.selected.plan_hash }}</dd></div>
@@ -98,7 +144,7 @@ function formatBytes(value: number | null): string {
 
           <section v-if="store.selected.error_code || store.selected.error_message" class="approval-section">
             <span class="eyebrow">LAST ERROR</span><h2 class="error-text">{{ store.selected.error_code || '执行错误' }}</h2>
-            <p class="execution-error-message">{{ store.selected.error_message || '服务端未提供错误说明' }}</p>
+            <p class="execution-error-message">{{ executionErrorMessage }}</p>
           </section>
         </div>
 

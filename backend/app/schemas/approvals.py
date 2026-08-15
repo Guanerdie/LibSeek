@@ -6,8 +6,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.enums import ApprovalStatus, MediaType, PreflightStatus
+from app.models.enums import (
+    ApprovalStatus,
+    DownloadLaunchMode,
+    MediaType,
+    PreflightStatus,
+)
 from app.schemas.common import OrmModel
+from app.schemas.executions import DownloadExecutionResponse
 
 
 class PromotionSnapshot(BaseModel):
@@ -78,9 +84,18 @@ class ApprovalDecisionRequest(BaseModel):
 
 
 class ApprovalApproveRequest(ApprovalDecisionRequest):
-    acknowledges_hnr: bool
+    acknowledges_hnr: bool = False
     acknowledges_seeding: bool
     acknowledges_plan_only: bool
+
+
+class CandidateConfirmDownloadRequest(ApprovalCreateRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledges_hnr: bool = False
+    acknowledges_seeding: bool
+    acknowledges_plan_only: bool
+    launch_mode: DownloadLaunchMode = DownloadLaunchMode.START_IMMEDIATELY
 
 
 class ApprovalRejectRequest(ApprovalDecisionRequest):
@@ -168,6 +183,21 @@ class ApprovalResponse(BaseModel):
     preflight_result: PreflightResult | None
     preflight_checked_at: datetime | None
     events: list[ApprovalEventResponse] = Field(default_factory=list)
+
+
+class CandidateConfirmDownloadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal[
+        "EXECUTION_CREATED",
+        "EXECUTION_REPLAYED",
+        "PREFLIGHT_BLOCKED",
+    ]
+    approval: ApprovalResponse
+    preflight: PreflightResult
+    execution: DownloadExecutionResponse | None
+    approval_created: bool
+    execution_created: bool
 
 
 class DownloadPlanResponse(OrmModel):

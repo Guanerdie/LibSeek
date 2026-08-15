@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from app.models.enums import (
 from app.schemas.adapters import AdapterManifest, TorrentCandidate
 from app.schemas.approvals import (
     ApprovalApproveRequest,
+    ApprovalCandidateSnapshot,
     ApprovalCreateRequest,
     PreflightCheck,
     PreflightResult,
@@ -37,15 +39,20 @@ from app.schemas.approvals import (
 from app.schemas.qbittorrent import QbCategory, QbTorrent, QbTorrentFile
 from app.services.approvals import (
     approve_request,
+    approve_request_automatically,
+    build_qb_plan_tags,
     consume_approval,
     create_approval_request,
     download_plan_hash,
+    media_title_qb_tag,
+    preflight_is_manually_passable,
     snapshot_hash,
     verify_download_plan,
     verify_snapshot,
 )
 from app.services.preflight import (
     PREFLIGHT_CHECK_CODES,
+    PREFLIGHT_RECENT_TORRENT_LIMIT,
     evaluate_preflight,
     preflight_policy_fingerprint,
 )
@@ -62,10 +69,49 @@ def test_internal_torrent_ref_respects_download_plan_column_limit() -> None:
         validate_internal_torrent_ref(f"{'s' * 24}:{'d' * 50}:{'r' * 105}")
 
 
+def test_qb_plan_tags_preserve_configured_tags_and_append_chinese_title() -> None:
+    assert build_qb_plan_tags(
+        ("unin-plan", "avistaz"),
+        "庆余年 第二季",
+    ) == ("unin-plan", "avistaz", "庆余年 第二季")
+
+
+def test_qb_plan_tags_deduplicate_configured_tags_and_title_case_insensitively() -> None:
+    assert build_qb_plan_tags(
+        ("Unin-Plan", "unin-plan", "三体 SEASON ONE"),
+        "三体 season one",
+    ) == ("Unin-Plan", "三体 SEASON ONE")
+
+
+def test_qb_media_title_tag_normalizes_commas_controls_and_length() -> None:
+    assert media_title_qb_tag("  庆余年,\n第二季\x00  ") == "庆余年， 第二季"
+
+    truncated = media_title_qb_tag("剧" * 101)
+    assert truncated == "剧" * 100
+    assert len(truncated) == 100
+
+
+def test_qb_plan_tags_reject_more_than_twenty_unique_tags() -> None:
+    configured = tuple(f"tag-{index}" for index in range(20))
+
+    with pytest.raises(AppError) as caught:
+        build_qb_plan_tags(configured, "庆余年")
+
+    assert caught.value.error_code == "QB_PLAN_TAGS_INVALID"
+
+
 class FakeReadOnlyQb(ReadOnlyDownloaderAdapter):
-    def __init__(self, torrents: list[QbTorrent] | None = None) -> None:
+    def __init__(
+        self,
+        torrents: list[QbTorrent] | None = None,
+        *,
+        query_failures: Collection[str] = (),
+    ) -> None:
         self.torrents = torrents or []
+        self.query_failures = frozenset(query_failures)
         self.auth_calls = 0
+        self.list_calls = 0
+        self.target_calls: list[tuple[str, object]] = []
 
     def manifest(self) -> AdapterManifest:
         raise NotImplementedError
@@ -80,7 +126,44 @@ class FakeReadOnlyQb(ReadOnlyDownloaderAdapter):
         return "2.11.4"
 
     async def list_torrents(self) -> list[QbTorrent]:
+        self.list_calls += 1
         return self.torrents
+
+    async def find_torrents_by_hashes(
+        self, hashes: Collection[str]
+    ) -> list[QbTorrent]:
+        normalized = tuple(value.casefold() for value in hashes)
+        self.target_calls.append(("hashes", normalized))
+        if "hashes" in self.query_failures:
+            raise AppError("QB_HASH_LOOKUP_FAILED", "test hash lookup failure")
+        return [
+            torrent
+            for torrent in self.torrents
+            if set(normalized).intersection(torrent.identity_hashes)
+        ]
+
+    async def list_recent_torrents(self, limit: int) -> list[QbTorrent]:
+        self.target_calls.append(("recent", limit))
+        if "recent" in self.query_failures:
+            raise AppError("QB_RECENT_LOOKUP_FAILED", "test recent lookup failure")
+        return sorted(
+            self.torrents,
+            key=lambda torrent: torrent.added_on,
+            reverse=True,
+        )[:limit]
+
+    async def has_active_seeding(self) -> bool:
+        self.target_calls.append(("active", None))
+        if "active" in self.query_failures:
+            raise AppError("QB_SEEDING_LOOKUP_FAILED", "test seeding lookup failure")
+        return any(
+            torrent.progress == 1
+            and (
+                torrent.upspeed > 0
+                or torrent.state.casefold() in {"uploading", "forcedup"}
+            )
+            for torrent in self.torrents
+        )
 
     async def get_torrent_files(self, info_hash: str) -> list[QbTorrentFile]:
         del info_hash
@@ -121,6 +204,38 @@ def qb_torrent(*, info_hash: str = INFO_HASH, name: str = "Existing", size: int 
         upspeed=1,
         save_path="/downloads/movies",
     )
+
+
+def approval_snapshot(**overrides: object) -> ApprovalCandidateSnapshot:
+    values: dict[str, object] = {
+        "media_item_id": "media",
+        "media_title": "Movie",
+        "media_type": "movie",
+        "tmdb_id": 1,
+        "year": 2026,
+        "torrent_candidate_id": "candidate",
+        "site_id": "avistaz",
+        "torrent_id": "torrent",
+        "torrent_ref": "avistaz:details:safe",
+        "release_title": "Movie 2026",
+        "size_bytes": 5000,
+        "info_hash": INFO_HASH,
+        "season": None,
+        "episodes": None,
+        "resolution": "1080p",
+        "source": "WEB-DL",
+        "subtitles": ["Chinese"],
+        "seeders": 3,
+        "promotion": {"download_factor": 0, "upload_factor": 1},
+        "hit_and_run": False,
+        "match_score": 0.9,
+        "match_reasons": ["TMDB_ID_EXACT"],
+        "warnings": [],
+        "requested_at": datetime.now(UTC),
+        "expires_at": datetime.now(UTC) + timedelta(hours=1),
+    }
+    values.update(overrides)
+    return ApprovalCandidateSnapshot.model_validate(values)
 
 
 def preflight_result(
@@ -304,42 +419,20 @@ async def seed_candidate(
 @pytest.mark.asyncio
 async def test_same_info_hash_is_blocked_and_unknown_is_not_pass() -> None:
     settings = safe_settings()
-    snapshot_data = {
-        "media_item_id": "media",
-        "media_title": "Movie",
-        "media_type": "movie",
-        "tmdb_id": 1,
-        "year": 2026,
-        "torrent_candidate_id": "candidate",
-        "site_id": "avistaz",
-        "torrent_id": "torrent",
-        "torrent_ref": "avistaz:details:safe",
-        "release_title": "Movie 2026",
-        "size_bytes": 5000,
-        "info_hash": INFO_HASH,
-        "season": None,
-        "episodes": None,
-        "resolution": "1080p",
-        "source": "WEB-DL",
-        "subtitles": ["Chinese"],
-        "seeders": 3,
-        "promotion": {"download_factor": 0, "upload_factor": 1},
-        "hit_and_run": False,
-        "match_score": 0.9,
-        "match_reasons": ["TMDB_ID_EXACT"],
-        "warnings": [],
-        "requested_at": datetime.now(UTC),
-        "expires_at": datetime.now(UTC) + timedelta(hours=1),
-    }
-    from app.schemas.approvals import ApprovalCandidateSnapshot
-
-    snapshot = ApprovalCandidateSnapshot.model_validate(snapshot_data)
-    blocked = await evaluate_preflight(FakeReadOnlyQb([qb_torrent()]), snapshot, settings)
+    snapshot = approval_snapshot()
+    adapter = FakeReadOnlyQb([qb_torrent()])
+    blocked = await evaluate_preflight(adapter, snapshot, settings)
     assert blocked.overall_status == PreflightStatus.BLOCKED
     duplicate_check = next(
         check for check in blocked.checks if check.code == "DUPLICATE_INFO_HASH"
     )
     assert duplicate_check.status == PreflightStatus.BLOCKED
+    assert adapter.list_calls == 0
+    assert adapter.target_calls == [
+        ("hashes", (INFO_HASH,)),
+        ("recent", PREFLIGHT_RECENT_TORRENT_LIMIT),
+        ("active", None),
+    ]
 
     v2_hash = "b" * 64
     v2_torrent = qb_torrent(info_hash=v2_hash[:40]).model_copy(
@@ -354,12 +447,395 @@ async def test_same_info_hash_is_blocked_and_unknown_is_not_pass() -> None:
     )
     assert v2_duplicate_check.status == PreflightStatus.BLOCKED
 
-    unknown_snapshot = snapshot.model_copy(update={"info_hash": None, "hit_and_run": None})
+    avistaz_default_snapshot = snapshot.model_copy(
+        update={"info_hash": "f" * 40, "hit_and_run": None}
+    )
+    avistaz_default = await evaluate_preflight(
+        FakeReadOnlyQb([qb_torrent(info_hash="e" * 40)]),
+        avistaz_default_snapshot,
+        settings,
+    )
+    hnr_check = next(
+        check for check in avistaz_default.checks if check.code == "HNR_KNOWN"
+    )
+    assert hnr_check.status == PreflightStatus.PASS
+    assert hnr_check.details == {
+        "hit_and_run": True,
+        "source": "SITE_DEFAULT",
+        "minimum_seeding_days": 7,
+    }
+
+    unknown_snapshot = snapshot.model_copy(
+        update={
+            "site_id": "nexus-test",
+            "torrent_ref": "nexus-test:details:safe",
+            "info_hash": None,
+            "hit_and_run": None,
+        }
+    )
     unknown = await evaluate_preflight(
         FakeReadOnlyQb([qb_torrent(info_hash="f" * 40)]), unknown_snapshot, settings
     )
     assert unknown.overall_status == PreflightStatus.UNKNOWN
-    assert unknown.overall_status != PreflightStatus.PASS
+
+
+@pytest.mark.asyncio
+async def test_preflight_uses_bounded_queries_and_marks_recent_no_match_as_warning() -> None:
+    settings = safe_settings()
+    existing = qb_torrent(info_hash="e" * 40, name="Other release", size=100)
+    adapter = FakeReadOnlyQb([existing])
+
+    result = await evaluate_preflight(adapter, approval_snapshot(), settings)
+
+    assert result.overall_status == PreflightStatus.WARNING
+    checks = {check.code: check for check in result.checks}
+    assert checks["DUPLICATE_INFO_HASH"].status == PreflightStatus.PASS
+    assert checks["POSSIBLE_DUPLICATE_RELEASE"].status == PreflightStatus.WARNING
+    assert checks["POSSIBLE_DUPLICATE_RELEASE"].details == {
+        "sample_limit": PREFLIGHT_RECENT_TORRENT_LIMIT,
+        "sample_count": 1,
+    }
+    assert checks["ACTIVE_SEEDING"].status == PreflightStatus.PASS
+    assert checks["ACTIVE_SEEDING"].details == {"count_at_least": 1}
+    assert adapter.list_calls == 0
+    assert adapter.target_calls == [
+        ("hashes", (INFO_HASH,)),
+        ("recent", PREFLIGHT_RECENT_TORRENT_LIMIT),
+        ("active", None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_updates", "deferred_checks", "expected_queries"),
+    (
+        pytest.param(
+            {"info_hash": None},
+            {
+                "DUPLICATE_INFO_HASH": {
+                    "deferred_validation": "TORRENT_FILE",
+                    "duplicate_check_deferred": True,
+                }
+            },
+            [
+                ("recent", PREFLIGHT_RECENT_TORRENT_LIMIT),
+                ("active", None),
+            ],
+            id="missing-info-hash",
+        ),
+        pytest.param(
+            {"size_bytes": None},
+            {
+                "POSSIBLE_DUPLICATE_RELEASE": {
+                    "deferred_validation": "TORRENT_FILE",
+                    "duplicate_check_deferred": True,
+                },
+                "SIZE_LIMIT": {
+                    "limit_bytes": 10_000,
+                    "deferred_validation": "TORRENT_FILE",
+                },
+            },
+            [
+                ("hashes", (INFO_HASH,)),
+                ("active", None),
+            ],
+            id="missing-size",
+        ),
+        pytest.param(
+            {"seeders": None},
+            {
+                "CANDIDATE_SEEDERS": {
+                    "deferred_validation": "PT_RESEARCH",
+                }
+            },
+            [
+                ("hashes", (INFO_HASH,)),
+                ("recent", PREFLIGHT_RECENT_TORRENT_LIMIT),
+                ("active", None),
+            ],
+            id="missing-seeders",
+        ),
+        pytest.param(
+            {"info_hash": None, "size_bytes": None, "seeders": None},
+            {
+                "DUPLICATE_INFO_HASH": {
+                    "deferred_validation": "TORRENT_FILE",
+                    "duplicate_check_deferred": True,
+                },
+                "POSSIBLE_DUPLICATE_RELEASE": {
+                    "deferred_validation": "TORRENT_FILE",
+                    "duplicate_check_deferred": True,
+                },
+                "SIZE_LIMIT": {
+                    "limit_bytes": 10_000,
+                    "deferred_validation": "TORRENT_FILE",
+                },
+                "CANDIDATE_SEEDERS": {
+                    "deferred_validation": "PT_RESEARCH",
+                },
+            },
+            [("active", None)],
+            id="all-recoverable-fields-missing",
+        ),
+    ),
+)
+async def test_recoverable_candidate_metadata_gaps_are_manual_warnings(
+    snapshot_updates: dict[str, object],
+    deferred_checks: dict[str, dict[str, object]],
+    expected_queries: list[tuple[str, object]],
+) -> None:
+    existing = qb_torrent(info_hash="e" * 40, name="Other release", size=100)
+    adapter = FakeReadOnlyQb([existing])
+
+    result = await evaluate_preflight(
+        adapter,
+        approval_snapshot(**snapshot_updates),
+        safe_settings(),
+    )
+
+    checks = {check.code: check for check in result.checks}
+    assert result.overall_status == PreflightStatus.WARNING
+    assert preflight_is_manually_passable(result) is True
+    for code, expected_details in deferred_checks.items():
+        assert checks[code].status == PreflightStatus.WARNING
+        assert checks[code].details == expected_details
+    assert adapter.target_calls == expected_queries
+
+
+@pytest.mark.asyncio
+async def test_recoverable_metadata_warnings_do_not_mask_environment_unknowns() -> None:
+    class ConnectionFailureQb(FakeReadOnlyQb):
+        async def authenticate(self) -> None:
+            raise AppError("QB_CONNECTION_FAILED", "test connection failure")
+
+    snapshot = approval_snapshot(info_hash=None, size_bytes=None, seeders=None)
+    existing = qb_torrent(info_hash="e" * 40, name="Other release", size=100)
+
+    active_read_failed = await evaluate_preflight(
+        FakeReadOnlyQb([existing], query_failures=("active",)),
+        snapshot,
+        safe_settings(),
+    )
+    save_path_unknown = await evaluate_preflight(
+        FakeReadOnlyQb([existing]),
+        snapshot,
+        safe_settings(qb_target_save_path=None),
+    )
+    size_policy_unknown = await evaluate_preflight(
+        FakeReadOnlyQb([existing]),
+        snapshot,
+        safe_settings(max_candidate_size_bytes=None),
+    )
+
+    for result, unknown_code in (
+        (active_read_failed, "ACTIVE_SEEDING"),
+        (save_path_unknown, "SAVE_PATH_ALLOWED"),
+        (size_policy_unknown, "SIZE_LIMIT"),
+    ):
+        checks = {check.code: check for check in result.checks}
+        assert checks[unknown_code].status == PreflightStatus.UNKNOWN
+        assert result.overall_status == PreflightStatus.UNKNOWN
+        assert preflight_is_manually_passable(result) is False
+
+    connection_failed = await evaluate_preflight(
+        ConnectionFailureQb([existing]),
+        snapshot,
+        safe_settings(),
+    )
+    connection_check = next(
+        check for check in connection_failed.checks if check.code == "QB_CONNECTION"
+    )
+    assert connection_check.status == PreflightStatus.BLOCKED
+    assert connection_failed.overall_status == PreflightStatus.BLOCKED
+    assert preflight_is_manually_passable(connection_failed) is False
+
+
+@pytest.mark.asyncio
+async def test_target_category_missing_is_warning_but_configuration_failures_stay_unknown() -> None:
+    class MissingCategoryQb(FakeReadOnlyQb):
+        async def get_categories(self) -> dict[str, QbCategory]:
+            return {}
+
+    class CategoryReadFailureQb(FakeReadOnlyQb):
+        async def get_categories(self) -> dict[str, QbCategory]:
+            raise AppError("QB_CATEGORY_LOOKUP_FAILED", "test category lookup failure")
+
+    snapshot = approval_snapshot()
+    existing = qb_torrent(info_hash="e" * 40, name="Other release", size=100)
+
+    present = await evaluate_preflight(
+        FakeReadOnlyQb([existing]), snapshot, safe_settings()
+    )
+    missing = await evaluate_preflight(
+        MissingCategoryQb([existing]), snapshot, safe_settings()
+    )
+    unconfigured = await evaluate_preflight(
+        FakeReadOnlyQb([existing]),
+        snapshot,
+        safe_settings(qb_target_category=None),
+    )
+    unavailable = await evaluate_preflight(
+        CategoryReadFailureQb([existing]), snapshot, safe_settings()
+    )
+
+    present_check = next(check for check in present.checks if check.code == "TARGET_CATEGORY")
+    missing_check = next(check for check in missing.checks if check.code == "TARGET_CATEGORY")
+    unconfigured_check = next(
+        check for check in unconfigured.checks if check.code == "TARGET_CATEGORY"
+    )
+    unavailable_check = next(
+        check for check in unavailable.checks if check.code == "TARGET_CATEGORY"
+    )
+
+    assert present_check.status == PreflightStatus.PASS
+    assert missing_check.status == PreflightStatus.WARNING
+    assert "自动创建" in missing_check.message
+    assert missing_check.details == {
+        "category": "movies",
+        "will_create_on_submit": True,
+    }
+    assert unconfigured_check.status == PreflightStatus.UNKNOWN
+    assert unavailable_check.status == PreflightStatus.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_preflight_reports_no_active_seeding_without_claiming_a_full_count() -> None:
+    inactive = qb_torrent(info_hash="e" * 40).model_copy(
+        update={"progress": 0.5, "state": "downloading", "upspeed": 0}
+    )
+
+    result = await evaluate_preflight(
+        FakeReadOnlyQb([inactive]),
+        approval_snapshot(),
+        safe_settings(),
+    )
+
+    active_check = next(
+        check for check in result.checks if check.code == "ACTIVE_SEEDING"
+    )
+    assert active_check.status == PreflightStatus.WARNING
+    assert active_check.details == {"count": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_query", "check_code", "error_code"),
+    (
+        ("hashes", "DUPLICATE_INFO_HASH", "QB_HASH_LOOKUP_FAILED"),
+        ("recent", "POSSIBLE_DUPLICATE_RELEASE", "QB_RECENT_LOOKUP_FAILED"),
+        ("active", "ACTIVE_SEEDING", "QB_SEEDING_LOOKUP_FAILED"),
+    ),
+)
+async def test_targeted_preflight_query_failure_is_unknown(
+    failed_query: str,
+    check_code: str,
+    error_code: str,
+) -> None:
+    adapter = FakeReadOnlyQb(
+        [qb_torrent(info_hash="e" * 40)],
+        query_failures=(failed_query,),
+    )
+
+    result = await evaluate_preflight(adapter, approval_snapshot(), safe_settings())
+
+    check = next(check for check in result.checks if check.code == check_code)
+    assert check.status == PreflightStatus.UNKNOWN
+    assert check.details == {"error_code": error_code}
+    assert result.overall_status == PreflightStatus.UNKNOWN
+    assert adapter.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_avistaz_uses_seven_day_hnr_default_without_manual_acknowledgement(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, record = await seed_candidate(
+        session_factory,
+        info_hash="a" * 40,
+        hit_and_run=None,
+    )
+    settings = safe_settings()
+    async with session_factory() as session:
+        approval = await create_approval_request(
+            session,
+            record.id,
+            ApprovalCreateRequest(),
+            settings,
+            actor="operator",
+        )
+        snapshot = verify_snapshot(approval)
+        assert snapshot.hit_and_run is True
+        assert "HNR_UNKNOWN" not in snapshot.warnings
+
+        passed = preflight_result(settings)
+        approval.preflight_result = passed.model_dump(mode="json")
+        approval.preflight_checked_at = passed.checked_at
+        approved, plan = await approve_request(
+            session,
+            approval,
+            ApprovalApproveRequest(
+                acknowledges_hnr=False,
+                acknowledges_seeding=True,
+                acknowledges_plan_only=True,
+            ),
+            settings,
+            actor="operator",
+        )
+
+        assert approved.status == ApprovalStatus.APPROVED
+        assert "HNR_UNKNOWN" not in plan.warnings
+
+
+@pytest.mark.asyncio
+async def test_bounded_duplicate_warning_allows_manual_but_not_automatic_approval(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, record = await seed_candidate(session_factory, info_hash="a" * 40)
+    settings = safe_settings()
+    async with session_factory() as session:
+        approval = await create_approval_request(
+            session,
+            record.id,
+            ApprovalCreateRequest(),
+            settings,
+            actor="operator",
+        )
+        result = await evaluate_preflight(
+            FakeReadOnlyQb(
+                [qb_torrent(info_hash="b" * 40, name="Other release", size=100)]
+            ),
+            verify_snapshot(approval),
+            settings,
+        )
+        assert result.overall_status == PreflightStatus.WARNING
+        approval.preflight_result = result.model_dump(mode="json")
+        approval.preflight_checked_at = result.checked_at
+
+        with pytest.raises(AppError) as automatic:
+            await approve_request_automatically(
+                session,
+                approval,
+                settings,
+                actor="automation",
+                policy_revision_id="policy-revision",
+                decision_id="decision",
+            )
+        assert automatic.value.error_code == "AUTOMATION_PREFLIGHT_NOT_PASS"
+        assert approval.status == ApprovalStatus.PENDING
+
+        approved_result, plan = await approve_request(
+            session,
+            approval,
+            ApprovalApproveRequest(
+                acknowledges_hnr=False,
+                acknowledges_seeding=True,
+                acknowledges_plan_only=True,
+            ),
+            settings,
+            actor="operator",
+        )
+        assert approved_result.status.value == ApprovalStatus.APPROVED.value
+        assert "POSSIBLE_DUPLICATE_RELEASE" in plan.warnings
 
 
 @pytest.mark.asyncio

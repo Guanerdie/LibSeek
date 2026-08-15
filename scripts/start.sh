@@ -74,9 +74,14 @@ if [ -n "$process_override_names" ]; then
 fi
 
 if [ ! -f "$env_file" ]; then
-  cp "$example_file" "$env_file"
-  echo '已创建 .env。请先修改 PostgreSQL 密码并填写本地认证配置。' >&2
-  exit 1
+  postgres_password=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  temporary_env=$(mktemp "$project_root/.env.tmp.XXXXXX")
+  trap 'rm -f "$temporary_env"' EXIT HUP INT TERM
+  sed "s/change-me-before-production/$postgres_password/g" "$example_file" > "$temporary_env"
+  chmod 600 "$temporary_env"
+  mv "$temporary_env" "$env_file"
+  trap - EXIT HUP INT TERM
+  echo '已创建本机 .env，并自动生成 PostgreSQL 随机密码。'
 fi
 
 unsupported_dotenv_line_numbers=$(
@@ -133,20 +138,20 @@ if [ -z "$postgres_password" ] || [ -z "$database_url" ] || printf '%s' "$postgr
   exit 1
 fi
 
-auth_username=$(dotenv_value AUTH_LOCAL_USERNAME)
-auth_password=$(dotenv_value AUTH_LOCAL_PASSWORD)
-auth_signing_key=$(dotenv_value AUTH_SESSION_SIGNING_KEY)
-if [ -z "$auth_username" ] || [ -z "$auth_password" ] || [ "${#auth_signing_key}" -lt 32 ]; then
-  echo '本地启动需要 AUTH_LOCAL_USERNAME、AUTH_LOCAL_PASSWORD 和至少 32 个字符的 AUTH_SESSION_SIGNING_KEY。' >&2
-  exit 1
+set -- --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file"
+if [ "$(dotenv_value ENABLE_DOWNLOAD_EXECUTOR)" = true ]; then
+  set -- "$@" --profile download-execution
+fi
+if [ "$(dotenv_value ENABLE_DOWNLOAD_MONITOR)" = true ]; then
+  set -- "$@" --profile download-monitor
 fi
 
-docker --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" config --quiet
+docker "$@" config --quiet
 if [ "$validate_only" = true ]; then
   echo 'Docker Compose 配置有效；未启动任何容器。'
   exit 0
 fi
 
-docker --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" up -d --build --wait --wait-timeout 180
-docker --context "$docker_context" compose --project-directory "$project_root" --env-file "$env_file" -f "$compose_file" ps
-echo '前端：http://127.0.0.1:8080  API：http://127.0.0.1:8000/api/docs'
+docker "$@" up -d --build --wait --wait-timeout 180
+docker "$@" ps
+echo '请打开 http://127.0.0.1:9527 创建本地管理员并配置连接。'

@@ -126,12 +126,12 @@ def test_candidate_score_emits_risk_warnings() -> None:
         "ID_MISMATCH",
         "YEAR_MISMATCH",
         "PARTIAL_PACK",
-        "HNR_UNKNOWN",
         "EPISODE_OVERLAP",
         "OVERSIZED",
         "POSSIBLE_DUPLICATE",
     ):
         assert warning in scored.warnings
+    assert "HNR_UNKNOWN" not in scored.warnings
 
 
 def test_season_pack_is_not_reported_as_exact_episode_coverage() -> None:

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from functools import lru_cache
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.models.enums import AuthRole
@@ -23,6 +22,10 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_prefix: str = "/api"
     database_url: str = "postgresql+psycopg://unin:unin@postgres:5432/unin"
+    runtime_config_dir: Path = Field(
+        default=Path("/var/lib/unin"),
+        validation_alias=AliasChoices("UNIN_RUNTIME_CONFIG_DIR", "runtime_config_dir"),
+    )
     auth_local_username: SecretStr | None = None
     auth_local_password: SecretStr | None = None
     auth_session_signing_key: SecretStr | None = None
@@ -58,6 +61,7 @@ class Settings(BaseSettings):
     tmdb_allow_future_episodes: bool = False
     enable_avistaz_live_search: bool = False
     avistaz_base_url: str = "https://avistaz.to"
+    avistaz_allowed_hosts: tuple[str, ...] = ("avistaz.to",)
     avistaz_username: SecretStr | None = None
     avistaz_password: SecretStr | None = None
     avistaz_pid: SecretStr | None = None
@@ -65,6 +69,11 @@ class Settings(BaseSettings):
     avistaz_password_file: Path | None = None
     avistaz_pid_file: Path | None = None
     avistaz_min_interval_seconds: float = 6.0
+    pt_site_architecture: Literal["avistaz", "nexusphp"] = "avistaz"
+    pt_site_id: str = "avistaz"
+    pt_site_display_name: str = "AvistaZ"
+    pt_site_runtime_configured: bool | None = None
+    pt_site_runtime_supported: bool = True
     enable_qb_read_only: bool = False
     qb_base_url: SecretStr | None = None
     qb_username: SecretStr | None = None
@@ -153,6 +162,7 @@ class Settings(BaseSettings):
     @field_validator(
         "allowed_external_hosts",
         "nextfind_allowed_hosts",
+        "avistaz_allowed_hosts",
         "preferred_resolutions",
         "preferred_sources",
         "preferred_audio",
@@ -177,6 +187,27 @@ class Settings(BaseSettings):
     def parse_string_tuple(cls, value: object) -> object:
         if isinstance(value, str):
             return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator(
+        "auth_local_username_file",
+        "auth_local_password_file",
+        "auth_session_signing_key_file",
+        "nextfind_username_file",
+        "nextfind_password_file",
+        "tmdb_access_token_file",
+        "avistaz_username_file",
+        "avistaz_password_file",
+        "avistaz_pid_file",
+        "qb_base_url_file",
+        "qb_username_file",
+        "qb_password_file",
+        mode="before",
+    )
+    @classmethod
+    def parse_optional_secret_file(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @field_validator("max_candidate_size_bytes", mode="before")
@@ -255,7 +286,7 @@ class Settings(BaseSettings):
     @property
     def tmdb_configured(self) -> bool:
         try:
-            return self.tmdb_token_value() is not None
+            return bool(self.tmdb_token_value())
         except OSError:
             return False
 
@@ -267,6 +298,21 @@ class Settings(BaseSettings):
             return False
 
     @property
+    def pt_site_configured(self) -> bool:
+        if self.pt_site_runtime_configured is not None:
+            return self.pt_site_runtime_configured
+        return self.pt_site_architecture == "avistaz" and self.avistaz_configured
+
+    @property
+    def pt_site_search_ready(self) -> bool:
+        return bool(
+            self.pt_site_architecture == "avistaz"
+            and self.pt_site_runtime_supported
+            and self.pt_site_configured
+            and self.enable_avistaz_live_search
+        )
+
+    @property
     def qb_configured(self) -> bool:
         try:
             return self.qb_credentials() is not None and bool(self.qb_allowed_hosts)
@@ -274,6 +320,34 @@ class Settings(BaseSettings):
             return False
 
 
-@lru_cache
+def apply_runtime_configuration(base: Settings) -> Settings:
+    from app.core.runtime_config import runtime_store
+
+    runtime = runtime_store(base).configuration()
+    updates = runtime.settings_overrides()
+    if not updates:
+        return base
+    effective = Settings.model_validate({**base.model_dump(), **updates})
+    from urllib.parse import urlsplit
+
+    for url_name, hosts_name in (
+        ("nextfind_base_url", "nextfind_allowed_hosts"),
+        ("avistaz_base_url", "avistaz_allowed_hosts"),
+    ):
+        parsed = urlsplit(str(getattr(effective, url_name)))
+        host = (parsed.hostname or "").casefold()
+        if host:
+            setattr(effective, hosts_name, (host,))
+    if effective.qb_credentials() is not None:
+        parsed = urlsplit(effective.qb_base_url_value() or "")
+        host = (parsed.hostname or "").lower()
+        scheme_allowed = parsed.scheme == "https" or (
+            parsed.scheme == "http" and effective.qb_allow_insecure_http
+        )
+        if host and scheme_allowed and not parsed.username and not parsed.password:
+            effective.qb_allowed_hosts = (host,)
+    return effective
+
+
 def get_settings() -> Settings:
-    return Settings()
+    return apply_runtime_configuration(Settings())

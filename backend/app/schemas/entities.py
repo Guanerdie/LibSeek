@@ -55,6 +55,7 @@ class MediaItemResponse(OrmModel):
     title: str
     original_title: str | None
     year: int | None
+    country_codes: list[str] | None
     poster_path: str | None
     raw_type: str | None
     local_episodes: int | None
@@ -83,12 +84,24 @@ class SystemStatusResponse(OrmModel):
     nextfind_configured: bool
     tmdb_configured: bool
     tmdb_live_enabled: bool
+    pt_site_architecture: str
+    pt_site_label: str
+    pt_site_configured: bool
+    pt_site_runtime_supported: bool
+    pt_site_search_ready: bool
+    pt_site_status: str
     avistaz_configured: bool
     avistaz_live_enabled: bool
     avistaz_status: str
     qb_configured: bool
     qb_read_only_enabled: bool
     qb_status: str
+    download_control_plane_enabled: bool
+    download_executor_enabled: bool
+    avistaz_torrent_fetch_enabled: bool
+    qb_write_enabled: bool
+    download_monitor_enabled: bool
+    automation_engine_enabled: bool
 
 
 class ResolveAccepted(BaseModel):
@@ -96,6 +109,16 @@ class ResolveAccepted(BaseModel):
     job_id: str
     status: WorkflowStatus
     deduplicated: bool
+
+
+class MetadataResolutionJobResponse(BaseModel):
+    media_id: str
+    job_id: str
+    status: JobStatus
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class MetadataMatchResponse(OrmModel):

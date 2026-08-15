@@ -25,6 +25,7 @@ from app.workers.download_executor import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("unin.download-executor")
 
 
@@ -40,7 +41,7 @@ def build_avistaz_executor(settings: Settings) -> AvistaZAdapter:
     if credentials is None:
         raise AppError("AVISTAZ_NOT_CONFIGURED", "AvistaZ 运行时凭据未配置", status_code=409)
     validated_base_url = validate_external_url(
-        settings.avistaz_base_url, settings.allowed_external_hosts
+        settings.avistaz_base_url, settings.avistaz_allowed_hosts
     )
     host = (urlparse(validated_base_url).hostname or "").casefold()
     if not host:
@@ -91,26 +92,33 @@ def build_pt_execution_registry(settings: Settings) -> PtExecutionRegistry:
     return registry
 
 
-async def run() -> None:
-    settings = get_settings()
-    require_download_executor_enabled(settings)
-    require_download_executor_ready_configuration(settings)
-    instance_id = os.getenv("DOWNLOAD_EXECUTOR_ID") or f"{socket.gethostname()}:{os.getpid()}"
-    worker_id = f"download-executor:{instance_id}"
-    executor = DownloadExecutor(
+def build_download_executor(settings: Settings, worker_id: str) -> DownloadExecutor:
+    return DownloadExecutor(
         SessionFactory,
         worker_id,
         build_pt_execution_registry(settings),
         lambda: build_qb_executor(settings),
         settings,
     )
-    ready_heartbeat = asyncio.create_task(
-        _ready_heartbeat_loop(settings, instance_id)
-    )
+
+
+async def run() -> None:
+    settings = get_settings()
+    require_download_executor_enabled(settings)
+    require_download_executor_ready_configuration(settings)
+    instance_id = os.getenv("DOWNLOAD_EXECUTOR_ID") or f"{socket.gethostname()}:{os.getpid()}"
+    worker_id = f"download-executor:{instance_id}"
+    ready_heartbeat = asyncio.create_task(_ready_heartbeat_loop(instance_id))
     logger.info("Download executor started: %s", worker_id)
     try:
         while True:
             try:
+                # Runtime integration settings are edited from the web UI. Bind each
+                # claim cycle to the latest atomic configuration snapshot.
+                settings = get_settings()
+                require_download_executor_enabled(settings)
+                require_download_executor_ready_configuration(settings)
+                executor = build_download_executor(settings, worker_id)
                 handled = await executor.run_once()
             except AppError as exc:
                 logger.error("Download executor cycle failed: error_code=%s", exc.error_code)
@@ -131,10 +139,17 @@ async def run() -> None:
             pass
 
 
-async def _ready_heartbeat_loop(settings: Settings, instance_id: str) -> None:
-    interval = max(5.0, settings.download_executor_ready_ttl_seconds / 3)
+async def _ready_heartbeat_loop(instance_id: str) -> None:
     while True:
-        await publish_download_executor_ready(SessionFactory, settings, instance_id)
+        settings = get_settings()
+        interval = max(5.0, settings.download_executor_ready_ttl_seconds / 3)
+        try:
+            await publish_download_executor_ready(SessionFactory, settings, instance_id)
+        except AppError as exc:
+            logger.warning(
+                "Download executor readiness unavailable: error_code=%s",
+                exc.error_code,
+            )
         await asyncio.sleep(interval)
 
 

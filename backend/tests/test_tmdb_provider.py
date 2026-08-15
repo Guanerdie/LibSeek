@@ -33,6 +33,11 @@ def movie_detail(language: str, tmdb_id: int = 10) -> dict[str, object]:
         "title": localized,
         "original_title": "Original Movie",
         "original_language": "ja",
+        "production_countries": [
+            {"iso_3166_1": "jp", "name": "Japan"},
+            {"iso_3166_1": "US", "name": "United States"},
+            {"iso_3166_1": "JP", "name": "Japan"},
+        ],
         "release_date": "2026-01-02",
         "poster_path": "/poster.jpg",
         "backdrop_path": "/backdrop.jpg",
@@ -60,6 +65,7 @@ async def test_tmdb_exact_id_uses_bilingual_details_and_cache() -> None:
     assert first.imdb_id == "tt0010"
     assert first.chinese_title == "中文电影"
     assert first.english_title == "English Movie"
+    assert first.country_codes == ["JP", "US"]
     assert first.year == 2026
     assert "Alias Movie" in first.aliases
     await tmdb.aclose()
@@ -95,6 +101,11 @@ async def test_tv_episode_matrix_excludes_future_and_unknown_air_dates() -> None
                 "id": 20,
                 "name": name,
                 "original_name": "Original TV",
+                "origin_country": ["kr", "US", "KR"],
+                "production_countries": [
+                    {"iso_3166_1": "JP"},
+                    {"iso_3166_1": "US"},
+                ],
                 "first_air_date": "2026-01-01",
                 "number_of_seasons": 1,
                 "number_of_episodes": 3,
@@ -120,6 +131,66 @@ async def test_tv_episode_matrix_excludes_future_and_unknown_air_dates() -> None
     result = await tmdb.get_by_tmdb_id(MediaType.TV, 20)
     assert result.episode_matrix == {1: [1]}
     assert result.number_of_episodes == 3
+    assert result.country_codes == ["KR", "US", "JP"]
+    await tmdb.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("media_type", "detail_path", "payload", "expected"),
+    (
+        (
+            MediaType.MOVIE,
+            "movie",
+            {
+                "id": 30,
+                "production_countries": [
+                    {"iso_3166_1": "fr"},
+                    {"iso_3166_1": "CA"},
+                    {"iso_3166_1": "FR"},
+                ],
+            },
+            ["FR", "CA"],
+        ),
+        (
+            MediaType.TV,
+            "tv",
+            {
+                "id": 30,
+                "origin_country": ["th", "US", "TH"],
+                "production_countries": [
+                    {"iso_3166_1": "JP"},
+                    {"iso_3166_1": "US"},
+                ],
+                "number_of_seasons": 9,
+            },
+            ["TH", "US", "JP"],
+        ),
+    ),
+)
+async def test_country_lookup_uses_one_detail_request_without_seasons(
+    media_type: MediaType,
+    detail_path: str,
+    payload: dict[str, object],
+    expected: list[str],
+) -> None:
+    detail_route = respx.get(f"{BASE}/3/{detail_path}/30").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    season_route = respx.get(url__regex=rf"{BASE}/3/tv/30/season/.*").mock(
+        return_value=httpx.Response(500)
+    )
+    tmdb = provider()
+
+    result = await tmdb.get_country_codes(media_type, 30)
+
+    assert result == expected
+    assert detail_route.call_count == 1
+    request = detail_route.calls[0].request
+    assert request.url.params["language"] == "en-US"
+    assert "append_to_response" not in request.url.params
+    assert season_route.call_count == 0
     await tmdb.aclose()
 
 

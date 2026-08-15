@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
+from collections.abc import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +44,10 @@ SEARCH_STATUS_PRECEDENCE = (
     WorkflowStatus.NO_CANDIDATE,
     WorkflowStatus.SEARCH_FAILED,
 )
+STRICT_IDENTITY_CONFIRMATION_ACTOR = "system:strict-identity"
+STRICT_IDENTITY_REQUIRED_REASONS = frozenset(
+    {"TMDB_ID_EXACT", "MEDIA_TYPE_MATCH", "YEAR_MATCH", "TITLE_EXACT"}
+)
 
 
 def metadata_resolution_input_fingerprint(media: MediaItem) -> str:
@@ -51,6 +57,7 @@ def metadata_resolution_input_fingerprint(media: MediaItem) -> str:
         "media_type": media.media_type.value,
         "tmdb_id": media.tmdb_id,
         "title": media.title,
+        "original_title": media.original_title,
         "year": media.year,
     }
     encoded = json.dumps(
@@ -261,6 +268,77 @@ async def list_metadata_matches(session: AsyncSession, media_id: str) -> list[Me
     return list((await session.scalars(statement)).all())
 
 
+def _normalized_identity_title(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def strict_identity_auto_confirmation_match(
+    media: MediaItem,
+    matches: Sequence[MetadataMatch],
+    *,
+    resolution_job_id: str,
+) -> MetadataMatch | None:
+    if (
+        media.tmdb_id is None
+        or media.identity_confidence != IdentityConfidence.HIGH
+        or media.year is None
+        or not media.title.strip()
+        or len(matches) != 1
+    ):
+        return None
+
+    match = matches[0]
+    if (
+        match.resolution_job_id != resolution_job_id
+        or match.rank != 1
+        or match.conflicts
+        or not STRICT_IDENTITY_REQUIRED_REASONS.issubset(set(match.match_reasons))
+    ):
+        return None
+    try:
+        candidate = MetadataRecord.model_validate(match.candidate_snapshot)
+    except ValueError:
+        return None
+
+    if (
+        match.tmdb_id != media.tmdb_id
+        or candidate.tmdb_id != media.tmdb_id
+        or candidate.media_type != media.media_type
+        or candidate.year is None
+        or candidate.year != media.year
+    ):
+        return None
+
+    candidate_titles = {
+        normalized
+        for normalized in (
+            _normalized_identity_title(candidate.title),
+            _normalized_identity_title(candidate.chinese_title),
+            _normalized_identity_title(candidate.english_title),
+            _normalized_identity_title(candidate.original_title),
+            *(
+                _normalized_identity_title(alias)
+                for alias in candidate.aliases
+            ),
+        )
+        if normalized
+    }
+    source_titles = {
+        normalized
+        for normalized in (
+            _normalized_identity_title(media.title),
+            _normalized_identity_title(media.original_title),
+        )
+        if normalized
+    }
+    if not source_titles or not source_titles.issubset(candidate_titles):
+        return None
+    return match
+
+
 async def confirm_identity(
     session: AsyncSession,
     media: MediaItem,
@@ -312,8 +390,13 @@ async def confirm_identity(
         confirmed_by=actor,
         candidate_snapshot=candidate.model_dump(mode="json"),
     )
+    identity_changed = (
+        media.tmdb_id != candidate.tmdb_id or media.media_type != candidate.media_type
+    )
     media.tmdb_id = candidate.tmdb_id
     media.media_type = candidate.media_type
+    if identity_changed or media.country_codes is None:
+        media.country_codes = candidate.country_codes
     media.missing_episodes = (
         derive_missing_episode_codes(
             candidate.episode_matrix,
@@ -348,6 +431,29 @@ async def confirm_identity(
     return review
 
 
+async def auto_confirm_strict_identity(
+    session: AsyncSession,
+    media: MediaItem,
+    matches: Sequence[MetadataMatch],
+    *,
+    resolution_job_id: str,
+) -> IdentityReview | None:
+    match = strict_identity_auto_confirmation_match(
+        media,
+        matches,
+        resolution_job_id=resolution_job_id,
+    )
+    if match is None:
+        return None
+    return await confirm_identity(
+        session,
+        media,
+        IdentityConfirmationRequest(metadata_match_id=match.id),
+        actor=STRICT_IDENTITY_CONFIRMATION_ACTOR,
+        audit_event_type="IDENTITY_CONFIRMED_AUTOMATICALLY",
+    )
+
+
 async def enqueue_torrent_search(
     session: AsyncSession,
     media: MediaItem,
@@ -369,7 +475,7 @@ async def enqueue_torrent_search(
     if review is None:
         raise AppError(
             "IDENTITY_CONFIRMATION_REQUIRED",
-            "必须先人工确认影视身份，才能搜索 PT 候选",
+            "必须先确认影视身份，才能搜索 PT 候选",
             status_code=409,
         )
     existing_run = await session.scalar(

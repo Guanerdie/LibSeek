@@ -13,7 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.pt_sites.catalog import build_pt_site_catalog
 from app.core.config import Settings
+from app.core.pt_site_rules import effective_hnr_rule, hnr_acknowledgement_required
 from app.core.security import sanitize_details
 from app.errors import AppError
 from app.models.entities import (
@@ -231,7 +233,12 @@ def evaluate_torrent_candidates(
         reasons.append("TORRENT_SCORE_TOO_LOW")
     if margin < float(revision.eligibility_rules["torrent_min_margin"]):
         reasons.append("TORRENT_MARGIN_TOO_SMALL")
-    if top.warnings:
+    blocking_warnings = [
+        warning
+        for warning in top.warnings
+        if not (top.site_id.casefold() == "avistaz" and warning == "HNR_UNKNOWN")
+    ]
+    if blocking_warnings:
         reasons.append("TORRENT_WARNINGS_PRESENT")
 
     try:
@@ -261,7 +268,7 @@ def evaluate_torrent_candidates(
         reasons.append("TORRENT_EXTERNAL_ID_NOT_EXACT")
     if media.year is not None and candidate.year != media.year:
         reasons.append("TORRENT_YEAR_NOT_EXACT")
-    if candidate.hit_and_run is None:
+    if not effective_hnr_rule(candidate.site_id, candidate.hit_and_run).known:
         reasons.append("HNR_UNKNOWN")
     if candidate.info_hash is None or not _INFO_HASH.fullmatch(candidate.info_hash):
         reasons.append("TORRENT_INFO_HASH_UNKNOWN")
@@ -478,66 +485,42 @@ async def maybe_automate_torrent_search_after_identity(
     trigger_created_at: datetime,
     settings: Settings,
 ) -> Job | None:
+    del trigger_created_at
     _, revision = await get_current_policy(session, for_update=True)
-    mode_outcome = _mode_outcome(
-        revision,
-        AutomationStage.TORRENT_SELECTION,
-        subject_created_at=trigger_created_at,
-        engine_enabled=settings.enable_automation_engine,
-    )
-    evidence = {"site_id": "avistaz", "trigger": "IDENTITY_CONFIRMED"}
-    if mode_outcome is not None:
-        outcome, reasons = mode_outcome
-        await _record_stage_decision(
-            session,
-            revision,
-            stage=AutomationStage.TORRENT_SELECTION,
-            action="QUEUE_TORRENT_SEARCH",
-            outcome=outcome,
-            media_item_id=media.id,
-            reasons=reasons,
-            evidence=evidence,
-        )
+    if (
+        stage_mode(revision, AutomationStage.TORRENT_SELECTION)
+        == AutomationMode.DISABLED
+    ):
         return None
-    if not settings.enable_avistaz_live_search or not settings.avistaz_configured:
-        await _record_stage_decision(
-            session,
-            revision,
-            stage=AutomationStage.TORRENT_SELECTION,
-            action="QUEUE_TORRENT_SEARCH",
-            outcome=DecisionOutcome.BLOCKED,
-            media_item_id=media.id,
-            reasons=("AVISTAZ_SEARCH_NOT_ENABLED",),
-            evidence=evidence,
-        )
+
+    catalog = build_pt_site_catalog(settings)
+    site_id = next(
+        (
+            registered_site_id
+            for registered_site_id in catalog.registered_site_ids
+            if (declaration := catalog.get(registered_site_id)) is not None
+            and declaration.available_for_search
+            and media.media_type in declaration.media_types
+        ),
+        None,
+    )
+    if site_id is None:
         return None
 
     from app.services.workflow import enqueue_torrent_search
 
-    run, job, deduplicated = await enqueue_torrent_search(
+    _, job, _ = await enqueue_torrent_search(
         session,
         media,
-        TorrentSearchCreateRequest(site_id="avistaz"),
+        TorrentSearchCreateRequest(site_id=site_id),
         max_attempts=settings.job_max_attempts,
         settings=settings,
     )
-    outcome = DecisionOutcome.NOOP if deduplicated else DecisionOutcome.ACTION_CREATED
-    decision = build_automation_decision(
-        revision,
-        stage=AutomationStage.TORRENT_SELECTION,
-        action="QUEUE_TORRENT_SEARCH",
-        outcome=outcome,
-        media_item_id=media.id,
-        reason_codes=("ACTIVE_SEARCH_EXISTS",) if deduplicated else ("IDENTITY_CONFIRMED",),
-        evidence={**evidence, "search_run_id": run.id},
-    )
-    stored, _ = await add_decision_once(session, decision)
-    if not deduplicated:
-        job.payload = {
-            **job.payload,
-            "automation_policy_revision_id": revision.id,
-            "automation_decision_id": stored.id,
-        }
+    job.payload = {
+        key: value
+        for key, value in job.payload.items()
+        if key not in {"automation_policy_revision_id", "automation_decision_id"}
+    }
     await session.flush()
     return job
 
@@ -832,7 +815,7 @@ async def maybe_enqueue_automatic_preflight(
         )
         return None
     snapshot = verify_snapshot(approval)
-    if snapshot.hit_and_run is None:
+    if not effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known:
         await _record_stage_decision(
             session,
             revision,
@@ -1028,7 +1011,7 @@ async def maybe_finalize_automatic_approval(
         return existing
 
     snapshot = verify_snapshot(approval)
-    if snapshot.hit_and_run is None:
+    if not effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known:
         await _record_stage_decision(
             session,
             revision,
@@ -1133,7 +1116,7 @@ async def maybe_create_automatic_execution(
         "approval_request_id": approval.id,
         "approval_snapshot_hash": approval.snapshot_hash,
         "launch_mode": DownloadLaunchMode.ADD_PAUSED.value,
-        "hnr_known": snapshot.hit_and_run is not None,
+        "hnr_known": effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known,
     }
     if mode_outcome is not None:
         outcome, reasons = mode_outcome
@@ -1149,7 +1132,7 @@ async def maybe_create_automatic_execution(
             evidence=evidence,
         )
         return None
-    if snapshot.hit_and_run is None:
+    if not effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known:
         await _record_stage_decision(
             session,
             revision,
@@ -1163,10 +1146,11 @@ async def maybe_create_automatic_execution(
         )
         return None
     required_acks = {
-        "acknowledges_hnr",
         "acknowledges_seeding",
         "acknowledges_add_paused_only",
     }
+    if hnr_acknowledgement_required(snapshot.site_id):
+        required_acks.add("acknowledges_hnr")
     if not all(revision.acknowledgements.get(name) is True for name in required_acks):
         await _record_stage_decision(
             session,

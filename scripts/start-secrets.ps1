@@ -252,4 +252,4 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "Docker Compose status check failed with exit code $LASTEXITCODE"
 }
-Write-Host 'Frontend: http://127.0.0.1:8080  API: http://127.0.0.1:8000/api/docs' -ForegroundColor Green
+Write-Host 'Frontend: http://127.0.0.1:9527  API: http://127.0.0.1:8000/api/docs' -ForegroundColor Green

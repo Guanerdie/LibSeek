@@ -20,6 +20,7 @@ from app.models.entities import (
     MediaItem,
 )
 from app.models.enums import DownloadJobStatus, HnrStatus
+from app.repositories.jobs import find_download_job_by_execution_id
 from app.schemas.approvals import MediaDestinationPlan
 from app.schemas.jobs import (
     DownloadJobResponse,
@@ -31,7 +32,11 @@ from app.schemas.jobs import (
     DownloadJobTimelineResponse,
 )
 from app.services.approvals import verify_download_plan, verify_snapshot
-from app.services.executions import requires_reconciliation, verify_download_execution
+from app.services.executions import (
+    get_download_execution,
+    requires_reconciliation,
+    verify_download_execution,
+)
 
 
 async def list_download_jobs(
@@ -62,6 +67,20 @@ async def get_download_job(session: AsyncSession, job_id: str) -> DownloadJob:
     job = await session.get(DownloadJob, job_id)
     if job is None:
         raise AppError("DOWNLOAD_JOB_NOT_FOUND", "下载任务不存在", status_code=404)
+    return job
+
+
+async def get_download_job_for_execution(
+    session: AsyncSession, execution_id: str
+) -> DownloadJob:
+    await get_download_execution(session, execution_id)
+    job = await find_download_job_by_execution_id(session, execution_id)
+    if job is None:
+        raise AppError(
+            "DOWNLOAD_JOB_NOT_CREATED",
+            "下载执行尚未生成下载任务",
+            status_code=404,
+        )
     return job
 
 

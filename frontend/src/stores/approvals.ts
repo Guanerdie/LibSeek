@@ -135,7 +135,10 @@ export const useApprovalStore = defineStore('approvals', () => {
     }
   }
 
-  async function perform(action: () => Promise<ApprovalRequest>, message: string): Promise<void> {
+  async function perform(
+    action: () => Promise<ApprovalRequest>,
+    message: string,
+  ): Promise<ApprovalRequest | null> {
     const current = ++generation
     working.value = true
     error.value = null
@@ -143,34 +146,60 @@ export const useApprovalStore = defineStore('approvals', () => {
     planError.value = null
     try {
       const result = await action()
-      if (current !== generation) return
+      if (current !== generation) return null
       approval.value = result
       notice.value = message
       if (result.status === 'APPROVED') await loadPlan(result.id, current)
+      return result
     } catch (caught) {
       if (current === generation) {
         plan.value = null
         error.value = caught instanceof Error ? caught.message : '审批操作失败'
       }
+      return null
     } finally {
       if (current === generation) working.value = false
     }
   }
 
-  const create = (candidateId: string, ttl: number) =>
-    perform(() => approvalApi.create(candidateId, ttl), '固定候选审批请求已创建')
+  const create = (candidateId: string, ttl: number): Promise<ApprovalRequest | null> => {
+    plan.value = null
+    planError.value = null
+    return perform(async () => {
+      const result = await approvalApi.create(candidateId, ttl)
+      if (result.torrent_candidate_id !== candidateId) {
+        throw new Error('新审批响应与当前固定候选不一致，请刷新后重试')
+      }
+      return result
+    }, '固定候选审批请求已创建')
+  }
   const preflight = (approvalId: string) =>
     perform(() => approvalApi.preflight(approvalId), '只读下载预检已完成')
-  const approve = (approvalId: string) =>
-    perform(
+  const approve = async (
+    approvalId: string,
+    acknowledgesHnr: boolean,
+  ): Promise<ApprovalRequest | null> => {
+    const result = await perform(
       () =>
         approvalApi.approve(approvalId, {
-          acknowledges_hnr: true,
+          acknowledges_hnr: acknowledgesHnr,
           acknowledges_seeding: true,
           acknowledges_plan_only: true,
         }),
       '审批已通过，下载计划已生成；若自动执行策略已启用且满足条件，独立 ADD_PAUSED 执行可能已排队',
     )
+    if (result?.status === 'PENDING') {
+      const blockingChecks = result.preflight_result?.checks.filter(
+        (check) => check.status === 'BLOCKED' || check.status === 'UNKNOWN',
+      ) ?? []
+      const reasons = blockingChecks.map((check) => check.message).join('；')
+      notice.value = null
+      error.value = reasons
+        ? `最新预检未通过，审批仍为待处理：${reasons}`
+        : '最新预检未通过，审批仍为待处理；请查看下方检查结果'
+    }
+    return result
+  }
   const reject = (approvalId: string, reason: string) =>
     perform(() => approvalApi.reject(approvalId, reason), '审批已拒绝')
   const revoke = (approvalId: string, reason: string) =>

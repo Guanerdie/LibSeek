@@ -9,6 +9,8 @@ import { useAuthStore } from '../src/stores/auth'
 import LoginView from '../src/views/LoginView.vue'
 
 const mocks = vi.hoisted(() => ({
+  setupStatus: vi.fn(),
+  setup: vi.fn(),
   csrf: vi.fn(),
   login: vi.fn(),
   me: vi.fn(),
@@ -21,6 +23,8 @@ vi.mock('../src/api/client', async (importOriginal) => {
   return {
     ...actual,
     authApi: {
+      setupStatus: mocks.setupStatus,
+      setup: mocks.setup,
       csrf: mocks.csrf,
       login: mocks.login,
       me: mocks.me,
@@ -36,6 +40,10 @@ beforeEach(() => {
   pinia = createPinia()
   setActivePinia(pinia)
   vi.clearAllMocks()
+  mocks.setupStatus.mockResolvedValue({
+    admin_initialized: true,
+    configuration_complete: true,
+  })
 })
 
 describe('auth store', () => {
@@ -53,11 +61,28 @@ describe('auth store', () => {
     const store = useAuthStore()
     await store.initialize()
 
+    expect(mocks.setupStatus).toHaveBeenCalledTimes(1)
     expect(order).toEqual(['csrf', 'me'])
     expect(store.principal).toEqual({ username: 'operator-user', role: 'operator' })
     expect(store.csrfToken).toBe('bootstrap-token')
     expect(store.initialized).toBe(true)
     expect(store.error).toBeNull()
+  })
+
+  it('stops before CSRF when the local administrator has not been initialized', async () => {
+    mocks.setupStatus.mockResolvedValueOnce({
+      admin_initialized: false,
+      configuration_complete: false,
+    })
+
+    const store = useAuthStore()
+    await store.initialize()
+
+    expect(store.adminInitialized).toBe(false)
+    expect(store.configurationComplete).toBe(false)
+    expect(store.principal).toBeNull()
+    expect(mocks.csrf).not.toHaveBeenCalled()
+    expect(mocks.me).not.toHaveBeenCalled()
   })
 
   it('treats an anonymous me response as a normal login state and keeps bootstrap CSRF', async () => {
@@ -152,6 +177,7 @@ describe('LoginView', () => {
       routes: [
         { path: '/login', component: LoginView },
         { path: '/target', component: { template: '<div>target</div>' } },
+        { path: '/configuration', component: { template: '<div>configuration</div>' } },
       ],
     })
   }
@@ -165,6 +191,8 @@ describe('LoginView', () => {
     })
     const router = testRouter()
     await router.push('/login?redirect=/target')
+    const auth = useAuthStore()
+    auth.adminInitialized = true
     const wrapper = mount(LoginView, { global: { plugins: [pinia, router] } })
 
     await wrapper.get('input[name="username"]').setValue('operator-user')
@@ -185,6 +213,8 @@ describe('LoginView', () => {
     mocks.login.mockRejectedValueOnce(new ApiError('AUTH_LOGIN_FAILED', '用户名或密码错误', 401))
     const router = testRouter()
     await router.push('/login')
+    const auth = useAuthStore()
+    auth.adminInitialized = true
     const wrapper = mount(LoginView, { global: { plugins: [pinia, router] } })
 
     await wrapper.get('input[name="username"]').setValue('operator-user')
@@ -195,5 +225,33 @@ describe('LoginView', () => {
     expect((wrapper.get('input[name="password"]').element as HTMLInputElement).value).toBe('')
     expect(wrapper.text()).toContain('用户名或密码错误')
     expect(router.currentRoute.value.path).toBe('/login')
+  })
+
+  it('creates the first administrator, clears both passwords, and opens configuration', async () => {
+    mocks.setup.mockResolvedValueOnce({
+      username: 'first-admin',
+      role: 'admin',
+      csrf_token: 'new-session-secret',
+    })
+    const router = testRouter()
+    await router.push('/login')
+    const auth = useAuthStore()
+    auth.adminInitialized = false
+    const wrapper = mount(LoginView, { global: { plugins: [pinia, router] } })
+
+    expect(wrapper.text()).toContain('创建管理员')
+    await wrapper.get('input[name="username"]').setValue('first-admin')
+    await wrapper.get('input[name="password"]').setValue('strong-local-password')
+    await wrapper.get('input[name="password_confirmation"]').setValue('strong-local-password')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.setup).toHaveBeenCalledWith('first-admin', 'strong-local-password')
+    expect(auth.principal).toEqual({ username: 'first-admin', role: 'admin' })
+    expect(auth.csrfToken).toBe('new-session-secret')
+    expect(router.currentRoute.value.path).toBe('/configuration')
+    expect(wrapper.text()).not.toContain('new-session-secret')
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
   })
 })

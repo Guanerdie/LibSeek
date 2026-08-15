@@ -19,7 +19,11 @@ from app.adapters.pt_sites.catalog import (
     avistaz_site_declaration,
     nexusphp_site_declaration,
 )
-from app.adapters.pt_sites.nexusphp import NexusPhpAdapter, NexusPhpHtmlParser
+from app.adapters.pt_sites.nexusphp import (
+    NexusPhpAdapter,
+    NexusPhpConnectionProbe,
+    NexusPhpHtmlParser,
+)
 from app.adapters.pt_sites.profiles import NexusPhpSelectors, NexusPhpSiteProfile
 from app.adapters.pt_sites.registry import PtSiteRegistry, default_pt_site_registry
 from app.errors import AppError
@@ -88,6 +92,225 @@ def recording_gate(
 async def public_resolver(host: str, port: int) -> tuple[str, ...]:
     del host, port
     return ("93.184.216.34",)
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_connection_probe_performs_one_bounded_cookie_only_get() -> None:
+    cookie = "session=runtime-cookie-secret; uid=42"
+    requests: list[httpx.Request] = []
+    gate_calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=(
+                b"<html><body>"
+                b"<a href='/logout.php'>Logout</a>"
+                b"<a href='/userdetails.php?id=42'>Account</a>"
+                b"</body></html>"
+            ),
+        )
+
+    probe = NexusPhpConnectionProbe(
+        "https://tracker.example.invalid",
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header=cookie,
+        transport=httpx.MockTransport(handler),
+        address_resolver=public_resolver,
+        max_response_bytes=1024,
+        request_gate=recording_gate(gate_calls),
+    )
+    try:
+        result = await probe.probe()
+    finally:
+        await probe.aclose()
+
+    assert result.healthy is True
+    assert result.error_code is None
+    assert gate_calls == ["connection_probe"]
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path == "/torrents.php"
+    assert requests[0].url.query == b""
+    assert requests[0].content == b""
+    assert requests[0].headers["cookie"] == cookie
+    assert "passkey" not in str(requests[0].url).casefold()
+    assert cookie not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "content_type", "error_code"),
+    (
+        (
+            b"<form action='/login.php'><input name='username'></form>",
+            "text/html",
+            "NEXUSPHP_LOGIN_REQUIRED",
+        ),
+        (
+            b"<form id='challenge-form'></form>",
+            "text/html",
+            "NEXUSPHP_CHALLENGE_UNSUPPORTED",
+        ),
+        (
+            b"<a href='/logout.php'>Logout</a>",
+            "text/html",
+            "NEXUSPHP_SESSION_UNVERIFIED",
+        ),
+        (
+            b"<a href='/userdetails.php?id=42'>Account</a>",
+            "text/html",
+            "NEXUSPHP_SESSION_UNVERIFIED",
+        ),
+        (
+            b"{}",
+            "application/json",
+            "NEXUSPHP_NON_HTML_RESPONSE",
+        ),
+    ),
+)
+async def test_nexusphp_connection_probe_never_accepts_ambiguous_pages(
+    body: bytes,
+    content_type: str,
+    error_code: str,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, headers={"content-type": content_type}, content=body)
+
+    probe = NexusPhpConnectionProbe(
+        "https://tracker.example.invalid",
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header="session=runtime-cookie-secret",
+        transport=httpx.MockTransport(handler),
+        address_resolver=public_resolver,
+        max_response_bytes=1024,
+    )
+    try:
+        result = await probe.probe()
+    finally:
+        await probe.aclose()
+
+    assert result.healthy is False
+    assert result.error_code == error_code
+    assert "runtime-cookie-secret" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_connection_probe_rejects_cross_origin_redirect() -> None:
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://evil.example/steal"})
+
+    probe = NexusPhpConnectionProbe(
+        "https://tracker.example.invalid",
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header="session=runtime-cookie-secret",
+        transport=httpx.MockTransport(handler),
+        address_resolver=public_resolver,
+        max_response_bytes=1024,
+    )
+    try:
+        result = await probe.probe()
+    finally:
+        await probe.aclose()
+
+    assert result.healthy is False
+    assert result.error_code == "NEXUSPHP_CROSS_ORIGIN_REDIRECT"
+    assert requests == ["https://tracker.example.invalid/torrents.php"]
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_connection_probe_rejects_private_dns_before_sending_cookie() -> None:
+    seen_cookies: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_cookies.append(request.headers.get("cookie", ""))
+        return httpx.Response(200, headers={"content-type": "text/html"})
+
+    async def private_resolver(host: str, port: int) -> tuple[str, ...]:
+        assert host == "tracker.example.invalid"
+        assert port == 443
+        return ("10.0.0.8",)
+
+    probe = NexusPhpConnectionProbe(
+        "https://tracker.example.invalid",
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header="session=must-not-be-sent",
+        transport=httpx.MockTransport(handler),
+        address_resolver=private_resolver,
+        max_response_bytes=1024,
+    )
+    try:
+        result = await probe.probe()
+    finally:
+        await probe.aclose()
+
+    assert result.healthy is False
+    assert result.error_code == "NEXUSPHP_HOST_ADDRESS_NOT_ALLOWED"
+    assert seen_cookies == []
+    assert "must-not-be-sent" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_connection_probe_rejects_oversized_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=b"x" * 1025,
+        )
+
+    probe = NexusPhpConnectionProbe(
+        "https://tracker.example.invalid",
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header="session=runtime-cookie-secret",
+        transport=httpx.MockTransport(handler),
+        address_resolver=public_resolver,
+        max_response_bytes=1024,
+    )
+    try:
+        result = await probe.probe()
+    finally:
+        await probe.aclose()
+
+    assert result.healthy is False
+    assert result.error_code == "NEXUSPHP_RESPONSE_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_nexusphp_connection_probe_ignores_cross_origin_authentication_markers() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=(
+                b"<a href='https://evil.example/logout.php'>Logout</a>"
+                b"<a href='https://evil.example/userdetails.php?id=42'>Account</a>"
+            ),
+        )
+
+    probe = NexusPhpConnectionProbe(
+        "https://tracker.example.invalid",
+        allowed_hosts=("tracker.example.invalid",),
+        cookie_header="session=runtime-cookie-secret",
+        transport=httpx.MockTransport(handler),
+        address_resolver=public_resolver,
+        max_response_bytes=1024,
+    )
+    try:
+        result = await probe.probe()
+    finally:
+        await probe.aclose()
+
+    assert result.healthy is False
+    assert result.error_code == "NEXUSPHP_SESSION_UNVERIFIED"
 
 
 def metadata_record(tmdb_id: int = 123) -> MetadataRecord:

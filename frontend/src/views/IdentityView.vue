@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import { useAuthStore } from '../stores/auth'
 import { useIdentityStore } from '../stores/identity'
+import { formatCountryCodes } from '../utils/format'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -14,6 +15,7 @@ const mediaId = computed(() => String(route.params.id))
 const canOperate = computed(() => auth.hasRole('operator'))
 
 watch(mediaId, (value) => void store.load(value), { immediate: true })
+onBeforeUnmount(() => store.cancelResolution())
 
 function posterUrl(path: string | null): string | null {
   return path ? `https://image.tmdb.org/t/p/w342${path}` : null
@@ -30,7 +32,7 @@ function confirm(matchId: string): void {
     <PageHeader
       eyebrow="IDENTITY REVIEW"
       title="影视身份确认"
-      description="人工核对 NextFind 条目与 TMDB 候选。"
+      description="核对 NextFind 条目与 TMDB 候选；这里只处理无法自动确认的条目。"
     >
       <div class="header-actions">
         <a class="button secondary" href="/media">返回列表</a>
@@ -43,11 +45,11 @@ function confirm(matchId: string): void {
           class="button primary"
           data-testid="continue-pt-search"
           :href="`/media/${mediaId}/torrents`"
-        >继续 PT 搜索</a>
+        >查看 PT 候选</a>
       </div>
     </PageHeader>
 
-    <div class="phase-banner"><span>只读</span>身份不会自动批准，必须由操作者明确确认。</div>
+    <div class="phase-banner"><span>自动识别</span>信息完全一致时系统自动确认；存在缺失或冲突时才需要人工选择。</div>
     <PageState :loading="store.loading" :error="store.error" />
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
 
@@ -56,7 +58,9 @@ function confirm(matchId: string): void {
         <div><span>NextFind 标题</span><strong>{{ store.media.title }}</strong></div>
         <div><span>类型</span><strong>{{ store.media.media_type === 'movie' ? '电影' : '电视剧' }}</strong></div>
         <div><span>年份</span><strong>{{ store.media.year ?? '未知' }}</strong></div>
+        <div data-testid="source-country"><span>国家 / 地区</span><strong>{{ formatCountryCodes(store.media.country_codes) || '待确认' }}</strong></div>
         <div><span>原 TMDB ID</span><strong class="mono">{{ store.media.tmdb_id ?? '未提供' }}</strong></div>
+        <div><span>元数据状态</span><strong>{{ store.media.metadata_status }}</strong></div>
         <div><span>状态</span><strong>{{ store.media.workflow_status }}</strong></div>
       </section>
 
@@ -84,6 +88,7 @@ function confirm(matchId: string): void {
             <dl class="candidate-facts">
               <div><dt>年份</dt><dd>{{ match.candidate.year ?? '—' }}</dd></div>
               <div><dt>类型</dt><dd>{{ match.candidate.media_type === 'movie' ? '电影' : '电视剧' }}</dd></div>
+              <div><dt>国家 / 地区</dt><dd data-testid="candidate-country">{{ formatCountryCodes(match.candidate.country_codes) || '—' }}</dd></div>
               <div><dt>IMDb</dt><dd class="mono">{{ match.candidate.imdb_id || '—' }}</dd></div>
               <div><dt>季 / 集</dt><dd>{{ match.candidate.number_of_seasons ?? '—' }} / {{ match.candidate.number_of_episodes ?? '—' }}</dd></div>
             </dl>

@@ -253,9 +253,19 @@ def build_pt_site_catalog(settings: Settings) -> PtSiteCatalog:
     return PtSiteCatalog(
         (
             avistaz_site_declaration(
-                search_enabled=settings.enable_avistaz_live_search,
-                runtime_ready=settings.avistaz_configured,
-                torrent_fetch_enabled=settings.enable_avistaz_torrent_fetch,
+                search_enabled=(
+                    settings.pt_site_architecture == "avistaz"
+                    and settings.enable_avistaz_live_search
+                ),
+                runtime_ready=(
+                    settings.pt_site_architecture == "avistaz"
+                    and settings.pt_site_runtime_supported
+                    and settings.pt_site_configured
+                ),
+                torrent_fetch_enabled=(
+                    settings.pt_site_architecture == "avistaz"
+                    and settings.enable_avistaz_torrent_fetch
+                ),
             ),
         ),
         default_site_id="avistaz",

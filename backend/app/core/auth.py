@@ -7,8 +7,8 @@ import hmac
 import json
 import secrets
 import time
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from app.errors import AppError
 from app.models.enums import AuthRole
@@ -16,6 +16,11 @@ from app.models.enums import AuthRole
 SESSION_COOKIE_NAME = "unin_session"
 CSRF_COOKIE_NAME = "unin_csrf"
 CSRF_HEADER_NAME = "X-CSRF-Token"
+PASSWORD_DIGEST_ALGORITHM = "pbkdf2_sha256"
+PASSWORD_DIGEST_VERSION = "v1"
+PASSWORD_DIGEST_ITERATIONS = 600_000
+_PASSWORD_SALT_BYTES = 16
+_PASSWORD_DERIVED_KEY_BYTES = 32
 
 _ROLE_RANK = {
     AuthRole.VIEWER: 10,
@@ -31,6 +36,15 @@ class Principal:
     issued_at: int
     expires_at: int
     csrf_digest: str
+
+
+@dataclass(frozen=True)
+class AuthMaterial:
+    username: str
+    credential_kind: Literal["plaintext", "pbkdf2_sha256"]
+    role: AuthRole
+    credential: str = field(repr=False)
+    signing_key: str = field(repr=False)
 
 
 def new_csrf_token() -> str:
@@ -166,6 +180,92 @@ def verify_local_credentials(
     return username_matches and password_matches
 
 
+def create_password_digest(
+    password: str,
+    *,
+    iterations: int = PASSWORD_DIGEST_ITERATIONS,
+) -> str:
+    if iterations < 1:
+        raise ValueError("password digest iterations must be positive")
+    salt = secrets.token_bytes(_PASSWORD_SALT_BYTES)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+        dklen=_PASSWORD_DERIVED_KEY_BYTES,
+    )
+    return "$".join(
+        (
+            PASSWORD_DIGEST_ALGORITHM,
+            PASSWORD_DIGEST_VERSION,
+            str(iterations),
+            _b64encode(salt),
+            _b64encode(digest),
+        )
+    )
+
+
+def verify_password_digest(password: str, encoded_digest: str) -> bool:
+    try:
+        algorithm, version, raw_iterations, raw_salt, raw_expected = encoded_digest.split("$")
+        if algorithm != PASSWORD_DIGEST_ALGORITHM or version != PASSWORD_DIGEST_VERSION:
+            return False
+        iterations = int(raw_iterations)
+        if not 1 <= iterations <= PASSWORD_DIGEST_ITERATIONS:
+            return False
+        salt = _decode_password_component(raw_salt, expected_length=_PASSWORD_SALT_BYTES)
+        expected = _decode_password_component(
+            raw_expected,
+            expected_length=_PASSWORD_DERIVED_KEY_BYTES,
+        )
+    except (TypeError, ValueError):
+        return False
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+        dklen=_PASSWORD_DERIVED_KEY_BYTES,
+    )
+    return hmac.compare_digest(actual, expected)
+
+
+def verify_runtime_credentials(
+    *,
+    username: str,
+    password: str,
+    expected_username: str,
+    expected_password_digest: str,
+) -> bool:
+    username_matches = hmac.compare_digest(
+        _credential_digest(username), _credential_digest(expected_username)
+    )
+    password_matches = verify_password_digest(password, expected_password_digest)
+    return username_matches and password_matches
+
+
+def verify_auth_material_credentials(
+    *,
+    username: str,
+    password: str,
+    material: AuthMaterial,
+) -> bool:
+    if material.credential_kind == "plaintext":
+        return verify_local_credentials(
+            username=username,
+            password=password,
+            expected_username=material.username,
+            expected_password=material.credential,
+        )
+    return verify_runtime_credentials(
+        username=username,
+        password=password,
+        expected_username=material.username,
+        expected_password_digest=material.credential,
+    )
+
+
 def role_allows(actual: AuthRole, required: AuthRole) -> bool:
     return _ROLE_RANK[actual] >= _ROLE_RANK[required]
 
@@ -203,6 +303,21 @@ def _b64decode(value: str) -> bytes:
         return base64.urlsafe_b64decode(f"{value}{padding}")
     except (binascii.Error, ValueError, TypeError) as exc:
         raise _invalid_session() from exc
+
+
+def _decode_password_component(value: str, *, expected_length: int) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    try:
+        decoded = base64.b64decode(
+            f"{value}{padding}",
+            altchars=b"-_",
+            validate=True,
+        )
+    except (binascii.Error, ValueError, TypeError) as exc:
+        raise ValueError("invalid password digest encoding") from exc
+    if len(decoded) != expected_length:
+        raise ValueError("invalid password digest component length")
+    return decoded
 
 
 def _invalid_session() -> AppError:

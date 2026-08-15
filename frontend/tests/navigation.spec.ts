@@ -15,8 +15,12 @@ beforeEach(() => {
 })
 
 describe('authenticated navigation', () => {
-  it('registers login and qBittorrent routes and exposes protected navigation', async () => {
+  it('keeps operational routes directly accessible while exposing only daily navigation', async () => {
     expect(router.resolve('/login').matched).toHaveLength(1)
+    expect(router.resolve('/configuration').matched).toHaveLength(1)
+    expect(router.resolve('/discovery').matched).toHaveLength(1)
+    expect(router.resolve('/adapters').matched).toHaveLength(1)
+    expect(router.resolve('/approvals/approval-1').matched).toHaveLength(1)
     expect(router.resolve('/qbittorrent').matched).toHaveLength(1)
     expect(router.resolve('/executions/execution-1').matched).toHaveLength(1)
     expect(router.resolve('/download-jobs/job-1').matched).toHaveLength(1)
@@ -25,6 +29,7 @@ describe('authenticated navigation', () => {
     expect(router.resolve('/media-imports/import-1').matched).toHaveLength(1)
     expect(router.resolve('/automation').matched).toHaveLength(1)
     await router.push('/')
+    expect(router.currentRoute.value.path).toBe('/media')
 
     const wrapper = mount(App, {
       global: {
@@ -38,29 +43,43 @@ describe('authenticated navigation', () => {
         },
       },
     })
-    expect(wrapper.get('a[href="/qbittorrent"]').text()).toContain('qB 状态')
-    expect(wrapper.get('a[href="/executions"]').text()).toContain('下载执行')
-    expect(wrapper.get('a[href="/download-jobs"]').text()).toContain('下载任务')
-    expect(wrapper.get('a[href="/media-imports"]').text()).toContain('入库规划')
-    expect(wrapper.get('a[href="/automation"]').text()).toContain('自动化')
+    expect(
+      wrapper.findAll('.primary-nav-link').map((link) => ({
+        href: link.attributes('href'),
+        text: link.text(),
+      })),
+    ).toEqual([
+      { href: '/media', text: '▦待处理' },
+      { href: '/download-jobs', text: '↓下载' },
+      { href: '/configuration', text: '⚙设置' },
+    ])
+    expect(wrapper.find('.nav-disclosure').exists()).toBe(false)
+    expect(wrapper.find('a[href="/"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/discovery"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/adapters"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/approvals"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/media-imports"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/automation"]').exists()).toBe(false)
+    expect(wrapper.find('a[href="/qbittorrent"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('admin-user')
     expect(wrapper.text()).toContain('管理员')
-    expect(wrapper.text()).toContain('第七阶段')
+    expect(wrapper.text()).toContain('人工确认')
   })
 
   it('guards protected routes and accepts only safe internal login redirects', async () => {
     const auth = useAuthStore()
     auth.principal = null
 
+    await router.push('/login')
     await router.push('/media')
     expect(router.currentRoute.value.path).toBe('/login')
     expect(router.currentRoute.value.query.redirect).toBe('/media')
 
     auth.principal = { username: 'admin-user', role: 'admin' }
-    await router.push('/login?redirect=/qbittorrent')
-    expect(router.currentRoute.value.path).toBe('/qbittorrent')
+    await router.push('/login?redirect=/configuration')
+    expect(router.currentRoute.value.path).toBe('/configuration')
 
     await router.push('/login?redirect=https://example.invalid')
-    expect(router.currentRoute.value.path).toBe('/')
+    expect(router.currentRoute.value.path).toBe('/media')
   })
 })

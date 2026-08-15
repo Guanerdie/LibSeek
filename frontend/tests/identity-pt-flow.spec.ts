@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   torrentGet: vi.fn(),
   torrentCandidates: vi.fn(),
   torrentCreate: vi.fn(),
+  approvalConfirmDownload: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -46,6 +47,7 @@ vi.mock('../src/api/client', () => ({
     candidates: mocks.torrentCandidates,
     create: mocks.torrentCreate,
   },
+  approvalApi: { confirmDownload: mocks.approvalConfirmDownload },
 }))
 
 function mediaWithStatus(
@@ -61,6 +63,7 @@ function mediaWithStatus(
     title: `测试剧集 ${workflowStatus}`,
     original_title: 'Test Series',
     year: 2026,
+    country_codes: null,
     poster_path: null,
     raw_type: 'tv',
     local_episodes: 2,
@@ -125,6 +128,7 @@ const metadataMatch = {
     english_title: 'Test Series',
     original_title: 'Test Series',
     original_language: 'en',
+    country_codes: null,
     aliases: [],
     year: 2026,
     number_of_seasons: 1,
@@ -226,7 +230,7 @@ describe('身份确认到 PT 搜索的门禁', () => {
       job_id: 'job-1',
       deduplicated: false,
     })
-    mocks.torrentGet.mockResolvedValue({ ...searchRun, status: 'PT_SEARCH_PENDING' })
+    mocks.torrentGet.mockResolvedValue(searchRun)
     mocks.torrentCandidates.mockResolvedValue([])
 
     const wrapper = mount(TorrentCandidatesView)
@@ -296,7 +300,7 @@ describe('身份确认到 PT 搜索的门禁', () => {
     expect(mocks.confirmIdentity).not.toHaveBeenCalled()
   })
 
-  it('确认身份后响应最新媒体状态并显示继续 PT 搜索入口', async () => {
+  it('确认身份后响应最新媒体状态并显示 PT 候选入口', async () => {
     const auth = useAuthStore()
     auth.principal = { username: 'viewer-user', role: 'viewer' }
     mocks.mediaGet
@@ -320,7 +324,7 @@ describe('身份确认到 PT 搜索的门禁', () => {
     expect(mocks.confirmIdentity).toHaveBeenCalledWith('media-1', 'match-1')
     expect(useIdentityStore().media?.workflow_status).toBe('IDENTITY_CONFIRMED')
     const nextEntry = wrapper.get('[data-testid="continue-pt-search"]')
-    expect(nextEntry.text()).toBe('继续 PT 搜索')
+    expect(nextEntry.text()).toBe('查看 PT 候选')
     expect(nextEntry.attributes('href')).toBe('/media/media-1/torrents')
   })
 })

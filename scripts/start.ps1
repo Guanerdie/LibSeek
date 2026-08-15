@@ -48,9 +48,21 @@ if ($processOverrides.Count -gt 0) {
 }
 
 if (-not (Test-Path -LiteralPath $EnvFile)) {
-    Copy-Item -LiteralPath $ExampleFile -Destination $EnvFile
-    Write-Host 'Created .env. Update the PostgreSQL password and local authentication values before starting.' -ForegroundColor Yellow
-    exit 1
+    $randomBytes = New-Object byte[] 32
+    $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $randomGenerator.GetBytes($randomBytes)
+    }
+    finally {
+        $randomGenerator.Dispose()
+    }
+    $postgresPassword = ([BitConverter]::ToString($randomBytes)).Replace('-', '').ToLowerInvariant()
+    $contents = (Get-Content -Raw -LiteralPath $ExampleFile -Encoding UTF8).Replace(
+        'change-me-before-production',
+        $postgresPassword
+    )
+    [IO.File]::WriteAllText($EnvFile, $contents, [Text.UTF8Encoding]::new($false))
+    Write-Host 'Created local .env with a random PostgreSQL password.' -ForegroundColor Green
 }
 
 $unsupportedDotEnvLineNumbers = @(
@@ -123,14 +135,21 @@ if (
     throw 'Refusing to start with the example PostgreSQL password. Update POSTGRES_PASSWORD and DATABASE_URL in .env.'
 }
 
-$authUsername = Get-DotEnvValue 'AUTH_LOCAL_USERNAME'
-$authPassword = Get-DotEnvValue 'AUTH_LOCAL_PASSWORD'
-$authSigningKey = Get-DotEnvValue 'AUTH_SESSION_SIGNING_KEY'
-if (-not $authUsername -or -not $authPassword -or $authSigningKey.Length -lt 32) {
-    throw 'Local start requires AUTH_LOCAL_USERNAME, AUTH_LOCAL_PASSWORD, and an AUTH_SESSION_SIGNING_KEY of at least 32 characters.'
+$composeArguments = @(
+    '--context', $DockerContext,
+    'compose',
+    '--project-directory', $ProjectRoot,
+    '--env-file', $EnvFile,
+    '-f', $ComposeFile
+)
+if ((Get-DotEnvValue 'ENABLE_DOWNLOAD_EXECUTOR') -ceq 'true') {
+    $composeArguments += @('--profile', 'download-execution')
+}
+if ((Get-DotEnvValue 'ENABLE_DOWNLOAD_MONITOR') -ceq 'true') {
+    $composeArguments += @('--profile', 'download-monitor')
 }
 
-docker --context $DockerContext compose --project-directory $ProjectRoot --env-file $EnvFile -f $ComposeFile config --quiet
+& docker @composeArguments config --quiet
 if ($LASTEXITCODE -ne 0) {
     throw "Docker Compose validation failed with exit code $LASTEXITCODE"
 }
@@ -139,12 +158,12 @@ if ($ValidateOnly) {
     exit 0
 }
 
-docker --context $DockerContext compose --project-directory $ProjectRoot --env-file $EnvFile -f $ComposeFile up -d --build --wait --wait-timeout 180
+& docker @composeArguments up -d --build --wait --wait-timeout 180
 if ($LASTEXITCODE -ne 0) {
     throw "Docker Compose startup failed with exit code $LASTEXITCODE"
 }
-docker --context $DockerContext compose --project-directory $ProjectRoot --env-file $EnvFile -f $ComposeFile ps
+& docker @composeArguments ps
 if ($LASTEXITCODE -ne 0) {
     throw "Docker Compose status check failed with exit code $LASTEXITCODE"
 }
-Write-Host 'Frontend: http://127.0.0.1:8080  API: http://127.0.0.1:8000/api/docs' -ForegroundColor Green
+Write-Host 'Open http://127.0.0.1:9527 to create the local administrator and configure connections.' -ForegroundColor Green

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 
@@ -65,7 +65,7 @@ from app.schemas.executions import (
     ExecutionIntentCreateRequest,
 )
 from app.schemas.qbittorrent import QbTorrent
-from app.services.approvals import download_plan_hash, snapshot_hash
+from app.services.approvals import build_qb_plan_tags, download_plan_hash, snapshot_hash
 from app.services.automation import add_decision_once, build_automation_decision
 from app.services.automation_policy import get_current_policy, publish_policy_revision
 from app.services.executions import create_execution_intent, execute_approved_plan
@@ -172,6 +172,7 @@ class FakeAvistaZ:
         payload: bytes,
         *,
         search_error: AppError | None = None,
+        fetch_error: AppError | None = None,
         manifest_id: str = "avistaz",
         manifest_enabled: bool = True,
         fetch_enabled: bool = True,
@@ -181,6 +182,7 @@ class FakeAvistaZ:
         self.candidates = candidates
         self.payload = payload
         self.search_error = search_error
+        self.fetch_error = fetch_error
         self.manifest_id = manifest_id
         self.manifest_enabled = manifest_enabled
         self.fetch_enabled = fetch_enabled
@@ -227,6 +229,8 @@ class FakeAvistaZ:
         if self.before_request is not None:
             await self.before_request()
         self.fetch_calls.append(torrent_id)
+        if self.fetch_error is not None:
+            raise self.fetch_error
         return self.payload
 
     async def aclose(self) -> None:
@@ -272,6 +276,8 @@ class FakeQb:
         *,
         add_result: QbAddResult | None = None,
         add_error: AppError | None = None,
+        category_error: AppError | None = None,
+        create_category: bool = False,
         before_add_request: Callable[[], Awaitable[None]] | None = None,
         before_write_guard: Callable[[], Awaitable[None]] | None = None,
         before_list_request: Callable[[], Awaitable[None]] | None = None,
@@ -279,11 +285,16 @@ class FakeQb:
         self.list_results = list_results
         self.add_result = add_result
         self.add_error = add_error
+        self.category_error = category_error
+        self.create_category = create_category
         self.before_add_request = before_add_request
         self.before_write_guard = before_write_guard
         self.before_list_request = before_list_request
         self.calls: list[str] = []
+        self.hash_queries: list[tuple[str, ...]] = []
         self.added_payloads: list[bytes] = []
+        self.added_tags: list[tuple[str, ...]] = []
+        self.category_write_guard_calls = 0
         self.write_guard_calls = 0
         self.before_request: Callable[[], Awaitable[None]] | None = None
 
@@ -300,13 +311,35 @@ class FakeQb:
         await self._guard_request()
         self.calls.append("authenticate")
 
-    async def list_torrents(self) -> list[QbTorrent]:
+    async def find_torrents_by_hashes(
+        self, hashes: Collection[str]
+    ) -> list[QbTorrent]:
         if self.before_list_request is not None:
             await self.before_list_request()
         await self._guard_request()
-        self.calls.append("list_torrents")
-        index = min(self.calls.count("list_torrents") - 1, len(self.list_results) - 1)
+        self.calls.append("find_torrents_by_hashes")
+        self.hash_queries.append(tuple(hashes))
+        index = min(
+            self.calls.count("find_torrents_by_hashes") - 1,
+            len(self.list_results) - 1,
+        )
         return self.list_results[index]
+
+    async def ensure_category(
+        self,
+        category: str,
+        save_path: str,
+        *,
+        write_guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        del category, save_path
+        if self.create_category or self.category_error is not None:
+            if write_guard is not None:
+                self.category_write_guard_calls += 1
+                await write_guard()
+            self.calls.append("create_category")
+            if self.category_error is not None:
+                raise self.category_error
 
     async def add_torrent(
         self,
@@ -317,9 +350,17 @@ class FakeQb:
         category: str,
         tags: tuple[str, ...] = (),
         start_immediately: bool = True,
+        category_prepared: bool = False,
+        category_write_guard: Callable[[], Awaitable[None]] | None = None,
         write_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> QbAddResult:
-        del expected_info_hash, save_path, category, tags, start_immediately
+        del expected_info_hash, start_immediately
+        if not category_prepared:
+            await self.ensure_category(
+                category,
+                save_path,
+                write_guard=category_write_guard or write_guard,
+            )
         if self.before_add_request is not None:
             await self.before_add_request()
         await self._guard_request()
@@ -330,6 +371,7 @@ class FakeQb:
             await write_guard()
         self.calls.append("add_torrent")
         self.added_payloads.append(torrent)
+        self.added_tags.append(tags)
         if self.add_error is not None:
             raise self.add_error
         if self.add_result is None:
@@ -341,8 +383,31 @@ class FakeQb:
 
 
 class CrashingQb(FakeQb):
-    async def authenticate(self) -> NoReturn:
-        self.calls.append("authenticate")
+    async def add_torrent(
+        self,
+        torrent: bytes,
+        *,
+        expected_info_hash: str,
+        save_path: str,
+        category: str,
+        tags: tuple[str, ...] = (),
+        start_immediately: bool = True,
+        category_prepared: bool = False,
+        category_write_guard: Callable[[], Awaitable[None]] | None = None,
+        write_guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> NoReturn:
+        del (
+            torrent,
+            expected_info_hash,
+            save_path,
+            category,
+            tags,
+            start_immediately,
+            category_prepared,
+            category_write_guard,
+            write_guard,
+        )
+        self.calls.append("add_torrent")
         raise KeyboardInterrupt("simulated process crash")
 
 
@@ -504,7 +569,7 @@ async def seed_pending_execution(
             release_title=RELEASE_TITLE,
             save_path_ref="movies-root",
             category="movies",
-            tags=["unin-plan"],
+            tags=list(build_qb_plan_tags(settings.qb_plan_tags, media.title)),
             estimated_size_bytes=1024,
             media_destination_plan=destination.model_dump(mode="json"),
             preflight_result=preflight.model_dump(mode="json"),
@@ -1034,12 +1099,14 @@ async def test_executor_submits_only_exact_researched_torrent_and_creates_job(
     assert qb.before_request is not None
     assert qb.calls == [
         "authenticate",
-        "list_torrents",
+        "find_torrents_by_hashes",
         "add_torrent",
-        "list_torrents",
+        "find_torrents_by_hashes",
         "close",
     ]
+    assert qb.hash_queries == [(info_hash,), (info_hash,)]
     assert qb.added_payloads == [payload]
+    assert qb.added_tags == [("unin-plan", "Execution Movie")]
     async with session_factory() as session:
         execution = await session.get(DownloadExecution, execution_id)
         job = await session.scalar(
@@ -1129,6 +1196,102 @@ async def test_same_title_with_different_torrent_id_never_fetches_or_reaches_qb(
 
 
 @pytest.mark.asyncio
+async def test_category_creation_failure_uses_bounded_retry_before_torrent_add(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    first_pt = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    second_pt = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    pt_adapters = iter((first_pt, second_pt))
+    first_qb = FakeQb(
+        [[]],
+        category_error=AppError(
+            "QB_CATEGORY_CREATE_FAILED",
+            "category create failed",
+            status_code=502,
+            retryable=True,
+            details={"category": "movies"},
+        ),
+    )
+    observed = qb_observation(info_hash)
+    second_qb = FakeQb(
+        [[], [observed]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+    )
+    qb_adapters = iter((first_qb, second_qb))
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: next(pt_adapters)),
+        lambda: next(qb_adapters),
+        settings,
+    )
+
+    assert await executor.run_once() is True
+
+    assert first_qb.category_write_guard_calls == 1
+    assert first_qb.write_guard_calls == 0
+    assert first_qb.added_payloads == []
+    assert first_qb.calls == [
+        "authenticate",
+        "find_torrents_by_hashes",
+        "create_category",
+        "close",
+    ]
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        approval = (
+            await session.get(ApprovalRequest, execution.approval_id)
+            if execution is not None
+            else None
+        )
+        retry_event = await session.scalar(
+            select(DownloadExecutionEvent).where(
+                DownloadExecutionEvent.download_execution_id == execution_id,
+                DownloadExecutionEvent.event_type == "VALIDATION_RETRY_SCHEDULED",
+            )
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.RETRY_WAIT
+        assert execution.attempts == 1
+        assert execution.next_retry_at is not None
+        assert execution.actual_info_hash is None
+        assert execution.actual_info_hash_v1 is None
+        assert execution.actual_info_hash_v2 is None
+        assert execution.lease_token is None
+        assert approval is not None and approval.status == ApprovalStatus.APPROVED
+        assert retry_event is not None
+        assert retry_event.sanitized_details == {
+            "error_code": "QB_CATEGORY_CREATE_FAILED",
+            "attempt": 1,
+            "automatic_retry_allowed": True,
+            "external_write_performed": False,
+            "category_write_may_have_occurred": True,
+        }
+        execution.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    assert await executor.run_once() is True
+
+    assert second_qb.category_write_guard_calls == 0
+    assert second_qb.write_guard_calls == 1
+    assert second_qb.added_payloads == [payload]
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        approval = (
+            await session.get(ApprovalRequest, execution.approval_id)
+            if execution is not None
+            else None
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.SUBMITTED
+        assert execution.attempts == 2
+        assert approval is not None and approval.status == ApprovalStatus.CONSUMED
+
+
+@pytest.mark.asyncio
 async def test_unknown_add_outcome_is_terminal_and_never_automatically_retried(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1138,6 +1301,7 @@ async def test_unknown_add_outcome_is_terminal_and_never_automatically_retried(
     avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
     qb = FakeQb(
         [[]],
+        create_category=True,
         add_error=AppError(
             "QB_ADD_OUTCOME_UNKNOWN",
             "qB add result unknown",
@@ -1156,6 +1320,9 @@ async def test_unknown_add_outcome_is_terminal_and_never_automatically_retried(
     assert await executor.run_once() is True
     assert await executor.run_once() is False
 
+    assert qb.category_write_guard_calls == 1
+    assert qb.write_guard_calls == 1
+    assert qb.calls.count("create_category") == 1
     assert qb.calls.count("add_torrent") == 1
     async with session_factory() as session:
         execution = await session.get(DownloadExecution, execution_id)
@@ -1204,7 +1371,7 @@ async def test_automatic_policy_change_before_qb_post_cancels_without_write(
 
     assert await executor.run_once() is True
 
-    assert qb.calls == ["authenticate", "list_torrents", "close"]
+    assert qb.calls == ["authenticate", "find_torrents_by_hashes", "close"]
     assert qb.write_guard_calls == 0
     assert qb.added_payloads == []
     async with session_factory() as session:
@@ -1261,7 +1428,7 @@ async def test_write_guard_blocks_policy_change_after_global_request_guard(
 
     assert await executor.run_once() is True
 
-    assert qb.calls == ["authenticate", "list_torrents", "close"]
+    assert qb.calls == ["authenticate", "find_torrents_by_hashes", "close"]
     assert qb.write_guard_calls == 1
     assert qb.added_payloads == []
     async with session_factory() as session:
@@ -1317,7 +1484,12 @@ async def test_automatic_policy_change_after_qb_add_requires_manual_reconciliati
 
     assert await executor.run_once() is True
 
-    assert qb.calls == ["authenticate", "list_torrents", "add_torrent", "close"]
+    assert qb.calls == [
+        "authenticate",
+        "find_torrents_by_hashes",
+        "add_torrent",
+        "close",
+    ]
     assert list_attempts == 2
     assert qb.write_guard_calls == 1
     assert qb.added_payloads == [payload]
@@ -1383,9 +1555,9 @@ async def test_policy_change_between_final_fence_and_finalize_is_outcome_unknown
 
     assert qb.calls == [
         "authenticate",
-        "list_torrents",
+        "find_torrents_by_hashes",
         "add_torrent",
-        "list_torrents",
+        "find_torrents_by_hashes",
         "close",
     ]
     async with session_factory() as session:
@@ -1504,6 +1676,294 @@ async def test_retryable_validation_failure_is_sanitized_and_does_not_touch_qb(
         assert "secret-pid" not in serialized
         assert "secret-passkey" not in serialized
         assert "/download?" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_avistaz_fetch_403_records_safe_status_and_scheduled_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    avistaz = FakeAvistaZ(
+        [approved_candidate(info_hash)],
+        payload,
+        fetch_error=AppError(
+            "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            f"fetch failed at {SECRET_URL}",
+            status_code=502,
+            retryable=True,
+            details={
+                "upstream_status_code": 403,
+                "request_url": SECRET_URL,
+                "response_body": "private tracker response",
+                "headers": {"Authorization": "Bearer secret-token"},
+                "passkey": "secret-passkey",
+            },
+        ),
+    )
+    qb_factory_calls = 0
+
+    def qb_factory() -> NoReturn:
+        nonlocal qb_factory_calls
+        qb_factory_calls += 1
+        raise AssertionError("qB must not be created before torrent validation")
+
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        qb_factory,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+
+    assert qb_factory_calls == 0
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        event = await session.scalar(
+            select(DownloadExecutionEvent).where(
+                DownloadExecutionEvent.download_execution_id == execution_id,
+                DownloadExecutionEvent.event_type == "VALIDATION_RETRY_SCHEDULED",
+            )
+        )
+        assert execution is not None
+        assert event is not None
+        assert execution.status == DownloadExecutionStatus.RETRY_WAIT
+        assert execution.next_retry_at is not None
+        assert execution.error_message == (
+            "AvistaZ 返回 HTTP 403，已安排自动重试（第 1/3 次）"
+        )
+        assert event.sanitized_details == {
+            "error_code": "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            "attempt": 1,
+            "automatic_retry_allowed": True,
+            "external_write_performed": False,
+            "upstream_status_code": 403,
+        }
+        serialized = repr([execution.error_message, event.sanitized_details])
+        assert "secret-pid" not in serialized
+        assert "secret-passkey" not in serialized
+        assert "private tracker response" not in serialized
+        assert "Authorization" not in serialized
+        assert "request_url" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_avistaz_fetch_403_reports_exhausted_retry_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        execution.attempts = execution.max_attempts - 1
+        await session.commit()
+    avistaz = FakeAvistaZ(
+        [approved_candidate(info_hash)],
+        payload,
+        fetch_error=AppError(
+            "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            "torrent fetch forbidden",
+            status_code=502,
+            retryable=True,
+            details={"upstream_status_code": 403},
+        ),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: (_ for _ in ()).throw(
+            AssertionError("qB must not be created before torrent validation")
+        ),
+        settings,
+    )
+
+    assert await executor.run_once() is True
+
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        event = await session.scalar(
+            select(DownloadExecutionEvent).where(
+                DownloadExecutionEvent.download_execution_id == execution_id,
+                DownloadExecutionEvent.event_type == "VALIDATION_FAILED",
+            )
+        )
+        assert execution is not None
+        assert event is not None
+        assert execution.status == DownloadExecutionStatus.FAILED
+        assert execution.attempts == execution.max_attempts == 3
+        assert execution.next_retry_at is None
+        assert execution.error_message == (
+            "AvistaZ 返回 HTTP 403，未安排自动重试或重试次数已耗尽"
+            "（第 3/3 次）"
+        )
+        assert event.sanitized_details == {
+            "error_code": "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            "attempt": 3,
+            "automatic_retry_allowed": False,
+            "external_write_performed": False,
+            "upstream_status_code": 403,
+        }
+
+
+@pytest.mark.asyncio
+async def test_avistaz_fetch_403_retries_with_fresh_adapter_and_submits(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    first_adapter = FakeAvistaZ(
+        [approved_candidate(info_hash)],
+        payload,
+        fetch_error=AppError(
+            "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            "torrent fetch forbidden",
+            status_code=502,
+            retryable=True,
+            details={"upstream_status_code": 403},
+        ),
+    )
+    second_adapter = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    adapters = iter((first_adapter, second_adapter))
+    observed = qb_observation(info_hash)
+    qb = FakeQb(
+        [[], [observed]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: next(adapters)),
+        lambda: qb,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.RETRY_WAIT
+        assert execution.attempts == 1
+        execution.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    assert await executor.run_once() is True
+
+    assert first_adapter.search_calls
+    assert first_adapter.fetch_calls == [TORRENT_ID]
+    assert first_adapter.closed is True
+    assert second_adapter.search_calls
+    assert second_adapter.fetch_calls == [TORRENT_ID]
+    assert second_adapter.closed is True
+    assert qb.calls == [
+        "authenticate",
+        "find_torrents_by_hashes",
+        "add_torrent",
+        "find_torrents_by_hashes",
+        "close",
+    ]
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        job = await session.scalar(
+            select(DownloadJob).where(DownloadJob.execution_id == execution_id)
+        )
+        event_types = list(
+            (
+                await session.scalars(
+                    select(DownloadExecutionEvent.event_type).where(
+                        DownloadExecutionEvent.download_execution_id == execution_id
+                    )
+                )
+            ).all()
+        )
+        assert execution is not None
+        assert execution.status == DownloadExecutionStatus.SUBMITTED
+        assert execution.attempts == 2
+        assert execution.error_code is None
+        assert execution.error_message is None
+        assert job is not None
+        assert event_types.count("VALIDATION_CLAIMED") == 2
+        assert "VALIDATION_RETRY_SCHEDULED" in event_types
+
+
+@pytest.mark.parametrize("upstream_status", [400, 599])
+def test_safe_upstream_status_accepts_http_error_boundaries(
+    upstream_status: int,
+) -> None:
+    error = AppError(
+        "UPSTREAM_FAILURE",
+        "upstream failed",
+        details={"upstream_status_code": upstream_status},
+    )
+
+    assert DownloadExecutor._safe_upstream_status_code(error) == upstream_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_status",
+    [True, "403", 403.0, 399, 600, {}, []],
+    ids=["bool", "string", "float", "below-range", "above-range", "dict", "list"],
+)
+async def test_invalid_upstream_status_is_not_persisted_or_displayed(
+    session_factory: async_sessionmaker[AsyncSession],
+    invalid_status: object,
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings()
+    execution_id = await seed_pending_execution(session_factory, settings, info_hash)
+    avistaz = FakeAvistaZ(
+        [approved_candidate(info_hash)],
+        payload,
+        fetch_error=AppError(
+            "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            f"fetch failed at {SECRET_URL}",
+            status_code=502,
+            retryable=True,
+            details={
+                "upstream_status_code": invalid_status,
+                "response_body": "private tracker response",
+            },
+        ),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: (_ for _ in ()).throw(
+            AssertionError("qB must not be created before torrent validation")
+        ),
+        settings,
+    )
+
+    assert await executor.run_once() is True
+
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        event = await session.scalar(
+            select(DownloadExecutionEvent).where(
+                DownloadExecutionEvent.download_execution_id == execution_id,
+                DownloadExecutionEvent.event_type == "VALIDATION_RETRY_SCHEDULED",
+            )
+        )
+        assert execution is not None
+        assert event is not None
+        assert execution.error_message == "下载执行在写入前失败，请根据错误代码处理"
+        assert event.sanitized_details == {
+            "error_code": "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+            "attempt": 1,
+            "automatic_retry_allowed": True,
+            "external_write_performed": False,
+        }
+        serialized = repr([execution.error_message, event.sanitized_details])
+        assert "secret-pid" not in serialized
+        assert "private tracker response" not in serialized
 
 
 @pytest.mark.asyncio
@@ -1659,7 +2119,12 @@ async def test_monitor_uses_only_read_methods_and_keeps_hnr_unknown(
     )
     assert await monitor.run_once() == 1
 
-    assert monitor_qb.calls == ["authenticate", "list_torrents", "close"]
+    assert monitor_qb.calls == [
+        "authenticate",
+        "find_torrents_by_hashes",
+        "close",
+    ]
+    assert monitor_qb.hash_queries == [(info_hash,)]
     async with session_factory() as session:
         job = await session.scalar(
             select(DownloadJob).where(DownloadJob.execution_id == execution_id)
@@ -1703,10 +2168,10 @@ async def test_monitor_records_ambiguous_hash_match_as_auditable_error(
     assert await monitor.run_once() == 1
     assert monitor_qb.calls == [
         "authenticate",
-        "list_torrents",
+        "find_torrents_by_hashes",
         "close",
         "authenticate",
-        "list_torrents",
+        "find_torrents_by_hashes",
         "close",
     ]
 

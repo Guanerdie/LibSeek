@@ -29,6 +29,24 @@ SiteId = Annotated[
 ]
 
 
+def normalize_country_codes(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    result: list[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            item = item.get("iso_3166_1")
+        if not isinstance(item, str):
+            continue
+        code = item.strip().upper()
+        if len(code) != 2 or not code.isascii() or not code.isalpha():
+            continue
+        if code not in result:
+            result.append(code)
+    return result or None
+
+
 class PtSearchMode(StrEnum):
     TMDB_ID = "TMDB_ID"
     IMDB_ID = "IMDB_ID"
@@ -92,6 +110,7 @@ class MediaItemData(BaseModel):
     tmdb_id: int | None = None
     title: str
     original_title: str | None = None
+    country_codes: list[str] | None = None
     year: int | None = Field(default=None, ge=1870, le=2200)
     poster_path: str | None = None
     raw_type: str | None = None
@@ -114,6 +133,11 @@ class MediaItemData(BaseModel):
     @classmethod
     def validate_missing_episodes(cls, value: object) -> list[str] | None:
         return normalize_episode_codes(value)
+
+    @field_validator("country_codes", mode="before")
+    @classmethod
+    def validate_country_codes(cls, value: object) -> list[str] | None:
+        return normalize_country_codes(value)
 
 
 class MediaDiscoveryResult(BaseModel):
@@ -150,6 +174,7 @@ class MetadataRecord(BaseModel):
     english_title: str | None = None
     original_title: str | None = None
     original_language: str | None = None
+    country_codes: list[str] | None = None
     aliases: list[str] = Field(default_factory=list)
     year: int | None = None
     number_of_seasons: int | None = Field(default=None, ge=0)
@@ -165,6 +190,11 @@ class MetadataRecord(BaseModel):
     @classmethod
     def validate_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
         return normalize_episode_matrix(value)
+
+    @field_validator("country_codes", mode="before")
+    @classmethod
+    def validate_country_codes(cls, value: object) -> list[str] | None:
+        return normalize_country_codes(value)
 
 
 class TorrentCandidate(BaseModel):

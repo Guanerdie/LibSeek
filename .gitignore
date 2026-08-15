@@ -3,6 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+backend/.pytest-*/
 .mypy_cache/
 .ruff_cache/
 htmlcov/
@@ -14,4 +15,5 @@ frontend/dist/
 *.log
 .DS_Store
 secrets/*.txt
+secrets/.setup-staging/
 !secrets/.gitkeep

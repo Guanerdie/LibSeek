@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import socket
+from functools import partial
 
 from app.adapters.downloaders import QbittorrentReadOnlyAdapter
 from app.core.config import Settings, get_settings
@@ -15,6 +16,7 @@ from app.workers.download_executor import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("unin.download-monitor")
 
 
@@ -51,6 +53,14 @@ async def run() -> None:
     logger.info("Read-only download monitor started: %s", monitor_id)
     while True:
         try:
+            # UI-managed integration settings are replaced atomically. Rebind every
+            # cycle while preserving the monitor's pagination cursor.
+            settings = get_settings()
+            require_download_monitor_enabled(settings)
+            monitor.reconfigure(
+                settings,
+                partial(build_qb_monitor, settings),
+            )
             await monitor.run_once()
         except AppError as exc:
             logger.error("Download monitor cycle failed: error_code=%s", exc.error_code)

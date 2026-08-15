@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Header, Query, Response
 from sqlalchemy.exc import IntegrityError
 
 from app.api.dependencies import (
@@ -9,10 +11,11 @@ from app.api.dependencies import (
     OperatorPrincipal,
     QbAdapter,
     ViewerPrincipal,
+    open_qb_adapter,
 )
 from app.core.config import get_settings
 from app.errors import AppError
-from app.models.entities import ApprovalRequest
+from app.models.entities import ApprovalRequest, DownloadExecution
 from app.models.enums import ApprovalStatus, AutomationStage
 from app.schemas.approvals import (
     ApprovalApproveRequest,
@@ -22,7 +25,13 @@ from app.schemas.approvals import (
     ApprovalRejectRequest,
     ApprovalResponse,
     ApprovalRevokeRequest,
+    CandidateConfirmDownloadRequest,
+    CandidateConfirmDownloadResponse,
     DownloadPlanResponse,
+)
+from app.schemas.executions import (
+    DownloadExecutionCreateRequest,
+    ExecutionIntentCreateRequest,
 )
 from app.services.approvals import (
     approve_request,
@@ -30,13 +39,18 @@ from app.services.approvals import (
     effective_status,
     get_approval_or_404,
     get_download_plan,
+    get_or_create_pending_approval_request,
     list_approval_events,
     list_approval_requests,
+    preflight_is_manually_passable,
     reject_request,
     require_pending_approval,
     revoke_request,
     save_preflight_result,
+    validate_approval_create_request_compatibility,
+    validate_manual_approval_acknowledgements,
     validate_preflight_result,
+    verify_snapshot,
 )
 from app.services.automation import (
     maybe_create_automatic_execution,
@@ -44,7 +58,14 @@ from app.services.automation import (
     maybe_finalize_automatic_approval,
     require_stage_not_disabled,
 )
-from app.services.preflight import evaluate_preflight
+from app.services.executions import (
+    create_execution_intent,
+    download_execution_response,
+    execute_approved_plan,
+    find_idempotent_candidate_execution,
+    require_execution_control_plane_enabled,
+)
+from app.services.preflight import evaluate_preflight, require_preflight_policy_current
 
 router = APIRouter(tags=["approvals", "download-plans"])
 
@@ -85,6 +106,37 @@ async def _response(session: DbSession, approval: ApprovalRequest) -> ApprovalRe
     )
 
 
+async def _confirm_download_response(
+    session: DbSession,
+    approval: ApprovalRequest,
+    *,
+    outcome: Literal[
+        "EXECUTION_CREATED",
+        "EXECUTION_REPLAYED",
+        "PREFLIGHT_BLOCKED",
+    ],
+    execution: DownloadExecution | None,
+    approval_created: bool,
+    execution_created: bool,
+) -> CandidateConfirmDownloadResponse:
+    if approval.preflight_result is None:
+        raise AppError(
+            "PREFLIGHT_REQUIRED",
+            "确认下载结果缺少预检记录",
+            status_code=409,
+        )
+    return CandidateConfirmDownloadResponse(
+        outcome=outcome,
+        approval=await _response(session, approval),
+        preflight=validate_preflight_result(approval.preflight_result),
+        execution=(
+            download_execution_response(execution) if execution is not None else None
+        ),
+        approval_created=approval_created,
+        execution_created=execution_created,
+    )
+
+
 @router.post(
     "/candidates/{candidate_id}/approval-requests",
     response_model=ApprovalResponse,
@@ -121,6 +173,211 @@ async def create_candidate_approval(
     return await _response(session, approval)
 
 
+@router.post(
+    "/candidates/{candidate_id}/confirm-download",
+    response_model=CandidateConfirmDownloadResponse,
+    status_code=201,
+)
+async def confirm_candidate_download(
+    candidate_id: str,
+    request: CandidateConfirmDownloadRequest,
+    response: Response,
+    idempotency_key: Annotated[
+        str,
+        Header(alias="Idempotency-Key", min_length=16, max_length=200),
+    ],
+    session: DbSession,
+    principal: AdminPrincipal,
+) -> CandidateConfirmDownloadResponse:
+    create_request = ApprovalCreateRequest(
+        expires_in_minutes=request.expires_in_minutes,
+    )
+    approve_request_body = ApprovalApproveRequest(
+        acknowledges_hnr=request.acknowledges_hnr,
+        acknowledges_seeding=request.acknowledges_seeding,
+        acknowledges_plan_only=request.acknowledges_plan_only,
+    )
+    existing_execution = await find_idempotent_candidate_execution(
+        session,
+        candidate_id,
+        idempotency_key,
+        request.launch_mode,
+    )
+    if existing_execution is not None:
+        replay_approval = await get_approval_or_404(
+            session,
+            existing_execution.approval_id,
+        )
+        validate_manual_approval_acknowledgements(
+            verify_snapshot(replay_approval),
+            approve_request_body,
+        )
+        try:
+            validate_approval_create_request_compatibility(
+                replay_approval,
+                create_request,
+            )
+        except AppError as exc:
+            raise AppError(
+                "IDEMPOTENCY_KEY_REUSED",
+                "Idempotency-Key 已被其他确认下载请求使用",
+                status_code=409,
+            ) from exc
+        response.status_code = 200
+        response.headers["Cache-Control"] = "no-store"
+        return await _confirm_download_response(
+            session,
+            replay_approval,
+            outcome="EXECUTION_REPLAYED",
+            execution=existing_execution,
+            approval_created=False,
+            execution_created=False,
+        )
+
+    for stage in (
+        AutomationStage.TORRENT_SELECTION,
+        AutomationStage.APPROVAL,
+        AutomationStage.EXECUTION,
+    ):
+        await require_stage_not_disabled(session, stage)
+
+    settings = get_settings()
+    require_execution_control_plane_enabled(settings)
+    async with open_qb_adapter(settings) as adapter:
+        approval: ApprovalRequest | None = None
+        try:
+            approval, approval_created = await get_or_create_pending_approval_request(
+                session,
+                candidate_id,
+                create_request,
+                settings,
+                actor=principal.username,
+            )
+            snapshot = require_pending_approval(session, approval)
+            validate_manual_approval_acknowledgements(snapshot, approve_request_body)
+            snapshot_hash = approval.snapshot_hash
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise AppError(
+                "APPROVAL_REQUEST_CONFLICT",
+                "确认下载时审批请求发生并发冲突，请使用相同幂等键重试",
+                status_code=409,
+            ) from exc
+        except AppError as exc:
+            if approval is not None:
+                await _commit_expiration_on_error(session, approval, exc)
+            raise
+
+        assert approval is not None
+
+        # Keep the external qBittorrent read outside a database transaction.
+        result = await evaluate_preflight(adapter, snapshot, settings)
+
+    for stage in (AutomationStage.APPROVAL, AutomationStage.EXECUTION):
+        await require_stage_not_disabled(session, stage)
+    current_settings = get_settings()
+    require_execution_control_plane_enabled(current_settings)
+    require_preflight_policy_current(result.policy_fingerprint, current_settings)
+    approval = await get_approval_or_404(session, approval.id, for_update=True)
+    try:
+        require_pending_approval(session, approval)
+        if approval.snapshot_hash != snapshot_hash:
+            raise AppError(
+                "APPROVAL_SNAPSHOT_CHANGED",
+                "审批快照已变化，预检结果已丢弃",
+                status_code=409,
+            )
+        await save_preflight_result(
+            session,
+            approval,
+            result,
+            actor=principal.username,
+        )
+        if not preflight_is_manually_passable(result):
+            await session.commit()
+            response.status_code = 200
+            response.headers["Cache-Control"] = "no-store"
+            return await _confirm_download_response(
+                session,
+                approval,
+                outcome="PREFLIGHT_BLOCKED",
+                execution=None,
+                approval_created=approval_created,
+                execution_created=False,
+            )
+
+        await approve_request(
+            session,
+            approval,
+            approve_request_body,
+            current_settings,
+            actor=principal.username,
+        )
+        intent, nonce = await create_execution_intent(
+            session,
+            approval.id,
+            ExecutionIntentCreateRequest(launch_mode=request.launch_mode),
+            current_settings,
+            actor=principal.username,
+        )
+        execution, execution_created = await execute_approved_plan(
+            session,
+            approval.id,
+            DownloadExecutionCreateRequest(intent_id=intent.id, nonce=nonce),
+            idempotency_key,
+            current_settings,
+            actor=principal.username,
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        recovered = await find_idempotent_candidate_execution(
+            session,
+            candidate_id,
+            idempotency_key,
+            request.launch_mode,
+        )
+        if recovered is None:
+            raise AppError(
+                "CONFIRM_DOWNLOAD_CONFLICT",
+                "确认下载发生并发冲突，请使用相同幂等键重试",
+                status_code=409,
+            ) from exc
+        execution = recovered
+        execution_created = False
+        approval_created = False
+        approval = await get_approval_or_404(session, execution.approval_id)
+    except AppError as exc:
+        if exc.error_code != "APPROVAL_NOT_PENDING":
+            await _commit_expiration_on_error(session, approval, exc)
+            raise
+        await session.rollback()
+        recovered = await find_idempotent_candidate_execution(
+            session,
+            candidate_id,
+            idempotency_key,
+            request.launch_mode,
+        )
+        if recovered is None:
+            raise
+        execution = recovered
+        execution_created = False
+        approval_created = False
+        approval = await get_approval_or_404(session, execution.approval_id)
+
+    response.status_code = 201 if execution_created else 200
+    response.headers["Cache-Control"] = "no-store"
+    return await _confirm_download_response(
+        session,
+        approval,
+        outcome=("EXECUTION_CREATED" if execution_created else "EXECUTION_REPLAYED"),
+        execution=execution,
+        approval_created=approval_created,
+        execution_created=execution_created,
+    )
+
+
 @router.get("/approval-requests", response_model=list[ApprovalResponse])
 async def get_approval_requests(
     session: DbSession,
@@ -128,7 +385,11 @@ async def get_approval_requests(
     candidate_id: str | None = None,
     limit: int = Query(default=100, ge=1, le=200),
 ) -> list[ApprovalResponse]:
-    approvals = await list_approval_requests(session, candidate_id=candidate_id, limit=limit)
+    approvals = await list_approval_requests(
+        session,
+        candidate_id=candidate_id,
+        limit=limit,
+    )
     return [await _response(session, approval) for approval in approvals]
 
 
@@ -146,21 +407,50 @@ async def approve_approval_request(
     request: ApprovalApproveRequest,
     session: DbSession,
     principal: AdminPrincipal,
+    adapter: QbAdapter,
 ) -> ApprovalResponse:
     await require_stage_not_disabled(session, AutomationStage.APPROVAL)
+    settings = get_settings()
     approval = await get_approval_or_404(session, approval_id, for_update=True)
     try:
+        snapshot = require_pending_approval(session, approval)
+        validate_manual_approval_acknowledgements(snapshot, request)
+    except AppError as exc:
+        await _commit_expiration_on_error(session, approval, exc)
+        raise
+    snapshot_hash = approval.snapshot_hash
+    await session.commit()
+
+    # qBittorrent is read outside the approval transaction. The approval snapshot and
+    # pending state are checked again under a fresh row lock before the result is stored.
+    result = await evaluate_preflight(adapter, snapshot, settings)
+    await require_stage_not_disabled(session, AutomationStage.APPROVAL)
+    current_settings = get_settings()
+    require_preflight_policy_current(result.policy_fingerprint, current_settings)
+    approval = await get_approval_or_404(session, approval_id, for_update=True)
+    try:
+        require_pending_approval(session, approval)
+        if approval.snapshot_hash != snapshot_hash:
+            raise AppError(
+                "APPROVAL_SNAPSHOT_CHANGED",
+                "审批快照已变化，预检结果已丢弃",
+                status_code=409,
+            )
+        await save_preflight_result(session, approval, result, actor=principal.username)
+        if not preflight_is_manually_passable(result):
+            await session.commit()
+            return await _response(session, approval)
         await approve_request(
             session,
             approval,
             request,
-            get_settings(),
+            current_settings,
             actor=principal.username,
         )
         await maybe_create_automatic_execution(
             session,
             approval=approval,
-            settings=get_settings(),
+            settings=current_settings,
         )
     except AppError as exc:
         await _commit_expiration_on_error(session, approval, exc)

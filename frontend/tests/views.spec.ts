@@ -10,7 +10,6 @@ import DiscoveryView from '../src/views/DiscoveryView.vue'
 import IdentityView from '../src/views/IdentityView.vue'
 import MediaView from '../src/views/MediaView.vue'
 import QbittorrentView from '../src/views/QbittorrentView.vue'
-import SystemView from '../src/views/SystemView.vue'
 import TorrentCandidatesView from '../src/views/TorrentCandidatesView.vue'
 import { useAuthStore } from '../src/stores/auth'
 import { useIdentityStore } from '../src/stores/identity'
@@ -36,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   approvalList: vi.fn(),
   approvalGet: vi.fn(),
   approvalCreate: vi.fn(),
+  approvalConfirmDownload: vi.fn(),
   approvalPreflight: vi.fn(),
   approvalApprove: vi.fn(),
   approvalReject: vi.fn(),
@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => ({
   executionForApproval: vi.fn(),
   executionList: vi.fn(),
   executionGet: vi.fn(),
+  executionDownloadJob: vi.fn(),
   executionReconcile: vi.fn(),
   qbStatus: vi.fn(),
   qbTorrents: vi.fn(),
@@ -54,9 +55,11 @@ const mocks = vi.hoisted(() => ({
 const routeState = vi.hoisted(() => ({
   params: { id: 'media-1' } as Record<string, string | undefined>,
 }))
+const routerMock = vi.hoisted(() => ({ replace: vi.fn() }))
 
 vi.mock('vue-router', () => ({
   useRoute: () => routeState,
+  useRouter: () => routerMock,
 }))
 
 vi.mock('../src/api/client', () => ({
@@ -85,6 +88,7 @@ vi.mock('../src/api/client', () => ({
     create: mocks.torrentCreate,
   },
   approvalApi: {
+    confirmDownload: mocks.approvalConfirmDownload,
     list: mocks.approvalList,
     get: mocks.approvalGet,
     create: mocks.approvalCreate,
@@ -100,6 +104,7 @@ vi.mock('../src/api/client', () => ({
     forApproval: mocks.executionForApproval,
     list: mocks.executionList,
     get: mocks.executionGet,
+    downloadJob: mocks.executionDownloadJob,
     reconcile: mocks.executionReconcile,
   },
   qbApi: {
@@ -117,6 +122,7 @@ const mediaItem = {
   title: '测试剧集',
   original_title: 'Test Series',
   year: 2026,
+  country_codes: ['JP', 'US'],
   poster_path: null,
   raw_type: 'tv',
   local_episodes: 2,
@@ -354,6 +360,7 @@ const executionIntent = {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  mocks.executionDownloadJob.mockRejectedValue(new Error('关联下载任务接口暂不可用'))
   routeState.params = { id: 'media-1' }
   mocks.ptSiteCatalog.mockResolvedValue(ptSiteCatalog)
   mocks.torrentList.mockResolvedValue([])
@@ -387,6 +394,36 @@ function mockApprovedApprovalRoute(routeKind: 'detail' | 'candidate'): void {
 }
 
 describe('MediaView', () => {
+  it('syncs NextFind from the daily media page and refreshes the list', async () => {
+    const completedRun = {
+      id: 'run-media-sync',
+      source: 'nextfind',
+      status: 'SUCCEEDED',
+      discovered_count: 3,
+      created_count: 2,
+      updated_count: 1,
+      error_code: null,
+      error_message: null,
+      started_at: '2026-08-10T00:00:00Z',
+      finished_at: '2026-08-10T00:01:00Z',
+      created_at: '2026-08-10T00:00:00Z',
+      audit_events: [],
+      deduplicated: false,
+    }
+    mocks.mediaList.mockResolvedValue({ items: [mediaItem], page: 1, page_size: 20, total: 1 })
+    mocks.discoveryCreate.mockResolvedValueOnce(completedRun)
+    const wrapper = mount(MediaView)
+    await flushPromises()
+
+    await wrapper.get('.header-actions button').trigger('click')
+    await flushPromises()
+
+    expect(mocks.discoveryCreate).toHaveBeenCalledTimes(1)
+    expect(mocks.discoveryGet).not.toHaveBeenCalled()
+    expect(mocks.mediaList).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('同步完成：新增 2 项，更新 1 项')
+  })
+
   it('shows loading, the missing-media list and pagination', async () => {
     let resolveRequest: (value: unknown) => void = () => undefined
     mocks.mediaList.mockReturnValueOnce(
@@ -402,6 +439,7 @@ describe('MediaView', () => {
     expect(wrapper.text()).toContain('测试剧集')
     expect(wrapper.text()).toContain('S01E03')
     expect(wrapper.text()).toContain('42')
+    expect(wrapper.get('[data-testid="media-country"]').text()).toBe('日本 / 美国')
 
     mocks.mediaList.mockResolvedValueOnce({ items: [], page: 2, page_size: 20, total: 21 })
     await wrapper.get('.pagination button:last-child').trigger('click')
@@ -420,6 +458,37 @@ describe('MediaView', () => {
     await flushPromises()
     expect(wrapper.text()).not.toContain('测试剧集')
     expect(wrapper.text()).toContain('上游不可用')
+  })
+
+  it('shows a pending country when the source has no country metadata', async () => {
+    mocks.mediaList.mockResolvedValueOnce({
+      items: [{ ...mediaItem, country_codes: null }],
+      page: 1,
+      page_size: 20,
+      total: 1,
+    })
+    const wrapper = mount(MediaView)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="media-country"]').text()).toBe('待确认')
+  })
+
+  it('applies a NextFind region filter from the media selection page', async () => {
+    mocks.mediaList.mockResolvedValue({ items: [mediaItem], page: 1, page_size: 20, total: 1 })
+    const wrapper = mount(MediaView)
+    await flushPromises()
+    const store = useMediaStore()
+    store.page = 3
+    mocks.mediaList.mockResolvedValueOnce({ items: [mediaItem], page: 1, page_size: 20, total: 1 })
+
+    await wrapper.get('select[aria-label="地区"]').setValue('japan')
+    await wrapper.get('.filter-bar').trigger('submit')
+    await flushPromises()
+
+    expect(store.page).toBe(1)
+    expect(mocks.mediaList).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1, region: 'japan' }),
+    )
   })
 
   it('renders the empty state', async () => {
@@ -486,32 +555,6 @@ describe('AdaptersView', () => {
   })
 })
 
-describe('SystemView', () => {
-  it('shows component health without persisting credentials', async () => {
-    mocks.systemStatus.mockResolvedValueOnce({
-      api: { healthy: true, message: 'API 运行正常', checked_at: '2026-08-10T00:00:00Z' },
-      worker: { healthy: true, message: 'Worker 运行正常', checked_at: '2026-08-10T00:00:00Z' },
-      postgres: {
-        healthy: true,
-        message: 'PostgreSQL 连接正常',
-        checked_at: '2026-08-10T00:00:00Z',
-      },
-      nextfind_configured: true,
-      tmdb_configured: false,
-      tmdb_live_enabled: false,
-      avistaz_configured: false,
-      avistaz_live_enabled: false,
-      avistaz_status: '本阶段未启用',
-    })
-    const wrapper = mount(SystemView)
-    await flushPromises()
-    expect(wrapper.text()).toContain('PostgreSQL')
-    expect(wrapper.text()).toContain('已配置')
-    expect(localStorage.length).toBe(0)
-    expect(sessionStorage.length).toBe(0)
-  })
-})
-
 describe('IdentityView', () => {
   it('keeps metadata resolution disabled while the current media is loading', async () => {
     let resolveMedia: (value: typeof mediaItem) => void = () => undefined
@@ -556,6 +599,7 @@ describe('IdentityView', () => {
         english_title: 'Test Series',
         original_title: 'Original Series',
         original_language: 'ja',
+        country_codes: ['KR'],
         aliases: [],
         year: 2026,
         number_of_seasons: 1,
@@ -576,6 +620,8 @@ describe('IdentityView', () => {
     expect(wrapper.text()).toContain('刷新候选')
     expect(wrapper.text()).toContain('NextFind 标题')
     expect(wrapper.text()).toContain('Test Series')
+    expect(wrapper.get('[data-testid="source-country"] strong').text()).toBe('日本 / 美国')
+    expect(wrapper.get('[data-testid="candidate-country"]').text()).toBe('韩国')
     expect(wrapper.text()).toContain('TMDB_ID_EXACT')
     expect(wrapper.text()).toContain('MEDIA_TYPE_CONFLICT')
 
@@ -591,7 +637,7 @@ describe('IdentityView', () => {
 })
 
 describe('TorrentCandidatesView', () => {
-  it('shows read-only scored candidates without a download action', async () => {
+  it('shows scored candidates and submits a download only after one confirmation', async () => {
     const searchRun = {
       id: 'search-1',
       media_id: 'media-1',
@@ -655,14 +701,47 @@ describe('TorrentCandidatesView', () => {
         },
       },
     ])
+    const preflight = {
+      overall_status: 'PASS',
+      checks: [
+        {
+          code: 'QB_CONNECTION',
+          status: 'PASS',
+          message: 'qBittorrent 连接正常',
+          details: {},
+        },
+      ],
+      checked_at: '2026-08-10T00:02:00Z',
+      policy_fingerprint: 'a'.repeat(64),
+    }
+    mocks.approvalConfirmDownload.mockResolvedValue({
+      outcome: 'EXECUTION_CREATED',
+      approval_created: true,
+      execution_created: true,
+      preflight,
+      approval: {
+        id: 'approval-quick-1',
+        media_item_id: 'media-1',
+        torrent_candidate_id: 'candidate-1',
+        preflight_result: preflight,
+      },
+      execution: {
+        id: 'execution-quick-1',
+        approval_id: 'approval-quick-1',
+        status: 'PENDING',
+      },
+    })
     const wrapper = mount(TorrentCandidatesView)
     await flushPromises()
     expect(wrapper.get('.header-actions').text()).toContain('刷新结果')
-    expect(wrapper.get('.phase-banner').text()).toContain('当前阶段仅支持只读搜索')
+    expect(wrapper.get('.phase-banner').text()).toContain('选择候选并确认一次')
+    expect(wrapper.get('.phase-banner').text()).toContain('自动完成 qBittorrent 预检')
     expect(wrapper.get('.pt-site-capabilities').text()).toContain('允许策略编排')
     const mediaSummary = wrapper.get('.result-toolbar > div')
     expect(mediaSummary.get('strong').text()).toBe('测试剧集')
-    expect(mediaSummary.get('small').text()).toBe('TMDB 42 · Synthetic Two (synthetic-two)')
+    expect(mediaSummary.get('small').text()).toBe(
+      'TMDB 42 · 国家 / 地区 日本 / 美国 · 地区分组 欧美 / 日本 · Synthetic Two (synthetic-two)',
+    )
 
     const runOption = wrapper.get('.result-toolbar select option[value="search-1"]')
     expect(runOption.text()).toMatch(
@@ -696,8 +775,24 @@ describe('TorrentCandidatesView', () => {
     expect(mobileCandidates[0].get('h2').text()).toBe(
       'Test Series 2026 S01E03 1080p WEB-DL',
     )
-    expect(wrapper.text()).not.toContain('下载种子')
-    expect(wrapper.find('a[href*="download"]').exists()).toBe(false)
+    const downloadButton = desktopCandidate.get('.candidate-download-button')
+    expect(downloadButton.text()).toBe('确认下载')
+    expect(mocks.approvalConfirmDownload).not.toHaveBeenCalled()
+    await downloadButton.trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain(
+      'Test Series 2026 S01E03 1080p WEB-DL',
+    )
+    expect(mocks.approvalConfirmDownload).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="confirm-candidate-download"]').trigger('click')
+    await flushPromises()
+    expect(mocks.approvalConfirmDownload).toHaveBeenCalledWith(
+      'candidate-1',
+      'START_IMMEDIATELY',
+      expect.stringMatching(/^unin-[0-9a-f]{48}$/),
+      expect.any(AbortSignal),
+    )
+    expect(wrapper.get('[role="dialog"]').text()).toContain('已加入下载队列')
+    expect(wrapper.get('a[href="/download-jobs"]').text()).toBe('查看下载任务')
 
     await wrapper.get('select[aria-label="PT 站点"]').setValue('fixture-nexus')
     expect(wrapper.get('.pt-site-unavailable').text()).toBe('该站点 Profile 尚未启用')
@@ -738,11 +833,15 @@ describe('TorrentCandidatesView', () => {
     mocks.torrentCandidates
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-    mocks.torrentCreate.mockResolvedValue({
+    const acceptedRun = {
       ...createdRun,
       job_id: 'job-1',
       deduplicated: false,
-    })
+    }
+    let resolveCreate: (value: typeof acceptedRun) => void = () => undefined
+    mocks.torrentCreate.mockReturnValue(new Promise((resolve) => {
+      resolveCreate = resolve
+    }))
 
     const wrapper = mount(TorrentCandidatesView)
     await flushPromises()
@@ -758,6 +857,11 @@ describe('TorrentCandidatesView', () => {
     await wrapper.get('[data-testid="preferred-subtitles"]').setValue('Chinese')
     await wrapper.get('[data-testid="max-size-gib"]').setValue('5')
     await wrapper.get('.search-preferences').trigger('submit')
+    await nextTick()
+
+    expect(wrapper.get('.result-toolbar select').attributes('disabled')).toBeDefined()
+
+    resolveCreate(acceptedRun)
     await flushPromises()
 
     expect(mocks.torrentCreate).toHaveBeenCalledWith('media-1', {
@@ -769,11 +873,13 @@ describe('TorrentCandidatesView', () => {
       max_size_bytes: 5_368_709_120,
     })
     expect(wrapper.get('.torrent-candidates-page > .notice-state').text()).toBe(
-      'Synthetic Two 只读搜索已创建；任务异步执行，可刷新查看最新结果',
+      'Synthetic Two 搜索完成，找到 0 个候选。',
     )
     const mediaSummary = wrapper.get('.result-toolbar > div')
     expect(mediaSummary.get('strong').text()).toBe('测试剧集')
-    expect(mediaSummary.get('small').text()).toBe('TMDB 42 · Synthetic Two (synthetic-two)')
+    expect(mediaSummary.get('small').text()).toBe(
+      'TMDB 42 · 国家 / 地区 日本 / 美国 · 地区分组 欧美 / 日本 · Synthetic Two (synthetic-two)',
+    )
     const runSelector = wrapper.get('.result-toolbar select')
     expect((runSelector.element as HTMLSelectElement).value).toBe('search-new')
     expect(runSelector.get('option[value="search-new"]').text()).toMatch(
@@ -835,6 +941,34 @@ describe('Approval views', () => {
     routeState.params = { id: 'approval-1' }
   })
 
+  it('returns a candidate deep link to PT results and canonicalizes a new approval URL', async () => {
+    routeState.params = {
+      mediaId: 'media-1',
+      searchId: 'search-1',
+      candidateId: 'candidate-1',
+    }
+    mocks.mediaGet.mockResolvedValueOnce(mediaItem)
+    mocks.torrentCandidates.mockResolvedValueOnce([torrentCandidateResult])
+    mocks.approvalList.mockResolvedValueOnce([])
+    mocks.approvalCreate.mockResolvedValueOnce(approval)
+
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    const returnLink = wrapper.get('.page-header .button.secondary')
+    expect(returnLink.text()).toBe('返回 PT 候选')
+    expect(returnLink.attributes('href')).toBe('/media/media-1/torrents')
+
+    const createButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('创建固定快照审批'))
+    await createButton?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.approvalCreate).toHaveBeenCalledWith('candidate-1', 60)
+    expect(routerMock.replace).toHaveBeenCalledWith('/approvals/approval-1')
+  })
+
   it('loads an existing execution from the candidate approval deep link', async () => {
     mockApprovedApprovalRoute('candidate')
     const auth = useAuthStore()
@@ -849,7 +983,8 @@ describe('Approval views', () => {
     expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
     expect(wrapper.text()).toContain('已存在下载执行记录，不会重复创建')
     expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+    expect(wrapper.text()).not.toContain('确认添加到 qB')
+    expect(wrapper.text()).not.toContain('确认并立即下载')
     expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
   })
 
@@ -870,7 +1005,8 @@ describe('Approval views', () => {
 
     expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
     expect(wrapper.get('.execution-lookup-guard').text()).toContain('正在确认')
-    expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+    expect(wrapper.text()).not.toContain('确认添加到 qB')
+    expect(wrapper.text()).not.toContain('确认并立即下载')
 
     resolveLookup(execution)
     await flushPromises()
@@ -889,7 +1025,10 @@ describe('Approval views', () => {
     expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
     expect(wrapper.text()).not.toContain('审批尚未创建下载执行记录')
     expect(wrapper.find('.execution-lookup-guard').exists()).toBe(false)
-    expect(wrapper.text()).toContain('第一步：创建执行意图')
+    expect(wrapper.text()).toContain('确认添加到 qB')
+    expect(wrapper.text()).not.toContain('创建执行意图')
+    expect(wrapper.text()).not.toContain('第二步')
+    expect(wrapper.find('.execution-control-section input[type="checkbox"]').exists()).toBe(false)
   })
 
   it.each([
@@ -911,7 +1050,8 @@ describe('Approval views', () => {
       expect(mocks.executionForApproval).toHaveBeenCalledWith('approval-1')
       expect(wrapper.text()).toContain(message)
       expect(wrapper.get('.execution-lookup-guard').text()).toContain('安全禁用')
-      expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+      expect(wrapper.text()).not.toContain('确认添加到 qB')
+      expect(wrapper.text()).not.toContain('确认并立即下载')
       expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
     },
   )
@@ -927,27 +1067,153 @@ describe('Approval views', () => {
     expect(wrapper.get('.approval-mobile-item').text()).toContain('测试剧集')
     expect(wrapper.get('.approval-mobile-item a').attributes('href')).toBe('/approvals/approval-1')
     expect(wrapper.get('.phase-banner').text()).toContain('审批只生成不可执行计划')
-    expect(wrapper.get('.phase-banner').text()).toContain('独立执行流程')
+    expect(wrapper.get('.phase-banner').text()).toContain('管理员一次确认下载执行')
     expect(wrapper.get('.phase-banner').text()).toContain('自动执行策略')
-    expect(wrapper.get('.phase-banner').text()).toContain('默认关闭的服务端执行总闸开启')
+    expect(wrapper.get('.phase-banner').text()).toContain('服务端执行总闸开启')
   })
 
-  it('does not enable approval when preflight is UNKNOWN', async () => {
-    mocks.approvalGet.mockResolvedValueOnce(approval)
+  it('runs a fresh preflight from approve and keeps blocked approvals pending', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({
+      ...approval,
+      candidate: { ...approval.candidate, site_id: 'synthetic-two' },
+    })
+    mocks.approvalApprove.mockResolvedValueOnce({
+      ...approval,
+      candidate: { ...approval.candidate, site_id: 'synthetic-two' },
+      status: 'PENDING',
+      preflight_result: {
+        ...approval.preflight_result,
+        overall_status: 'BLOCKED',
+        checked_at: '2026-08-10T00:12:00Z',
+        checks: [
+          {
+            code: 'DUPLICATE_INFO_HASH',
+            status: 'BLOCKED',
+            message: 'qBittorrent 已存在相同 info_hash',
+            details: {},
+          },
+        ],
+      },
+      preflight_checked_at: '2026-08-10T00:12:00Z',
+    })
     const wrapper = mount(ApprovalView)
     await flushPromises()
     expect(wrapper.text()).toContain('候选 H&R 规则未知')
     expect(wrapper.get('.page > .phase-banner').text()).toContain('审批只生成不可执行计划')
-    expect(wrapper.get('.page > .phase-banner').text()).toContain('独立执行流程')
+    expect(wrapper.get('.page > .phase-banner').text()).toContain('管理员一次确认下载执行')
     expect(wrapper.get('.page > .phase-banner').text()).toContain('自动执行策略')
-    expect(wrapper.get('.page > .phase-banner').text()).toContain('默认关闭的服务端执行总闸开启')
+    expect(wrapper.get('.page > .phase-banner').text()).toContain('服务端执行总闸开启')
     expect(wrapper.get('.acknowledgements').text()).toContain('独立 ADD_PAUSED 执行可能随即排队')
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     for (const checkbox of checkboxes) await checkbox.setValue(true)
     const approveButton = wrapper
       .findAll('button')
-      .find((button) => button.text().includes('批准计划并评估执行策略'))
+      .find((button) => button.text().includes('预检并批准计划'))
+    expect(approveButton?.attributes('disabled')).toBeUndefined()
+    await approveButton?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.approvalPreflight).not.toHaveBeenCalled()
+    expect(mocks.approvalApprove).toHaveBeenCalledOnce()
+    expect(mocks.executionForApproval).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('最新预检未通过，审批仍为待处理')
+    expect(wrapper.text()).toContain('qBittorrent 已存在相同 info_hash')
+    expect(wrapper.text()).toContain('已阻止')
+  })
+
+  it('uses the AvistaZ 7-day H&R default without an acknowledgement', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({
+      ...approval,
+      candidate: {
+        ...approval.candidate,
+        hit_and_run: null,
+        warnings: ['HNR_UNKNOWN', 'TRACKER_POLICY_NOT_VERIFIED'],
+      },
+      preflight_result: {
+        ...approval.preflight_result,
+        overall_status: 'PASS',
+        checks: [{ code: 'READY', status: 'PASS', message: '预检通过', details: {} }],
+      },
+    })
+    mocks.approvalApprove.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('站点默认 7 天')
+    expect(wrapper.get('.acknowledgements').text()).not.toContain('已了解该站 H&R 规则')
+    expect(wrapper.get('.warning-list').text()).not.toContain('HNR_UNKNOWN')
+    expect(wrapper.get('.warning-list').text()).toContain('TRACKER_POLICY_NOT_VERIFIED')
+
+    const acknowledgements = wrapper.findAll('.acknowledgements input[type="checkbox"]')
+    expect(acknowledgements).toHaveLength(2)
+    for (const checkbox of acknowledgements) await checkbox.setValue(true)
+    const approveButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('预检并批准计划'))
+    expect(approveButton?.attributes('disabled')).toBeUndefined()
+    await approveButton?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.approvalApprove).toHaveBeenCalledWith('approval-1', {
+      acknowledges_hnr: false,
+      acknowledges_seeding: true,
+      acknowledges_plan_only: true,
+    })
+  })
+
+  it('keeps H&R acknowledgement and warnings for other PT sites', async () => {
+    mocks.approvalGet.mockResolvedValueOnce({
+      ...approval,
+      candidate: {
+        ...approval.candidate,
+        site_id: 'synthetic-two',
+        hit_and_run: null,
+        warnings: ['HNR_UNKNOWN', 'TRACKER_POLICY_NOT_VERIFIED'],
+      },
+      preflight_result: {
+        ...approval.preflight_result,
+        overall_status: 'PASS',
+        checks: [{ code: 'READY', status: 'PASS', message: '预检通过', details: {} }],
+      },
+    })
+    mocks.approvalApprove.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
+    mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    const wrapper = mount(ApprovalView)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('站点默认 7 天')
+    expect(wrapper.get('.acknowledgements').text()).toContain('已了解该站 H&R 规则')
+    expect(wrapper.get('.warning-list').text()).toContain('HNR_UNKNOWN')
+    expect(wrapper.get('.warning-list').text()).toContain('TRACKER_POLICY_NOT_VERIFIED')
+
+    const acknowledgementLabels = wrapper.findAll('.acknowledgements label')
+    await acknowledgementLabels
+      .find((label) => label.text().includes('继续做种'))
+      ?.get('input')
+      .setValue(true)
+    await acknowledgementLabels
+      .find((label) => label.text().includes('审批本身只生成'))
+      ?.get('input')
+      .setValue(true)
+    const approveButton = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('预检并批准计划'))
     expect(approveButton?.attributes('disabled')).toBeDefined()
+
+    await acknowledgementLabels
+      .find((label) => label.text().includes('H&R'))
+      ?.get('input')
+      .setValue(true)
+    expect(approveButton?.attributes('disabled')).toBeUndefined()
+    await approveButton?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.approvalApprove).toHaveBeenCalledWith('approval-1', {
+      acknowledges_hnr: true,
+      acknowledges_seeding: true,
+      acknowledges_plan_only: true,
+    })
   })
 
   it('reacts to role changes for operator and admin approval controls', async () => {
@@ -972,22 +1238,22 @@ describe('Approval views', () => {
     const findButton = (text: string) => wrapper.findAll('button').find((item) => item.text().includes(text))
 
     for (const checkbox of wrapper.findAll('input[type="checkbox"]')) await checkbox.setValue(true)
-    expect(findButton('批准计划并评估执行策略')?.attributes('disabled')).toBeUndefined()
+    expect(findButton('预检并批准计划')?.attributes('disabled')).toBeUndefined()
     expect(findButton('拒绝')?.attributes('disabled')).toBeUndefined()
+    expect(findButton('运行 qB 只读预检')).toBeUndefined()
 
     auth.principal = { username: 'operator-user', role: 'operator' }
     await nextTick()
-    expect(findButton('批准计划并评估执行策略')?.attributes('disabled')).toBeDefined()
-    expect(findButton('运行 qB 只读预检')?.attributes('disabled')).toBeUndefined()
+    expect(findButton('预检并批准计划')?.attributes('disabled')).toBeDefined()
     expect(findButton('拒绝')?.attributes('disabled')).toBeUndefined()
 
     auth.principal = { username: 'viewer-user', role: 'viewer' }
     await nextTick()
-    expect(findButton('运行 qB 只读预检')?.attributes('disabled')).toBeDefined()
+    expect(findButton('预检并批准计划')?.attributes('disabled')).toBeDefined()
     expect(findButton('拒绝')?.attributes('disabled')).toBeDefined()
   })
 
-  it('uses a private one-time intent for the two-step paused execution flow', async () => {
+  it('uses a private one-time intent behind the single paused execution action', async () => {
     mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
     mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
     mocks.executionCreateIntent.mockResolvedValueOnce(executionIntent)
@@ -996,28 +1262,34 @@ describe('Approval views', () => {
     await flushPromises()
     const control = wrapper.get('.execution-control-section')
 
-    expect(wrapper.get('.download-plan .phase-banner').text()).toContain('本次审批仅生成不可执行计划')
-    expect(wrapper.get('.download-plan .phase-banner').text()).toContain('自动执行策略')
-    expect(wrapper.get('.download-plan .phase-banner').text()).toContain('默认关闭的服务端执行总闸必须开启')
+    expect(wrapper.get('.download-plan .phase-banner').text()).toContain(
+      '选择启动模式后，只需确认一次即可提交下载执行',
+    )
     expect(control.get('.segmented-control button.active').text()).toContain('添加后暂停')
-    await control.get('.execution-checks input[type="checkbox"]').setValue(true)
-    await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
+    expect(control.find('input[type="checkbox"]').exists()).toBe(false)
+    expect(control.text()).not.toContain('创建执行意图')
+    expect(control.text()).not.toContain('第二步')
+
+    const submitButton = control
+      .findAll('button')
+      .find((item) => item.text().includes('确认添加到 qB'))
+    expect(submitButton?.attributes('disabled')).toBeUndefined()
+    await submitButton?.trigger('click')
     await flushPromises()
 
     expect(mocks.executionCreateIntent).toHaveBeenCalledWith('approval-1', 'ADD_PAUSED')
     expect(wrapper.text()).not.toContain(`ei1_${'n'.repeat(32)}`)
-    expect(control.get('.final-step label').text()).toContain('本次人工提交')
-    expect(control.get('.final-step label').text()).toContain('仅在服务端执行总闸开启时才可能写入 qBittorrent')
-    await control.get('.final-step input[type="checkbox"]').setValue(true)
-    await control.findAll('button').find((item) => item.text().includes('第二步'))?.trigger('click')
-    await flushPromises()
-
     expect(mocks.executionExecute).toHaveBeenCalledWith(
       'approval-1',
       'intent-1',
       `ei1_${'n'.repeat(32)}`,
       expect.stringMatching(/^unin-[0-9a-f]{48}$/),
     )
+    const createCallOrder = mocks.executionCreateIntent.mock.invocationCallOrder[0]
+    const executeCallOrder = mocks.executionExecute.mock.invocationCallOrder[0]
+    expect(createCallOrder).toBeDefined()
+    expect(executeCallOrder).toBeDefined()
+    expect(createCallOrder!).toBeLessThan(executeCallOrder!)
     expect(wrapper.text()).toContain('执行记录已创建')
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
@@ -1032,33 +1304,56 @@ describe('Approval views', () => {
     await flushPromises()
     const control = wrapper.get('.execution-control-section')
 
-    await control.get('.execution-checks input[type="checkbox"]').setValue(true)
-    await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
-    await flushPromises()
-    await control.get('.final-step input[type="checkbox"]').setValue(true)
-    await control.findAll('button').find((item) => item.text().includes('第二步'))?.trigger('click')
+    await control
+      .findAll('button')
+      .find((item) => item.text().includes('确认添加到 qB'))
+      ?.trigger('click')
     await flushPromises()
 
+    expect(mocks.executionCreateIntent).toHaveBeenCalledOnce()
+    expect(mocks.executionExecute).toHaveBeenCalledOnce()
     expect(wrapper.text()).toContain('网络响应未知')
     expect(wrapper.get('.execution-lookup-guard').text()).toContain('安全禁用')
-    expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+    expect(wrapper.text()).not.toContain('确认添加到 qB')
+    expect(wrapper.text()).not.toContain('确认并立即下载')
     expect(wrapper.text()).not.toContain('尚未提交')
   })
 
-  it('requires an extra explicit confirmation for immediate start', async () => {
+  it('creates and executes an immediate-start intent from one explicit action', async () => {
     mocks.approvalGet.mockResolvedValueOnce({ ...approval, status: 'APPROVED' })
     mocks.approvalPlan.mockResolvedValueOnce(downloadPlan)
+    mocks.executionCreateIntent.mockResolvedValueOnce({
+      ...executionIntent,
+      launch_mode: 'START_IMMEDIATELY',
+    })
+    mocks.executionExecute.mockResolvedValueOnce({
+      ...execution,
+      launch_mode: 'START_IMMEDIATELY',
+    })
     const wrapper = mount(ApprovalView)
     await flushPromises()
     const control = wrapper.get('.execution-control-section')
     const immediateButton = control.findAll('.segmented-control button').find((item) => item.text().includes('立即开始'))
     await immediateButton?.trigger('click')
-    const checks = control.findAll('.execution-checks input[type="checkbox"]')
-    await checks[0]?.setValue(true)
-    const firstStep = control.findAll('button').find((item) => item.text().includes('第一步'))
-    expect(firstStep?.attributes('disabled')).toBeDefined()
-    await checks[1]?.setValue(true)
-    expect(firstStep?.attributes('disabled')).toBeUndefined()
+    expect(control.find('input[type="checkbox"]').exists()).toBe(false)
+    const submitButton = control
+      .findAll('button')
+      .find((item) => item.text().includes('确认并立即下载'))
+    expect(submitButton?.attributes('disabled')).toBeUndefined()
+
+    await submitButton?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.executionCreateIntent).toHaveBeenCalledWith(
+      'approval-1',
+      'START_IMMEDIATELY',
+    )
+    expect(mocks.executionExecute).toHaveBeenCalledWith(
+      'approval-1',
+      'intent-1',
+      `ei1_${'n'.repeat(32)}`,
+      expect.stringMatching(/^unin-[0-9a-f]{48}$/),
+    )
   })
 
   it('shows a disabled execution backend error without claiming success', async () => {
@@ -1068,8 +1363,10 @@ describe('Approval views', () => {
     const wrapper = mount(ApprovalView)
     await flushPromises()
     const control = wrapper.get('.execution-control-section')
-    await control.get('.execution-checks input[type="checkbox"]').setValue(true)
-    await control.findAll('button').find((item) => item.text().includes('第一步'))?.trigger('click')
+    await control
+      .findAll('button')
+      .find((item) => item.text().includes('确认添加到 qB'))
+      ?.trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('下载执行控制默认关闭')
@@ -1101,7 +1398,8 @@ describe('Approval views', () => {
       expect(wrapper.text()).toContain('已存在下载执行记录，不会重复创建')
       if (errorMessage) expect(wrapper.text()).toContain(errorMessage)
       expect(wrapper.find('a[href="/executions/execution-1"]').exists()).toBe(true)
-      expect(wrapper.text()).not.toContain('第一步：创建执行意图')
+      expect(wrapper.text()).not.toContain('确认添加到 qB')
+      expect(wrapper.text()).not.toContain('确认并立即下载')
       expect(mocks.executionCreateIntent).not.toHaveBeenCalled()
     },
   )

@@ -18,7 +18,7 @@ onMounted(() => store.loadList())
       title="审批与下载计划"
       description="固定候选快照、人工决策、预检和不可执行下载计划。"
     />
-    <div class="phase-banner"><span>计划模式</span>审批只生成不可执行计划，不获取 .torrent、不写入 qBittorrent；后续仅在独立执行流程中，经过管理员两步确认，或显式启用并满足自动执行策略，且默认关闭的服务端执行总闸开启时，才可能写入。</div>
+    <div class="phase-banner"><span>计划模式</span>审批只生成不可执行计划，不获取 .torrent、不写入 qBittorrent；后续由管理员一次确认下载执行，或显式启用并满足自动执行策略，且服务端执行总闸开启时，才可能写入。</div>
     <PageState
       :loading="store.loading"
       :error="store.error"

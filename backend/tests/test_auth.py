@@ -5,6 +5,7 @@ import hashlib
 import hmac
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -14,17 +15,20 @@ from app.core.auth import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
+    create_password_digest,
     create_session_token,
     parse_session_token,
+    verify_password_digest,
 )
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
 from app.errors import AppError
 from app.main import app
-from app.models.entities import IdentityReview, MediaItem, MetadataMatch
+from app.models.entities import IdentityReview, Job, MediaItem, MetadataMatch
 from app.models.enums import (
     AuthRole,
     IdentityConfidence,
+    JobStatus,
     MediaType,
     MetadataStatus,
 )
@@ -42,6 +46,19 @@ def auth_settings(role: AuthRole = AuthRole.ADMIN) -> Settings:
         auth_local_password=LOCAL_PASSWORD,
         auth_session_signing_key=SIGNING_KEY,
         auth_local_role=role,
+    )
+
+
+def runtime_auth_settings(runtime_config_dir) -> Settings:
+    return Settings(
+        _env_file=None,
+        runtime_config_dir=runtime_config_dir,
+        auth_local_username=None,
+        auth_local_password=None,
+        auth_session_signing_key=None,
+        auth_local_username_file=None,
+        auth_local_password_file=None,
+        auth_session_signing_key_file=None,
     )
 
 
@@ -83,17 +100,158 @@ async def login(
 
 
 @pytest.mark.asyncio
-async def test_auth_fails_closed_without_complete_secrets(auth_client_factory) -> None:
+async def test_uninitialized_auth_reports_setup_required(
+    tmp_path,
+    auth_client_factory,
+) -> None:
+    settings = runtime_auth_settings(tmp_path)
+    async with auth_client_factory(settings) as client:
+        status = await client.get("/api/auth/setup-status")
+        csrf = await client.get("/api/auth/csrf")
+        login_response = await client.post(
+            "/api/auth/login",
+            json={"username": "not-created", "password": "not-created-password"},
+        )
+
+    assert status.status_code == 200
+    assert status.json() == {
+        "admin_initialized": False,
+        "configuration_complete": False,
+    }
+    assert csrf.status_code == 409
+    assert csrf.json()["error_code"] == "AUTH_SETUP_REQUIRED"
+    assert login_response.status_code == 409
+    assert login_response.json()["error_code"] == "AUTH_SETUP_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_setup_creates_admin_and_authenticated_session(
+    tmp_path,
+    auth_client_factory,
+) -> None:
+    settings = runtime_auth_settings(tmp_path)
+    async with auth_client_factory(settings) as client:
+        response = await client.post(
+            "/api/auth/setup",
+            json={"username": "first-admin", "password": "new-local-password"},
+        )
+        me = await client.get("/api/auth/me")
+        status = await client.get("/api/auth/setup-status")
+
+    assert response.status_code == 200
+    assert response.json()["username"] == "first-admin"
+    assert response.json()["role"] == "admin"
+    assert response.json()["csrf_token"].startswith("s1_")
+    assert me.status_code == 200
+    assert me.json() == {"username": "first-admin", "role": "admin"}
+    assert status.json()["admin_initialized"] is True
+    cookies = response.headers.get_list("set-cookie")
+    assert any(item.startswith(f"{SESSION_COOKIE_NAME}=") for item in cookies)
+    assert any(item.startswith(f"{CSRF_COOKIE_NAME}=") for item in cookies)
+
+
+@pytest.mark.asyncio
+async def test_setup_is_atomic_and_persists_hashed_credentials_across_clients(
+    tmp_path,
+    auth_client_factory,
+) -> None:
+    settings = runtime_auth_settings(tmp_path)
+    password = "persistent-local-password"
+    async with auth_client_factory(settings) as first_client:
+        created = await first_client.post(
+            "/api/auth/setup",
+            json={"username": "persistent-admin", "password": password},
+        )
+        duplicate = await first_client.post(
+            "/api/auth/setup",
+            json={"username": "second-admin", "password": "second-password"},
+        )
+
+    persisted_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in tmp_path.rglob("*") if path.is_file()
+    )
+    assert created.status_code == 200
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error_code"] == "AUTH_ALREADY_CONFIGURED"
+    assert password not in persisted_text
+    assert "pbkdf2_sha256$v1$" in persisted_text
+
+    async with auth_client_factory(runtime_auth_settings(tmp_path)) as restarted_client:
+        logged_in = await login(
+            restarted_client,
+            username="persistent-admin",
+            password=password,
+        )
+    assert logged_in.status_code == 200
+    assert logged_in.json()["username"] == "persistent-admin"
+
+
+@pytest.mark.asyncio
+async def test_complete_legacy_auth_remains_initialized_and_cannot_be_replaced(
+    tmp_path,
+    auth_client_factory,
+) -> None:
+    settings = auth_settings()
+    settings.runtime_config_dir = tmp_path
+    async with auth_client_factory(settings) as client:
+        status = await client.get("/api/auth/setup-status")
+        replacement = await client.post(
+            "/api/auth/setup",
+            json={"username": "replacement", "password": "replacement-password"},
+        )
+        logged_in = await login(client)
+
+    assert status.status_code == 200
+    assert status.json()["admin_initialized"] is True
+    assert replacement.status_code == 409
+    assert replacement.json()["error_code"] == "AUTH_ALREADY_CONFIGURED"
+    assert logged_in.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_partial_legacy_auth_fails_closed_instead_of_opening_setup(
+    tmp_path,
+    auth_client_factory,
+) -> None:
     settings = Settings(
         _env_file=None,
-        auth_local_username=None,
+        runtime_config_dir=tmp_path,
+        auth_local_username="partial-user",
         auth_local_password=None,
         auth_session_signing_key=None,
+        auth_local_username_file=None,
+        auth_local_password_file=None,
+        auth_session_signing_key_file=None,
     )
     async with auth_client_factory(settings) as client:
-        response = await client.get("/api/auth/csrf")
-    assert response.status_code == 503
-    assert response.json()["error_code"] == "AUTH_NOT_CONFIGURED"
+        status = await client.get("/api/auth/setup-status")
+        setup_response = await client.post(
+            "/api/auth/setup",
+            json={"username": "attacker", "password": "attacker-password"},
+        )
+
+    assert status.status_code == 503
+    assert status.json()["error_code"] == "AUTH_NOT_CONFIGURED"
+    assert setup_response.status_code == 503
+    assert setup_response.json()["error_code"] == "AUTH_NOT_CONFIGURED"
+
+
+def test_versioned_pbkdf2_password_digest_round_trip_and_rejects_malformed() -> None:
+    password = "not-written-in-cleartext"
+    encoded = create_password_digest(password, iterations=1)
+
+    assert encoded.startswith("pbkdf2_sha256$v1$1$")
+    assert password not in encoded
+    assert verify_password_digest(password, encoded) is True
+    assert verify_password_digest(f"{password}-wrong", encoded) is False
+    assert verify_password_digest(password, "pbkdf2_sha256$v1$bad$salt$digest") is False
+
+
+def test_first_setup_ports_remain_bound_to_loopback() -> None:
+    compose = (Path(__file__).resolve().parents[2] / "compose.yaml").read_text(encoding="utf-8")
+
+    assert '- "127.0.0.1:${API_PORT:-8000}:8000"' in compose
+    assert '- "127.0.0.1:${FRONTEND_PORT:-9527}:80"' in compose
 
 
 def test_auth_material_rejects_weak_key_and_oversized_username() -> None:
@@ -220,9 +378,7 @@ async def test_existing_session_is_rejected_after_server_role_changes(
 
 def test_malformed_base64_session_is_normalized_to_app_error() -> None:
     signed = "v1.a"
-    digest = hmac.new(
-        SIGNING_KEY.encode(), signed.encode(), hashlib.sha256
-    ).digest()
+    digest = hmac.new(SIGNING_KEY.encode(), signed.encode(), hashlib.sha256).digest()
     signature = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     with pytest.raises(AppError) as caught:
         parse_session_token(f"{signed}.{signature}", SIGNING_KEY)
@@ -288,6 +444,48 @@ async def test_role_hierarchy_blocks_viewer_and_operator_but_allows_admin_operat
         )
     assert admin_operator_action.status_code == 409
     assert admin_operator_action.json()["error_code"] == "NEXTFIND_NOT_CONFIGURED"
+
+
+@pytest.mark.asyncio
+async def test_viewer_can_read_metadata_resolution_job_status_without_mutation_access(
+    session_factory: async_sessionmaker[AsyncSession],
+    auth_client_factory,
+) -> None:
+    now = datetime.now(UTC)
+    media = MediaItem(
+        source="nextfind",
+        source_item_id="viewer-resolution-job",
+        media_type=MediaType.MOVIE,
+        title="Viewer Resolution Job",
+        identity_confidence=IdentityConfidence.NEEDS_CONFIRMATION,
+        metadata_status=MetadataStatus.UNRESOLVED,
+        discovered_at=now,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        session.add(media)
+        await session.flush()
+        job = Job(
+            job_type=f"RESOLVE_METADATA:{media.id}",
+            status=JobStatus.PENDING,
+            payload={"media_id": media.id, "read_only": True},
+        )
+        session.add(job)
+        await session.commit()
+
+    async with auth_client_factory(auth_settings(AuthRole.VIEWER)) as client:
+        logged_in = await login(client)
+        lookup = await client.get(f"/api/media/{media.id}/resolve-jobs/{job.id}")
+        forbidden_mutation = await client.post(
+            f"/api/media/{media.id}/resolve",
+            headers={CSRF_HEADER_NAME: logged_in.json()["csrf_token"]},
+        )
+
+    assert lookup.status_code == 200
+    assert lookup.json()["job_id"] == job.id
+    assert lookup.json()["status"] == "PENDING"
+    assert forbidden_mutation.status_code == 403
+    assert forbidden_mutation.json()["error_code"] == "AUTH_ROLE_FORBIDDEN"
 
 
 @pytest.mark.asyncio
@@ -385,7 +583,9 @@ async def test_openapi_has_control_plane_but_no_qb_write_routes(
     assert "/api/approval-requests/{approval_id}/download-execution" in paths
     assert "/api/download-executions" in paths
     assert "/api/download-executions/{execution_id}" in paths
+    assert "/api/download-executions/{execution_id}/download-job" in paths
     assert "/api/download-executions/{execution_id}/reconcile" in paths
+    assert "/api/media/{media_id}/resolve-jobs/{job_id}" in paths
     qb_paths = {
         path: sorted(methods)
         for path, methods in paths.items()
@@ -413,8 +613,11 @@ async def test_execution_control_plane_mutations_require_admin_role_and_csrf(
             json={},
             headers={CSRF_HEADER_NAME: csrf_token},
         )
+        viewer_lookup = await client.get("/api/download-executions/missing/download-job")
 
     assert missing_csrf.status_code == 403
     assert missing_csrf.json()["error_code"] == "CSRF_TOKEN_REQUIRED"
     assert forbidden.status_code == 403
     assert forbidden.json()["error_code"] == "AUTH_ROLE_FORBIDDEN"
+    assert viewer_lookup.status_code == 404
+    assert viewer_lookup.json()["error_code"] == "DOWNLOAD_EXECUTION_NOT_FOUND"

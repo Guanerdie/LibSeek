@@ -18,6 +18,15 @@ depends_on: str | Sequence[str] | None = None
 
 DEFAULT_REVISION_ID = "00000000-0000-0000-0000-000000000008"
 DEFAULT_POLICY_HASH = "c3daca9d3005065aae8712e956b2765a7460e23234f577b4671aa0b00e326814"
+DEFAULT_ELIGIBILITY_RULES = (
+    '{"identity_min_score": 0.5, "identity_min_margin": 0.1, '
+    '"torrent_min_score": 0.75, "torrent_min_margin": 0.1, '
+    '"torrent_min_seeders": 1}'
+)
+DEFAULT_ACKNOWLEDGEMENTS = (
+    '{"acknowledges_hnr": false, "acknowledges_seeding": false, '
+    '"acknowledges_plan_only": false, "acknowledges_add_paused_only": false}'
+)
 
 
 def automation_mode() -> sa.Enum:
@@ -158,8 +167,8 @@ def upgrade() -> None:
             policy_hash, previous_policy_hash, effective_from, created_by, created_at
         ) VALUES (
             '{DEFAULT_REVISION_ID}', 1, 'MANUAL', 'MANUAL', 'MANUAL', 'MANUAL',
-            '{{"identity_min_score":0.5,"identity_min_margin":0.1,"torrent_min_score":0.75,"torrent_min_margin":0.1,"torrent_min_seeders":1}}',
-            '{{"acknowledges_hnr":false,"acknowledges_seeding":false,"acknowledges_plan_only":false,"acknowledges_add_paused_only":false}}',
+            '{DEFAULT_ELIGIBILITY_RULES}',
+            '{DEFAULT_ACKNOWLEDGEMENTS}',
             '{DEFAULT_POLICY_HASH}', NULL, CURRENT_TIMESTAMP, 'system:migration',
             CURRENT_TIMESTAMP
         )

@@ -122,6 +122,7 @@ class MediaItem(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     original_title: Mapped[str | None] = mapped_column(String(500))
     year: Mapped[int | None] = mapped_column(Integer)
+    country_codes: Mapped[list[str] | None] = mapped_column(JSON)
     poster_path: Mapped[str | None] = mapped_column(Text)
     raw_type: Mapped[str | None] = mapped_column(String(80))
     local_episodes: Mapped[int | None] = mapped_column(Integer)

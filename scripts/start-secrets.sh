@@ -298,4 +298,4 @@ if ! docker "$@" ps; then
   echo 'Docker Compose 状态检查失败。' >&2
   exit 1
 fi
-echo '前端：http://127.0.0.1:8080  API：http://127.0.0.1:8000/api/docs'
+echo '前端：http://127.0.0.1:9527  API：http://127.0.0.1:8000/api/docs'

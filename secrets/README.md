@@ -2,6 +2,19 @@
 
 此目录只保存本机运行时 Secret。`*.txt` 已被 `.gitignore` 排除，但仍是明文文件；不要提交、同步、截图或把内容粘贴到聊天。
 
+## Windows 首选：一次性可视化向导
+
+在项目根目录运行：
+
+```powershell
+Set-Location D:\project\unin
+.\scripts\setup.ps1
+```
+
+浏览器会自动打开一次性 localhost 向导，可依次录入本地账号/NextFind/TMDB、AvistaZ 和 qBittorrent。密码永不预填或回显；默认拒绝覆盖已有 Secret，需要替换时使用 `.\scripts\setup.ps1 -ReplaceExisting`。保存不会测试真实连接或启动 Docker；它只开启已录入服务的只读能力，下载写入、自动化和下载监控仍保持关闭。
+
+录入完成后回到本项目/Codex继续。每次真实读取 NextFind、TMDB、AvistaZ 或 qBittorrent，以及任何 qB 写入前，我都会先说明目标、读写对象和可能影响，并等待你的明确批准。
+
 Secret 按阶段分为三组。只创建并叠加当前获准阶段，不需要为尚未启用的外部服务创建占位文件：
 
 ```text
@@ -40,6 +53,6 @@ Secret 可见范围按已叠加层累加，服务边界固定如下：
 
 qBittorrent SID 只保存在对应适配器进程内存中，不需要也不得创建 SID Secret 文件。`automation-preflight` 不持有 NextFind、TMDB 或 AvistaZ Secret；它只能通过只读适配器执行自动审批预检。readiness 心跳只含非敏感配置指纹和实例 ID，不是 Secret。
 
-Windows PowerShell 请使用 README 中的 `Read-Host -AsSecureString` 片段创建文件并收紧 ACL。Linux 上建议由部署系统提供 Docker Secret；若使用本地文件，至少执行 `chmod 600 secrets/*.txt` 并限制目录访问。
+Windows 首选使用上面的可视化向导；向导不可用时，才使用项目 README 中标为“手工备用”的 `Read-Host -AsSecureString` 片段创建文件并收紧 ACL。Linux 上建议由部署系统提供 Docker Secret；若使用本地文件，至少执行 `chmod 600 secrets/*.txt` 并限制目录访问。
 
 只做 Compose 配置解析时不需要创建这些文件；Compose 配置解析成功不代表 Secret 已就绪。启动前只检查本次命令所叠加层的文件，不得用占位凭据启动服务或真实连接。停止使用外部连接后应安全移除对应外部服务 Secret，并把 `ENABLE_TMDB_LIVE`、`ENABLE_AVISTAZ_LIVE_SEARCH`、`ENABLE_QB_READ_ONLY`、`ENABLE_AUTOMATION_ENGINE`、`ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 和 `ENABLE_DOWNLOAD_MONITOR` 恢复为 `false`。认证三个 Secret 缺失时，受保护 API 会 fail closed，而不是退回匿名访问。

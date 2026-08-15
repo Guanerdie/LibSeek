@@ -12,7 +12,12 @@ from app.adapters.base import MetadataProvider
 from app.core.http import AsyncTtlCache, SafeAsyncHttpClient, SerializedRateLimiter
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.schemas.adapters import AdapterManifest, MetadataRecord
+from app.schemas.adapters import (
+    AdapterManifest,
+    MetadataRecord,
+    ProbeResult,
+    normalize_country_codes,
+)
 
 
 class TmdbExternalIds(BaseModel):
@@ -36,6 +41,12 @@ class TmdbAlternativeTitles(BaseModel):
     results: list[TmdbAlternativeTitle] = Field(default_factory=list)
 
 
+class TmdbProductionCountry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    iso_3166_1: str | None = None
+
+
 class TmdbDetails(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -45,6 +56,8 @@ class TmdbDetails(BaseModel):
     original_title: str | None = None
     original_name: str | None = None
     original_language: str | None = None
+    origin_country: list[str] = Field(default_factory=list)
+    production_countries: list[TmdbProductionCountry] = Field(default_factory=list)
     release_date: str | None = None
     first_air_date: str | None = None
     number_of_seasons: int | None = Field(default=None, ge=0)
@@ -140,6 +153,19 @@ class TmdbProvider(MetadataProvider):
     async def aclose(self) -> None:
         await self.http.aclose()
 
+    async def probe(self) -> ProbeResult:
+        try:
+            payload = await self._get_json("/3/authentication", {})
+            if not isinstance(payload, dict) or payload.get("success") is not True:
+                raise AppError(
+                    "TMDB_RESPONSE_INVALID",
+                    "TMDB 认证响应格式无效",
+                    status_code=502,
+                )
+            return ProbeResult(healthy=True, message="TMDB Access Token 验证成功")
+        except AppError as exc:
+            return ProbeResult(healthy=False, error_code=exc.error_code, message=exc.message)
+
     async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
         cache_key = f"{path}|{sorted((key, str(value)) for key, value in params.items())}"
         cached = await self.cache.get(cache_key)
@@ -166,7 +192,7 @@ class TmdbProvider(MetadataProvider):
                     )
                 await self.sleep(float(2**attempt))
                 continue
-            if response.status_code == 401:
+            if response.status_code in {401, 403}:
                 raise AppError("TMDB_AUTH_FAILED", "TMDB Access Token 无效", status_code=401)
             if response.status_code == 404:
                 raise AppError("TMDB_NOT_FOUND", "TMDB 中没有对应影视条目", status_code=404)
@@ -231,6 +257,7 @@ class TmdbProvider(MetadataProvider):
             english_title=english_title,
             original_title=original_title,
             original_language=chinese.original_language,
+            country_codes=self._country_codes(media_type, chinese),
             aliases=aliases,
             year=year,
             number_of_seasons=chinese.number_of_seasons,
@@ -273,11 +300,27 @@ class TmdbProvider(MetadataProvider):
         except ValidationError as exc:
             raise AppError("TMDB_VALIDATION_ERROR", "TMDB 外部 ID 校验失败") from exc
 
+    async def get_country_codes(
+        self, media_type: MediaType, tmdb_id: int
+    ) -> list[str] | None:
+        details = await self._details(media_type, tmdb_id, "en-US", append=False)
+        return self._country_codes(media_type, details)
+
     async def get_tv_episode_matrix(self, tmdb_id: int) -> dict[int, list[int]] | None:
         details = await self._details(MediaType.TV, tmdb_id, "zh-CN", append=False)
         if (details.number_of_seasons or 0) <= 0:
             return None
         return await self._episode_matrix(tmdb_id, details.number_of_seasons or 0)
+
+    @staticmethod
+    def _country_codes(
+        media_type: MediaType, details: TmdbDetails
+    ) -> list[str] | None:
+        values: list[object] = []
+        if media_type == MediaType.TV:
+            values.extend(details.origin_country)
+        values.extend(country.iso_3166_1 for country in details.production_countries)
+        return normalize_country_codes(values)
 
     async def _episode_matrix(self, tmdb_id: int, season_count: int) -> dict[int, list[int]]:
         matrix: dict[int, list[int]] = {}

@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   executionForApproval: vi.fn(),
   executionList: vi.fn(),
   executionGet: vi.fn(),
+  executionDownloadJob: vi.fn(),
   executionReconcile: vi.fn(),
 }))
 
@@ -48,6 +49,7 @@ vi.mock('../src/api/client', () => ({
     forApproval: mocks.executionForApproval,
     list: mocks.executionList,
     get: mocks.executionGet,
+    downloadJob: mocks.executionDownloadJob,
     reconcile: mocks.executionReconcile,
   },
 }))
@@ -129,6 +131,7 @@ async function approvalRouter(initialId = 'approval-a') {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  mocks.executionDownloadJob.mockRejectedValue(new Error('关联下载任务接口暂不可用'))
   mocks.executionForApproval.mockRejectedValue(noExecution())
   const auth = useAuthStore()
   auth.principal = { username: 'admin-user', role: 'admin' }
@@ -171,7 +174,7 @@ describe('ApprovalView route reuse', () => {
       await checkbox.setValue(true)
     }
     const findApprove = () =>
-      wrapper.findAll('button').find((button) => button.text().includes('批准计划并评估执行策略'))
+      wrapper.findAll('button').find((button) => button.text().includes('预检并批准计划'))
     expect(findApprove()?.attributes('disabled')).toBeUndefined()
 
     await router.push('/approvals/approval-b')
@@ -183,5 +186,62 @@ describe('ApprovalView route reuse', () => {
       expect((checkbox.element as HTMLInputElement).checked).toBe(false)
     }
     expect(findApprove()?.attributes('disabled')).toBeDefined()
+  })
+
+  it('clears a revoked plan and replaces a direct approval URL after reissuing', async () => {
+    const revoked = { ...approval('approval-a', '旧审批'), status: 'REVOKED' as const }
+    const created = {
+      ...approval('approval-new', '重发审批'),
+      media_item_id: revoked.media_item_id,
+      torrent_candidate_id: revoked.torrent_candidate_id,
+      candidate: {
+        ...revoked.candidate,
+        media_title: '重发审批',
+      },
+    }
+    const oldPlan = {
+      id: 'plan-old',
+      approval_id: revoked.id,
+      approval_snapshot_hash: 'a'.repeat(64),
+      preflight_policy_fingerprint: 'b'.repeat(64),
+      plan_hash: 'c'.repeat(64),
+      site_id: 'avistaz',
+      torrent_ref: 'avistaz:details:old',
+      expected_info_hash: '1'.repeat(40),
+      release_title: '旧审批下载计划',
+      save_path_ref: 'media-tv',
+      category: 'media',
+      tags: ['unin'],
+      estimated_size_bytes: 2048,
+      media_destination_plan: {},
+      preflight_result: revoked.preflight_result,
+      warnings: [],
+      created_at: '2026-08-11T00:02:00Z',
+    }
+    const pendingCreate = deferred<ApprovalRequest>()
+    mocks.approvalGet
+      .mockResolvedValueOnce(revoked)
+      .mockResolvedValueOnce(created)
+    mocks.approvalPlan.mockResolvedValueOnce(oldPlan)
+    mocks.approvalCreate.mockReturnValueOnce(pendingCreate.promise)
+    const router = await approvalRouter()
+    const wrapper = mount(ApprovalView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('avistaz:details:old')
+    const reissue = wrapper.findAll('button').find((button) => button.text().includes('重新发起审批'))
+    await reissue?.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('avistaz:details:old')
+    expect(mocks.approvalCreate).toHaveBeenCalledWith(revoked.torrent_candidate_id, 60)
+
+    pendingCreate.resolve(created)
+    await flushPromises()
+
+    expect(router.currentRoute.value.fullPath).toBe('/approvals/approval-new')
+    expect(mocks.approvalGet).toHaveBeenLastCalledWith('approval-new')
+    expect(wrapper.text()).toContain('重发审批')
+    expect(wrapper.text()).not.toContain('avistaz:details:old')
   })
 })

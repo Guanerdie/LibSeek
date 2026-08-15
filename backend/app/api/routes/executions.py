@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.dependencies import AdminPrincipal, DbSession, SettingsDep, ViewerPrincipal
 from app.errors import AppError
-from app.models.entities import DownloadExecution, ExecutionIntent
+from app.models.entities import ExecutionIntent
 from app.models.enums import AutomationStage, DownloadExecutionStatus
 from app.schemas.common import Page
 from app.schemas.executions import (
@@ -17,17 +17,19 @@ from app.schemas.executions import (
     ExecutionIntentCreateRequest,
     ExecutionIntentCreateResponse,
 )
+from app.schemas.jobs import DownloadJobResponse
 from app.services.automation import require_stage_not_disabled
 from app.services.executions import (
     create_execution_intent,
+    download_execution_response,
     execute_approved_plan,
     get_download_execution,
     get_execution_for_approval,
     list_download_executions,
     recover_idempotent_execution,
     request_reconciliation,
-    requires_reconciliation,
 )
+from app.services.jobs import get_download_job_for_execution
 
 router = APIRouter(tags=["download-executions"])
 
@@ -46,41 +48,6 @@ def _intent_response(
         launch_mode=intent.launch_mode,
         expires_at=intent.expires_at,
         created_at=intent.created_at,
-    )
-
-
-def _execution_response(execution: DownloadExecution) -> DownloadExecutionResponse:
-    return DownloadExecutionResponse(
-        id=execution.id,
-        approval_id=execution.approval_id,
-        intent_id=execution.intent_id,
-        status=execution.status,
-        requires_reconciliation=requires_reconciliation(execution),
-        approval_snapshot_hash=execution.approval_snapshot_hash,
-        plan_hash=execution.plan_hash,
-        qb_target_fingerprint=execution.qb_target_fingerprint,
-        launch_mode=execution.launch_mode,
-        attempts=execution.attempts,
-        max_attempts=execution.max_attempts,
-        next_retry_at=execution.next_retry_at,
-        locked_at=execution.locked_at,
-        actual_info_hash=execution.actual_info_hash,
-        actual_info_hash_v1=execution.actual_info_hash_v1,
-        actual_info_hash_v2=execution.actual_info_hash_v2,
-        actual_size_bytes=execution.actual_size_bytes,
-        actual_file_count=execution.actual_file_count,
-        validated_at=execution.validated_at,
-        submitted_at=execution.submitted_at,
-        verified_at=execution.verified_at,
-        error_code=execution.error_code,
-        error_message=execution.error_message,
-        requested_by=execution.requested_by,
-        requested_at=execution.requested_at,
-        reconciliation_requested_by=execution.reconciliation_requested_by,
-        reconciliation_requested_at=execution.reconciliation_requested_at,
-        reconciliation_reason=execution.reconciliation_reason,
-        created_at=execution.created_at,
-        updated_at=execution.updated_at,
     )
 
 
@@ -165,7 +132,7 @@ async def execute_approval_download_plan(
         await _commit_safe_state_on_error(session, exc)
         raise
     response.status_code = 201 if created else 200
-    return _execution_response(execution)
+    return download_execution_response(execution)
 
 
 @router.get(
@@ -177,7 +144,9 @@ async def get_approval_download_execution(
     session: DbSession,
     _principal: ViewerPrincipal,
 ) -> DownloadExecutionResponse:
-    return _execution_response(await get_execution_for_approval(session, approval_id))
+    return download_execution_response(
+        await get_execution_for_approval(session, approval_id)
+    )
 
 
 @router.get("/download-executions", response_model=Page[DownloadExecutionResponse])
@@ -195,7 +164,7 @@ async def get_download_executions(
         page_size=page_size,
     )
     return Page(
-        items=[_execution_response(execution) for execution in executions],
+        items=[download_execution_response(execution) for execution in executions],
         page=page,
         page_size=page_size,
         total=total,
@@ -211,7 +180,20 @@ async def get_download_execution_by_id(
     session: DbSession,
     _principal: ViewerPrincipal,
 ) -> DownloadExecutionResponse:
-    return _execution_response(await get_download_execution(session, execution_id))
+    return download_execution_response(await get_download_execution(session, execution_id))
+
+
+@router.get(
+    "/download-executions/{execution_id}/download-job",
+    response_model=DownloadJobResponse,
+)
+async def get_download_execution_job(
+    execution_id: str,
+    session: DbSession,
+    _principal: ViewerPrincipal,
+) -> DownloadJobResponse:
+    job = await get_download_job_for_execution(session, execution_id)
+    return DownloadJobResponse.model_validate(job)
 
 
 @router.post(
@@ -231,4 +213,4 @@ async def reconcile_download_execution(
         actor=principal.username,
     )
     await session.commit()
-    return _execution_response(execution)
+    return download_execution_response(execution)

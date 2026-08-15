@@ -8,17 +8,10 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const navItems = [
-  { to: '/', label: '系统状态', icon: '◉' },
-  { to: '/media', label: '未入库影视', icon: '▦' },
-  { to: '/discovery', label: '发现任务', icon: '↻' },
-  { to: '/adapters', label: '适配器', icon: '◇' },
-  { to: '/approvals', label: '审批计划', icon: '✓' },
-  { to: '/executions', label: '下载执行', icon: '▶' },
-  { to: '/download-jobs', label: '下载任务', icon: '↓' },
-  { to: '/media-imports', label: '入库规划', icon: '↳' },
-  { to: '/automation', label: '自动化', icon: '⚙' },
-  { to: '/qbittorrent', label: 'qB 状态', icon: '⇄' },
+const primaryNavItems = [
+  { to: '/media', label: '待处理', icon: '▦' },
+  { to: '/download-jobs', label: '下载', icon: '↓' },
+  { to: '/configuration', label: '设置', icon: '⚙' },
 ]
 
 const isPublicRoute = computed(() => Boolean(route.meta.public))
@@ -39,14 +32,21 @@ async function logout(): Promise<void> {
           <small>MEDIA ORCHESTRATOR</small>
         </div>
       </div>
-      <nav aria-label="主导航">
-        <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" :aria-label="item.label" :title="item.label">
-          <span class="nav-icon">{{ item.icon }}</span>{{ item.label }}
+      <nav class="app-nav" aria-label="主导航">
+        <RouterLink
+          v-for="item in primaryNavItems"
+          :key="item.to"
+          class="primary-nav-link"
+          :to="item.to"
+          :aria-label="item.label"
+          :title="item.label"
+        >
+          <span class="nav-icon">{{ item.icon }}</span><span class="nav-label">{{ item.label }}</span>
         </RouterLink>
       </nav>
       <div class="phase-note">
         <span class="status-dot"></span>
-        <div><strong>第七阶段</strong><small>入库规划</small></div>
+        <div><strong>人工确认</strong><small>默认工作模式</small></div>
       </div>
     </aside>
     <main class="main-content">

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Callable
+from urllib.parse import parse_qs
 
 import bencodepy  # type: ignore[import-untyped]
 import httpx
@@ -64,6 +65,13 @@ def login_response() -> httpx.Response:
     )
 
 
+def categories_response(*names: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={name: {"savePath": "/downloads/approved"} for name in names},
+    )
+
+
 @pytest.mark.asyncio
 async def test_write_is_disabled_before_any_network_request() -> None:
     calls = 0
@@ -91,7 +99,11 @@ async def test_write_is_disabled_before_any_network_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_low_level_add_request_cannot_bypass_write_gate() -> None:
+@pytest.mark.parametrize(
+    "path",
+    ("/api/v2/torrents/add", "/api/v2/torrents/createCategory"),
+)
+async def test_low_level_write_request_cannot_bypass_write_gate(path: str) -> None:
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -104,8 +116,8 @@ async def test_low_level_add_request_cannot_bypass_write_gate() -> None:
         with pytest.raises(AppError) as caught:
             await client._request(
                 "POST",
-                "/api/v2/torrents/add",
-                files={"torrents": ("approved.torrent", b"payload", "application/x-bittorrent")},
+                path,
+                data={"category": "movies"},
             )
     finally:
         await client.aclose()
@@ -137,12 +149,14 @@ async def test_add_requires_a_persisted_expected_info_hash() -> None:
 async def test_existing_info_hash_is_idempotent_and_skips_add() -> None:
     torrent, info_hash = torrent_fixture()
     paths: list[str] = []
+    queried_hashes: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         if request.url.path == "/api/v2/auth/login":
             return login_response()
         if request.url.path == "/api/v2/torrents/info":
+            queried_hashes.append(request.url.params["hashes"])
             return httpx.Response(
                 200,
                 json=[
@@ -174,6 +188,7 @@ async def test_existing_info_hash_is_idempotent_and_skips_add() -> None:
     assert result.outcome == "ALREADY_PRESENT"
     assert result.info_hash == info_hash
     assert paths == ["/api/v2/auth/login", "/api/v2/torrents/info"]
+    assert queried_hashes == [info_hash]
 
 
 @pytest.mark.asyncio
@@ -256,6 +271,8 @@ async def test_add_uses_version_specific_state_field_and_approved_target(
             return httpx.Response(200, json=[])
         if request.url.path == "/api/v2/app/webapiVersion":
             return httpx.Response(200, text=web_api_version)
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies")
         if request.url.path == "/api/v2/torrents/add":
             add_body = request.content
             return httpx.Response(200, text="Ok.")
@@ -288,6 +305,256 @@ async def test_add_uses_version_specific_state_field_and_approved_target(
         "/api/v2/auth/login",
         "/api/v2/torrents/info",
         "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/add",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_missing_category_is_created_and_verified_before_add() -> None:
+    torrent, info_hash = torrent_fixture()
+    paths: list[str] = []
+    create_form: dict[str, list[str]] = {}
+    category_created = False
+    category_write_guard_calls = 0
+    add_write_guard_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal category_created, create_form
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/v2/app/webapiVersion":
+            return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies") if category_created else categories_response()
+        if request.url.path == "/api/v2/torrents/createCategory":
+            create_form = parse_qs(request.content.decode("utf-8"))
+            category_created = True
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            return httpx.Response(200, text="Ok.")
+        raise AssertionError(request.url.path)
+
+    async def category_write_guard() -> None:
+        nonlocal category_write_guard_calls
+        category_write_guard_calls += 1
+
+    async def add_write_guard() -> None:
+        nonlocal add_write_guard_calls
+        add_write_guard_calls += 1
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        result = await client.add_torrent(
+            torrent,
+            expected_info_hash=info_hash,
+            save_path="/downloads/approved",
+            category="movies",
+            category_write_guard=category_write_guard,
+            write_guard=add_write_guard,
+        )
+    finally:
+        await client.aclose()
+
+    assert result.outcome == "SUBMITTED"
+    assert create_form == {
+        "category": ["movies"],
+        "savePath": ["/downloads/approved"],
+    }
+    assert category_write_guard_calls == 1
+    assert add_write_guard_calls == 1
+    assert paths == [
+        "/api/v2/auth/login",
+        "/api/v2/torrents/info",
+        "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/createCategory",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/add",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_category_creation_not_observed_prevents_add() -> None:
+    torrent, info_hash = torrent_fixture()
+    paths: list[str] = []
+    category_write_guard_calls = 0
+    add_write_guard_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/v2/app/webapiVersion":
+            return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response()
+        if request.url.path == "/api/v2/torrents/createCategory":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            raise AssertionError("unverified category must prevent torrent submission")
+        raise AssertionError(request.url.path)
+
+    async def category_write_guard() -> None:
+        nonlocal category_write_guard_calls
+        category_write_guard_calls += 1
+
+    async def add_write_guard() -> None:
+        nonlocal add_write_guard_calls
+        add_write_guard_calls += 1
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.add_torrent(
+                torrent,
+                expected_info_hash=info_hash,
+                save_path="/downloads/approved",
+                category="movies",
+                category_write_guard=category_write_guard,
+                write_guard=add_write_guard,
+            )
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_CATEGORY_CREATE_FAILED"
+    assert caught.value.retryable is True
+    assert caught.value.details == {"category": "movies"}
+    assert category_write_guard_calls == 1
+    assert add_write_guard_calls == 0
+    assert paths == [
+        "/api/v2/auth/login",
+        "/api/v2/torrents/info",
+        "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/createCategory",
+        "/api/v2/torrents/categories",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_add_transport_failure_after_category_creation_is_outcome_unknown() -> None:
+    torrent, info_hash = torrent_fixture()
+    paths: list[str] = []
+    category_created = False
+    category_write_guard_calls = 0
+    add_write_guard_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal category_created
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/v2/app/webapiVersion":
+            return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies") if category_created else categories_response()
+        if request.url.path == "/api/v2/torrents/createCategory":
+            category_created = True
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            raise httpx.ReadTimeout("add response timed out", request=request)
+        raise AssertionError(request.url.path)
+
+    async def category_write_guard() -> None:
+        nonlocal category_write_guard_calls
+        category_write_guard_calls += 1
+
+    async def add_write_guard() -> None:
+        nonlocal add_write_guard_calls
+        add_write_guard_calls += 1
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        with pytest.raises(AppError) as caught:
+            await client.add_torrent(
+                torrent,
+                expected_info_hash=info_hash,
+                save_path="/downloads/approved",
+                category="movies",
+                category_write_guard=category_write_guard,
+                write_guard=add_write_guard,
+            )
+    finally:
+        await client.aclose()
+
+    assert caught.value.error_code == "QB_ADD_OUTCOME_UNKNOWN"
+    assert caught.value.retryable is False
+    assert caught.value.details == {"external_write_may_have_occurred": True}
+    assert category_write_guard_calls == 1
+    assert add_write_guard_calls == 1
+    assert paths == [
+        "/api/v2/auth/login",
+        "/api/v2/torrents/info",
+        "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/createCategory",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/add",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_category_creation_conflict_is_idempotent() -> None:
+    torrent, info_hash = torrent_fixture()
+    paths: list[str] = []
+    category_reads = 0
+    write_guard_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal category_reads
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/v2/app/webapiVersion":
+            return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            category_reads += 1
+            return categories_response() if category_reads == 1 else categories_response("movies")
+        if request.url.path == "/api/v2/torrents/createCategory":
+            return httpx.Response(409, text="category already exists")
+        if request.url.path == "/api/v2/torrents/add":
+            return httpx.Response(200, text="Ok.")
+        raise AssertionError(request.url.path)
+
+    async def write_guard() -> None:
+        nonlocal write_guard_calls
+        write_guard_calls += 1
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        result = await client.add_torrent(
+            torrent,
+            expected_info_hash=info_hash,
+            save_path="/downloads/approved",
+            category="movies",
+            write_guard=write_guard,
+        )
+    finally:
+        await client.aclose()
+
+    assert result.outcome == "SUBMITTED"
+    assert write_guard_calls == 2
+    assert paths == [
+        "/api/v2/auth/login",
+        "/api/v2/torrents/info",
+        "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
+        "/api/v2/torrents/createCategory",
+        "/api/v2/torrents/categories",
         "/api/v2/torrents/add",
     ]
 
@@ -308,6 +575,8 @@ async def test_add_state_field_is_cached_only_for_current_sid_session() -> None:
         if request.url.path == "/api/v2/app/webapiVersion":
             version_calls += 1
             return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies")
         if request.url.path == "/api/v2/torrents/add":
             add_bodies.append(request.content)
             return httpx.Response(200, text="Ok.")
@@ -411,6 +680,8 @@ async def test_failed_version_probe_is_not_cached() -> None:
         if request.url.path == "/api/v2/app/webapiVersion":
             version_calls += 1
             return httpx.Response(200, text="2.11" if version_calls == 1 else "2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies")
         if request.url.path == "/api/v2/torrents/add":
             add_calls += 1
             return httpx.Response(200, text="Ok.")
@@ -454,6 +725,8 @@ async def test_ambiguous_add_response_requires_reconciliation() -> None:
             return httpx.Response(200, json=[])
         if request.url.path == "/api/v2/app/webapiVersion":
             return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies")
         return httpx.Response(500, text="unknown")
 
     client = adapter(httpx.MockTransport(handler))
@@ -488,6 +761,8 @@ async def test_write_guard_runs_after_deduplication_and_before_add_post() -> Non
             return httpx.Response(200, json=[])
         if request.url.path == "/api/v2/app/webapiVersion":
             return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies")
         if request.url.path == "/api/v2/torrents/add":
             raise AssertionError("expired lease must prevent the add POST")
         raise AssertionError(request.url.path)
@@ -521,6 +796,7 @@ async def test_write_guard_runs_after_deduplication_and_before_add_post() -> Non
         "/api/v2/auth/login",
         "/api/v2/torrents/info",
         "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
     ]
 
 
@@ -534,7 +810,7 @@ async def test_request_guard_blocks_add_after_internal_deduplication_get() -> No
     async def request_guard() -> None:
         nonlocal guard_calls
         guard_calls += 1
-        if guard_calls == 4:
+        if guard_calls == 5:
             raise AppError(
                 "AUTOMATION_POLICY_REVISION_CHANGED",
                 "policy changed",
@@ -549,6 +825,8 @@ async def test_request_guard_blocks_add_after_internal_deduplication_get() -> No
             return httpx.Response(200, json=[])
         if request.url.path == "/api/v2/app/webapiVersion":
             return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("movies")
         raise AssertionError("request guard must block the add POST")
 
     async def write_guard() -> None:
@@ -574,10 +852,11 @@ async def test_request_guard_blocks_add_after_internal_deduplication_get() -> No
 
     assert caught.value.error_code == "AUTOMATION_POLICY_REVISION_CHANGED"
     assert caught.value.details["external_request_performed"] is False
-    assert guard_calls == 4
+    assert guard_calls == 5
     assert write_guard_calls == 0
     assert paths == [
         "/api/v2/auth/login",
         "/api/v2/torrents/info",
         "/api/v2/app/webapiVersion",
+        "/api/v2/torrents/categories",
     ]

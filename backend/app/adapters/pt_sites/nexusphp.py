@@ -40,6 +40,11 @@ _YEAR = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
 _SIZE = re.compile(r"(?i)^\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB|KIB|MIB|GIB|TIB)\s*$")
 AddressResolver = Callable[[str, int], Awaitable[tuple[str, ...]]]
 
+_NEXUSPHP_PROBE_PATH = "/torrents.php"
+_NEXUSPHP_LOGIN_SELECTOR = "form[action*='login'], input[name='username']"
+_NEXUSPHP_CAPTCHA_SELECTOR = "input[name*='captcha'], img[src*='captcha']"
+_NEXUSPHP_CHALLENGE_SELECTOR = "#challenge-form, .cf-challenge, [data-sitekey]"
+
 
 async def _resolve_target_addresses(host: str, port: int) -> tuple[str, ...]:
     loop = asyncio.get_running_loop()
@@ -87,6 +92,7 @@ class SameOriginNexusSession:
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
             follow_redirects=False,
+            trust_env=False,
         )
 
     async def aclose(self) -> None:
@@ -243,6 +249,178 @@ class SameOriginNexusSession:
                 status_code=409,
                 details={"external_request_performed": False},
             ) from exc
+
+
+class NexusPhpConnectionProbe:
+    """Strict read-only authentication probe for an unprofiled NexusPHP site."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        allowed_hosts: tuple[str, ...],
+        cookie_header: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+        address_resolver: AddressResolver | None = None,
+        connect_timeout: float = 5.0,
+        read_timeout: float = 30.0,
+        max_response_bytes: int = 2 * 1024 * 1024,
+        request_gate: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+    ) -> None:
+        self._cookie_header: str | None = self._validate_cookie(cookie_header)
+        self._request_gate = request_gate
+        self.session = SameOriginNexusSession(
+            base_url,
+            allowed_hosts=allowed_hosts,
+            transport=transport,
+            address_resolver=address_resolver,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            max_response_bytes=max_response_bytes,
+        )
+
+    async def aclose(self) -> None:
+        self._cookie_header = None
+        await self.session.aclose()
+
+    async def probe(self) -> ProbeResult:
+        try:
+            response = await self._request_probe_page()
+            self._validate_response(response)
+            self._validate_authenticated_page(response.content)
+            return ProbeResult(
+                healthy=True,
+                message="NexusPHP 站点可访问，Cookie 会话验证成功",
+            )
+        except AppError as exc:
+            return ProbeResult(
+                healthy=False,
+                error_code=exc.error_code,
+                message=exc.message,
+            )
+
+    async def _request_probe_page(self) -> SafeHttpResult:
+        headers = {
+            "Accept": "text/html,application/xhtml+xml",
+            "Cookie": self._require_cookie(),
+        }
+        if self._request_gate is None:
+            return await self.session.request("GET", _NEXUSPHP_PROBE_PATH, headers=headers)
+        async with self._request_gate("connection_probe"):
+            return await self.session.request("GET", _NEXUSPHP_PROBE_PATH, headers=headers)
+
+    def _require_cookie(self) -> str:
+        if self._cookie_header is None:
+            raise AppError(
+                "NEXUSPHP_SESSION_NOT_CONFIGURED",
+                "请先保存 NexusPHP Cookie",
+                status_code=409,
+            )
+        return self._cookie_header
+
+    @staticmethod
+    def _validate_cookie(value: str) -> str:
+        if (
+            not value
+            or len(value) > 8192
+            or any(not 32 <= ord(character) <= 126 for character in value)
+        ):
+            raise AppError(
+                "NEXUSPHP_SECRET_INVALID",
+                "NexusPHP Cookie 格式无效",
+                status_code=400,
+            )
+        return value
+
+    @staticmethod
+    def _validate_response(response: SafeHttpResult) -> None:
+        if response.status_code in {401, 403}:
+            raise AppError(
+                "NEXUSPHP_LOGIN_REQUIRED",
+                "NexusPHP Cookie 已失效或尚未登录",
+                status_code=409,
+            )
+        if response.status_code == 429:
+            raise AppError(
+                "NEXUSPHP_RATE_LIMITED",
+                "NexusPHP 连接测试受到限流，请稍后重试",
+                status_code=429,
+                retryable=True,
+            )
+        if response.status_code >= 500:
+            raise AppError(
+                "NEXUSPHP_UNAVAILABLE",
+                "NexusPHP 站点暂时不可用",
+                status_code=502,
+                retryable=True,
+            )
+        if not 200 <= response.status_code < 300:
+            raise AppError(
+                "NEXUSPHP_HTTP_ERROR",
+                "NexusPHP 返回了无法确认的状态",
+                status_code=502,
+            )
+        if "html" not in response.content_type.casefold():
+            raise AppError(
+                "NEXUSPHP_NON_HTML_RESPONSE",
+                "NexusPHP 连接测试响应不是 HTML",
+                status_code=502,
+            )
+
+    def _validate_authenticated_page(self, html: bytes) -> None:
+        soup = BeautifulSoup(html, "html.parser")
+        unsupported_states = (
+            (
+                _NEXUSPHP_CHALLENGE_SELECTOR,
+                "NEXUSPHP_CHALLENGE_UNSUPPORTED",
+                "站点返回了浏览器挑战；请先在浏览器中处理",
+            ),
+            (
+                _NEXUSPHP_CAPTCHA_SELECTOR,
+                "NEXUSPHP_CAPTCHA_REQUIRED",
+                "站点要求验证码；请先在浏览器中处理",
+            ),
+            (
+                _NEXUSPHP_LOGIN_SELECTOR,
+                "NEXUSPHP_LOGIN_REQUIRED",
+                "NexusPHP Cookie 已失效或尚未登录",
+            ),
+        )
+        for selector, error_code, message in unsupported_states:
+            if soup.select_one(selector) is not None:
+                raise AppError(error_code, message, status_code=409)
+
+        has_logout = False
+        has_account = False
+        for tag in soup.select("a[href], form[action]"):
+            raw_target = tag.get("href") if tag.has_attr("href") else tag.get("action")
+            if not isinstance(raw_target, str) or not raw_target:
+                continue
+            target = urljoin(f"{self.session.base_url}/", raw_target)
+            try:
+                if url_origin(target) != self.session.origin:
+                    continue
+            except ValueError:
+                continue
+            parsed = urlsplit(target)
+            filename = parsed.path.rstrip("/").rsplit("/", 1)[-1].casefold()
+            if filename == "logout.php":
+                has_logout = True
+            elif filename == "userdetails.php":
+                user_ids = parse_qs(parsed.query).get("id", ())
+                valid_user_id = any(
+                    value.isascii() and value.isdigit() and int(value) > 0
+                    for value in user_ids
+                )
+                if valid_user_id:
+                    has_account = True
+
+        if not has_logout or not has_account:
+            raise AppError(
+                "NEXUSPHP_SESSION_UNVERIFIED",
+                "站点可以访问，但页面不足以确认 Cookie 已登录",
+                status_code=409,
+            )
 
 
 class NexusPhpHtmlParser:

@@ -11,6 +11,7 @@ import ExecutionListView from '../src/views/ExecutionListView.vue'
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   get: vi.fn(),
+  downloadJob: vi.fn(),
   reconcile: vi.fn(),
   createIntent: vi.fn(),
   execute: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock('../src/api/client', () => ({
   executionApi: {
     list: mocks.list,
     get: mocks.get,
+    downloadJob: mocks.downloadJob,
     reconcile: mocks.reconcile,
     createIntent: mocks.createIntent,
     execute: mocks.execute,
@@ -67,12 +69,38 @@ const execution = {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  mocks.downloadJob.mockRejectedValue(new Error('关联下载任务接口暂不可用'))
   const auth = useAuthStore()
   auth.initialized = true
   auth.principal = { username: 'viewer-user', role: 'viewer' }
 })
 
 describe('execution views', () => {
+  it('refreshes execution status in place and links back to the approval', async () => {
+    mocks.get.mockResolvedValue(execution)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/executions', component: ExecutionListView },
+        { path: '/executions/:id', component: ExecutionDetailView },
+        { path: '/approvals/:id', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/executions/execution-1')
+    const wrapper = mount(ExecutionDetailView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.get('a[href="/approvals/approval-1"]').text()).toBe('approval-1')
+    await wrapper
+      .findAll('.page-header button')
+      .find((button) => button.text().includes('刷新详情'))
+      ?.trigger('click')
+    await flushPromises()
+
+    expect(mocks.get).toHaveBeenCalledTimes(2)
+    expect(mocks.get).toHaveBeenLastCalledWith('execution-1')
+  })
+
   it('renders a stable page and requests the next page explicitly', async () => {
     mocks.list
       .mockResolvedValueOnce({ items: [execution], page: 1, page_size: 20, total: 21 })
@@ -82,6 +110,7 @@ describe('execution views', () => {
       routes: [
         { path: '/executions', component: ExecutionListView },
         { path: '/executions/:id', component: ExecutionDetailView },
+        { path: '/approvals/:id', component: { template: '<div />' } },
       ],
     })
     await router.push('/executions')
@@ -110,6 +139,7 @@ describe('execution views', () => {
       routes: [
         { path: '/executions', component: ExecutionListView },
         { path: '/executions/:id', component: ExecutionDetailView },
+        { path: '/approvals/:id', component: { template: '<div />' } },
       ],
     })
     await router.push('/executions/execution-1')
@@ -130,5 +160,40 @@ describe('execution views', () => {
 
     expect(mocks.reconcile).toHaveBeenCalledWith('execution-1', '核对 qB 状态')
     expect(wrapper.text()).toContain('等待后台处理')
+  })
+
+  it.each([
+    {
+      status: 'RETRY_WAIT' as const,
+      attempts: 1,
+      expected: 'AvistaZ 返回 HTTP 403，已安排自动重试（第 1/3 次）',
+    },
+    {
+      status: 'FAILED' as const,
+      attempts: 3,
+      expected: 'AvistaZ 返回 HTTP 403，自动重试次数已耗尽（第 3/3 次）',
+    },
+  ])('renders a fixed safe AvistaZ 403 message for $status', async ({ status, attempts, expected }) => {
+    mocks.get.mockResolvedValueOnce({
+      ...execution,
+      status,
+      attempts,
+      requires_reconciliation: false,
+      error_code: 'AVISTAZ_TORRENT_FETCH_FORBIDDEN',
+      error_message: '下载执行异常，请根据错误代码查看审计记录',
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/executions', component: ExecutionListView },
+        { path: '/executions/:id', component: ExecutionDetailView },
+        { path: '/approvals/:id', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/executions/execution-1')
+    const wrapper = mount(ExecutionDetailView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.get('.execution-error-message').text()).toBe(expected)
   })
 })

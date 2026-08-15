@@ -202,6 +202,9 @@ _ALLOWED_SCHEMA_FIELD_NAMES = frozenset(
         "languages",
         "country",
         "countries",
+        "country_codes",
+        "origin_country",
+        "production_countries",
         "genres",
         "runtime",
         "overview",
@@ -631,10 +634,6 @@ async def run_contract_probe(
 
     validated_base_url = validate_external_url(
         settings.nextfind_base_url,
-        settings.allowed_external_hosts,
-    )
-    validated_base_url = validate_external_url(
-        validated_base_url,
         settings.nextfind_allowed_hosts,
     )
     nextfind_host = urlparse(validated_base_url).hostname

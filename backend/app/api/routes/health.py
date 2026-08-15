@@ -61,6 +61,12 @@ async def system_status(session: DbSession) -> SystemStatusResponse:
         nextfind_configured=settings.nextfind_configured,
         tmdb_configured=settings.tmdb_configured,
         tmdb_live_enabled=settings.enable_tmdb_live,
+        pt_site_architecture=settings.pt_site_architecture,
+        pt_site_label=settings.pt_site_display_name,
+        pt_site_configured=settings.pt_site_configured,
+        pt_site_runtime_supported=settings.pt_site_runtime_supported,
+        pt_site_search_ready=settings.pt_site_search_ready,
+        pt_site_status=_pt_site_status(settings),
         avistaz_configured=settings.avistaz_configured,
         avistaz_live_enabled=settings.enable_avistaz_live_search,
         avistaz_status=(
@@ -75,4 +81,22 @@ async def system_status(session: DbSession) -> SystemStatusResponse:
             if settings.enable_qb_read_only and settings.qb_configured
             else "只读连接默认关闭"
         ),
+        download_control_plane_enabled=(
+            settings.enable_download_execution_control_plane
+        ),
+        download_executor_enabled=settings.enable_download_executor,
+        avistaz_torrent_fetch_enabled=settings.enable_avistaz_torrent_fetch,
+        qb_write_enabled=settings.enable_qb_write,
+        download_monitor_enabled=settings.enable_download_monitor,
+        automation_engine_enabled=settings.enable_automation_engine,
     )
+
+
+def _pt_site_status(settings: object) -> str:
+    if getattr(settings, "pt_site_runtime_supported", False) is not True:
+        return "配置已保存，等待站点适配"
+    if getattr(settings, "pt_site_search_ready", False) is True:
+        return "只读搜索已启用"
+    if getattr(settings, "pt_site_configured", False) is True:
+        return "已配置，实时搜索保持关闭"
+    return "尚未完成配置"

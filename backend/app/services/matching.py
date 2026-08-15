@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from app.core.pt_site_rules import effective_hnr_rule
 from app.models.entities import MediaItem
 from app.models.enums import MediaType
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
@@ -150,7 +151,7 @@ def score_torrent_candidate(
         else:
             score += 0.02
             reasons.append("SIZE_WITHIN_LIMIT")
-    if candidate.hit_and_run is None:
+    if not effective_hnr_rule(candidate.site_id, candidate.hit_and_run).known:
         warnings.append("HNR_UNKNOWN")
     if preferences.possible_duplicate:
         warnings.append("POSSIBLE_DUPLICATE")

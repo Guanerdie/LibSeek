@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
@@ -11,7 +11,21 @@ import { formatShanghai } from '../utils/format'
 const auth = useAuthStore()
 const store = useDiscoveryStore()
 const canOperate = computed(() => auth.hasRole('operator'))
-onMounted(() => store.load())
+const pollingMessage = computed(() => {
+  if (!store.autoRefreshing || store.activeRunCount === 0) return null
+  if (store.retryWaitingCount === store.activeRunCount) {
+    return '发现任务正在等待 Worker 重试，页面会自动刷新进度。'
+  }
+  if (store.retryWaitingCount > 0) {
+    return `发现任务正在后台运行，其中 ${store.retryWaitingCount} 个正在等待重试；页面会自动刷新进度。`
+  }
+  return '发现任务正在后台运行，页面会自动刷新进度。'
+})
+
+onMounted(() => {
+  void store.startAutoRefresh()
+})
+onUnmounted(() => store.stopAutoRefresh())
 </script>
 
 <template>
@@ -19,7 +33,7 @@ onMounted(() => store.load())
     <PageHeader
       eyebrow="DISCOVERY QUEUE"
       title="发现任务"
-      description="每次任务只读取外部数据；相同活跃任务会自动合并。"
+      description="每次任务只读取外部数据；相同活跃任务会自动合并并持续刷新进度。"
     >
       <div class="header-actions">
         <button class="button secondary" :disabled="store.loading || store.creating" @click="store.refresh">刷新进度</button>
@@ -40,6 +54,14 @@ onMounted(() => store.load())
       :empty="!store.loading && !store.error && store.runs.length === 0"
       empty-text="尚无发现任务"
     />
+    <div
+      v-if="pollingMessage"
+      :class="['notice-state', { 'warning-state': store.retryWaitingCount > 0 }]"
+      role="status"
+      data-testid="discovery-polling-status"
+    >
+      {{ pollingMessage }}
+    </div>
     <div v-if="store.notice" class="notice-state">{{ store.notice }}</div>
     <div v-if="store.runs.length" class="split-layout">
       <div class="task-list panel">

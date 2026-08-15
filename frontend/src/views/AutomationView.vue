@@ -10,6 +10,7 @@ import {
   type AutomationPolicyDraft,
 } from '../stores/automation'
 import type {
+  AutomationDecision,
   AutomationDecisionOutcome,
   AutomationMode,
   AutomationPolicyRevision,
@@ -22,6 +23,21 @@ const store = useAutomationStore()
 const decisionStage = ref<AutomationStage | ''>('')
 const decisionOutcome = ref<AutomationDecisionOutcome | ''>('')
 const decisionMediaId = ref('')
+
+function decisionMediaTarget(decision: AutomationDecision): string {
+  const suffix = decision.stage === 'IDENTITY' ? 'identity' : 'torrents'
+  return `/media/${encodeURIComponent(decision.media_item_id)}/${suffix}`
+}
+
+function decisionResultTarget(decision: AutomationDecision): string {
+  if (decision.download_execution_id) {
+    return `/executions/${encodeURIComponent(decision.download_execution_id)}`
+  }
+  if (decision.approval_request_id) {
+    return `/approvals/${encodeURIComponent(decision.approval_request_id)}`
+  }
+  return decisionMediaTarget(decision)
+}
 
 const modes: Array<{ value: AutomationMode; label: string; description: string }> = [
   { value: 'DISABLED', label: '关闭', description: '禁止该阶段任何新动作' },
@@ -398,11 +414,11 @@ function revisionModeSummary(revision: AutomationPolicyRevision): string {
             <tr v-for="decision in store.decisions" :key="decision.id" :class="{ 'blocked-decision': decision.outcome === 'BLOCKED' }">
               <td><strong>{{ stageLabel(decision.stage) }}</strong><small>{{ decision.action }}</small></td>
               <td><StatusPill :status="decision.outcome" /></td>
-              <td><strong class="mono">{{ decision.media_item_id }}</strong><small class="mono">{{ decision.id }}</small></td>
+              <td><a class="inline-record-link mono" :href="decisionMediaTarget(decision)">{{ decision.media_item_id }}</a><small class="mono">{{ decision.id }}</small></td>
               <td><div class="decision-reasons"><span v-for="reason in decision.reason_codes" :key="reason">{{ reason }}</span><small v-if="decision.reason_codes.length === 0">无附加原因</small></div></td>
               <td><code :title="decision.evidence_hash">{{ shortHash(decision.evidence_hash) }}</code></td>
               <td><strong>{{ formatShanghai(decision.created_at) }}</strong><small>{{ decision.actor }}</small></td>
-              <td><button class="table-action" type="button" @click="store.loadDecision(decision.id)">查看证据</button></td>
+              <td><div class="row-actions"><button class="table-action" type="button" @click="store.loadDecision(decision.id)">查看证据</button><a class="table-action" :href="decisionResultTarget(decision)">进入结果</a></div></td>
             </tr>
           </tbody>
         </table>
@@ -424,11 +440,11 @@ function revisionModeSummary(revision: AutomationPolicyRevision): string {
         <dl>
           <div><dt>决策 ID</dt><dd class="mono">{{ store.selectedDecision.id }}</dd></div>
           <div><dt>策略修订 ID</dt><dd class="mono">{{ store.selectedDecision.policy_revision_id }}</dd></div>
-          <div><dt>影视 ID</dt><dd class="mono">{{ store.selectedDecision.media_item_id }}</dd></div>
+          <div><dt>影视 ID</dt><dd><a class="inline-record-link mono" :href="decisionMediaTarget(store.selectedDecision)">{{ store.selectedDecision.media_item_id }}</a></dd></div>
           <div><dt>元数据候选</dt><dd class="mono">{{ store.selectedDecision.metadata_match_id ?? '—' }}</dd></div>
           <div><dt>种子候选</dt><dd class="mono">{{ store.selectedDecision.torrent_candidate_id ?? '—' }}</dd></div>
-          <div><dt>审批请求</dt><dd class="mono">{{ store.selectedDecision.approval_request_id ?? '—' }}</dd></div>
-          <div><dt>下载执行</dt><dd class="mono">{{ store.selectedDecision.download_execution_id ?? '—' }}</dd></div>
+          <div><dt>审批请求</dt><dd><a v-if="store.selectedDecision.approval_request_id" class="inline-record-link mono" :href="`/approvals/${store.selectedDecision.approval_request_id}`">{{ store.selectedDecision.approval_request_id }}</a><span v-else>—</span></dd></div>
+          <div><dt>下载执行</dt><dd><a v-if="store.selectedDecision.download_execution_id" class="inline-record-link mono" :href="`/executions/${store.selectedDecision.download_execution_id}`">{{ store.selectedDecision.download_execution_id }}</a><span v-else>—</span></dd></div>
           <div><dt>决策主体</dt><dd>{{ store.selectedDecision.actor }}</dd></div>
           <div><dt>证据哈希</dt><dd class="mono">{{ store.selectedDecision.evidence_hash }}</dd></div>
         </dl>

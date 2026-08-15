@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import DbSession, ViewerPrincipal
+from app.core.media_regions import MediaRegion
 from app.errors import AppError
 from app.models.entities import MediaItem
 from app.models.enums import MediaType
@@ -19,6 +20,7 @@ async def get_media(
     page_size: int = Query(default=20, ge=1, le=100),
     media_type: MediaType | None = None,
     identity_confidence: str | None = Query(default=None, max_length=30),
+    region: MediaRegion | None = None,
     query: str | None = Query(default=None, max_length=200),
 ) -> Page[MediaItemResponse]:
     items, total = await list_media_items(
@@ -27,6 +29,7 @@ async def get_media(
         page_size=page_size,
         media_type=media_type,
         identity_confidence=identity_confidence,
+        region=region,
         query=query,
     )
     return Page[MediaItemResponse](items=items, page=page, page_size=page_size, total=total)

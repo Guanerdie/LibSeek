@@ -50,6 +50,7 @@ from app.models.enums import (
     PreflightStatus,
     WorkflowStatus,
 )
+from app.repositories.jobs import find_download_job_by_execution_id
 from app.schemas.approvals import (
     ApprovalCandidateSnapshot,
     ApprovalRevokeRequest,
@@ -64,7 +65,12 @@ from app.schemas.executions import (
     ExecutionIntentCreateRequest,
 )
 from app.schemas.qbittorrent import QbTorrent
-from app.services.approvals import download_plan_hash, revoke_request, snapshot_hash
+from app.services.approvals import (
+    build_qb_plan_tags,
+    download_plan_hash,
+    revoke_request,
+    snapshot_hash,
+)
 from app.services.executions import (
     create_execution_intent,
     execute_approved_plan,
@@ -76,6 +82,7 @@ from app.services.executions import (
     request_reconciliation,
     update_download_job_observation,
 )
+from app.services.jobs import get_download_job_for_execution
 from app.services.preflight import preflight_policy_fingerprint
 from app.services.torrent_validation import ValidatedTorrent
 
@@ -274,7 +281,7 @@ async def seed_approved_plan(
             release_title="Execution Movie 2026 1080p WEB-DL",
             save_path_ref="movies-root",
             category="movies",
-            tags=["unin-plan"],
+            tags=list(build_qb_plan_tags(policy_settings.qb_plan_tags, media.title)),
             estimated_size_bytes=1024,
             media_destination_plan=destination.model_dump(mode="json"),
             preflight_result=preflight.model_dump(mode="json"),
@@ -345,6 +352,37 @@ def execution_api_client_factory(
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_viewer_principal] = override_principal
     app.dependency_overrides[get_admin_principal] = override_principal
+
+    def create() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        )
+
+    yield create
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def execution_viewer_api_client_factory(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    principal = Principal(
+        username="execution-viewer",
+        role=AuthRole.VIEWER,
+        issued_at=0,
+        expires_at=2**31,
+        csrf_digest="0" * 64,
+    )
+
+    async def override_principal() -> Principal:
+        return principal
+
+    app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides[get_viewer_principal] = override_principal
 
     def create() -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -1204,6 +1242,134 @@ async def test_monitor_marks_save_path_drift_without_persisting_real_paths(
         )
         assert approved_path not in persisted
         assert observed_path not in persisted
+
+
+@pytest.mark.asyncio
+async def test_download_job_repository_finds_unique_execution_binding(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    approval = await seed_approved_plan(
+        session_factory, source_item_id="execution-job-repository"
+    )
+    async with session_factory() as session:
+        execution, lease_token = await create_staged_execution(
+            session,
+            approval,
+            idempotency_key="execution-job-repository-key-01",
+        )
+        job = await finalize_download_submission(
+            session,
+            execution.id,
+            qb_observation(),
+            DownloadExecutionStatus.SUBMITTED,
+            execution_settings(),
+            actor="executor-test",
+            lease_token=lease_token,
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        found = await find_download_job_by_execution_id(session, execution.id)
+        missing = await find_download_job_by_execution_id(session, "missing-execution")
+
+    assert found is not None
+    assert found.id == job.id
+    assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_download_job_service_distinguishes_missing_execution_and_pending_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    approval = await seed_approved_plan(
+        session_factory, source_item_id="execution-job-service"
+    )
+    async with session_factory() as session:
+        execution, lease_token = await create_staged_execution(
+            session,
+            approval,
+            idempotency_key="execution-job-service-key-0001",
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        with pytest.raises(AppError) as pending_job:
+            await get_download_job_for_execution(session, execution.id)
+        with pytest.raises(AppError) as missing_execution:
+            await get_download_job_for_execution(session, "missing-execution")
+
+    assert pending_job.value.status_code == 404
+    assert pending_job.value.error_code == "DOWNLOAD_JOB_NOT_CREATED"
+    assert missing_execution.value.status_code == 404
+    assert missing_execution.value.error_code == "DOWNLOAD_EXECUTION_NOT_FOUND"
+
+    async with session_factory() as session:
+        job = await finalize_download_submission(
+            session,
+            execution.id,
+            qb_observation(),
+            DownloadExecutionStatus.SUBMITTED,
+            execution_settings(),
+            actor="executor-test",
+            lease_token=lease_token,
+        )
+        resolved = await get_download_job_for_execution(session, execution.id)
+        await session.commit()
+
+    assert resolved.id == job.id
+
+
+@pytest.mark.asyncio
+async def test_viewer_can_get_download_job_for_execution_with_stable_not_found_errors(
+    session_factory: async_sessionmaker[AsyncSession],
+    execution_viewer_api_client_factory,
+) -> None:
+    approval = await seed_approved_plan(
+        session_factory, source_item_id="execution-job-viewer-api"
+    )
+    async with session_factory() as session:
+        execution, lease_token = await create_staged_execution(
+            session,
+            approval,
+            idempotency_key="execution-job-viewer-api-key-01",
+        )
+        await session.commit()
+
+    async with execution_viewer_api_client_factory() as client:
+        pending_job = await client.get(
+            f"/api/download-executions/{execution.id}/download-job"
+        )
+        missing_execution = await client.get(
+            "/api/download-executions/missing-execution/download-job"
+        )
+
+    assert pending_job.status_code == 404
+    assert pending_job.json()["error_code"] == "DOWNLOAD_JOB_NOT_CREATED"
+    assert missing_execution.status_code == 404
+    assert missing_execution.json()["error_code"] == "DOWNLOAD_EXECUTION_NOT_FOUND"
+
+    async with session_factory() as session:
+        job = await finalize_download_submission(
+            session,
+            execution.id,
+            qb_observation(),
+            DownloadExecutionStatus.SUBMITTED,
+            execution_settings(),
+            actor="executor-test",
+            lease_token=lease_token,
+        )
+        await session.commit()
+
+    async with execution_viewer_api_client_factory() as client:
+        response = await client.get(
+            f"/api/download-executions/{execution.id}/download-job"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == job.id
+    assert response.json()["execution_id"] == execution.id
+    assert "lease_token" not in response.text
+    assert "locked_by" not in response.text
 
 
 @pytest.mark.asyncio

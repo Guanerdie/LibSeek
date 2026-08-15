@@ -9,6 +9,7 @@ from app.api.routes import (
     approvals,
     auth,
     automation,
+    configuration,
     discovery,
     downloaders,
     executions,
@@ -34,17 +35,21 @@ app = FastAPI(
 
 
 @app.exception_handler(AppError)
-async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
+async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
     body = ErrorResponse(
         error_code=exc.error_code,
         message=exc.message,
         details=sanitize_details(exc.details),
     )
-    return JSONResponse(status_code=exc.status_code, content=body.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=body.model_dump(mode="json"),
+        headers=_configuration_no_store_headers(request),
+    )
 
 
 @app.exception_handler(RequestValidationError)
-async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     fields = [
         {"location": ".".join(str(part) for part in error["loc"]), "type": error["type"]}
         for error in exc.errors()
@@ -54,11 +59,22 @@ async def handle_validation_error(_: Request, exc: RequestValidationError) -> JS
         message="请求参数校验失败",
         details={"fields": fields},
     )
-    return JSONResponse(status_code=422, content=body.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=422,
+        content=body.model_dump(mode="json"),
+        headers=_configuration_no_store_headers(request),
+    )
+
+
+def _configuration_no_store_headers(request: Request) -> dict[str, str] | None:
+    if request.url.path.startswith(f"{settings.api_prefix}/configuration"):
+        return {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    return None
 
 
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(configuration.router, prefix=settings.api_prefix)
 app.include_router(discovery.router, prefix=settings.api_prefix)
 app.include_router(media.router, prefix=settings.api_prefix)
 app.include_router(adapters.router, prefix=settings.api_prefix)

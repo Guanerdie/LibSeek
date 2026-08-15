@@ -5,6 +5,7 @@ import {
   approvalApi,
   automationApi,
   authApi,
+  configurationApi,
   downloadJobApi,
   executionApi,
   mediaApi,
@@ -34,6 +35,24 @@ afterEach(() => {
 })
 
 describe('API request security', () => {
+  it('allows only the one-time administrator setup mutation without an existing CSRF token', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ username: 'first-admin', role: 'admin', csrf_token: 'new-session' }),
+    )
+
+    await authApi.setup('first-admin', 'local-password')
+
+    const [path, init] = fetchMock.mock.calls[0] ?? []
+    expect(path).toBe('/api/auth/setup')
+    expect(init?.method).toBe('POST')
+    expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
+    expect(JSON.parse(String(init?.body))).toEqual({
+      username: 'first-admin',
+      password: 'local-password',
+    })
+  })
+
   it('adds the in-memory CSRF token to mutations but not reads', async () => {
     const fetchMock = vi.mocked(fetch)
     fetchMock
@@ -58,6 +77,91 @@ describe('API request security', () => {
       status: 0,
     })
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('protects the configuration update with the in-memory session CSRF token', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ configuration_complete: false }))
+    setApiCsrfToken('csrf-session')
+
+    await configurationApi.update({
+      nextfind: { base_url: 'https://nextfind.example', username: 'nextfind-user' },
+      tmdb: {},
+      pt_site: {
+        architecture: 'avistaz',
+        base_url: 'https://avistaz.to',
+        username: '',
+      },
+      qbittorrent: {
+        url: '',
+        username: '',
+        save_path: '',
+        category: '',
+        allow_insecure_http: false,
+      },
+    })
+
+    const [path, init] = fetchMock.mock.calls[0] ?? []
+    expect(path).toBe('/api/configuration')
+    expect(init?.method).toBe('PUT')
+    expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-session')
+    expect(String(init?.body)).not.toMatch(/password|token/i)
+  })
+
+  it('sends every configuration connection test as a CSRF-protected POST', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({ target: 'nextfind', healthy: true, error_code: null, message: '连接成功' }),
+    )
+    setApiCsrfToken('csrf-connection-test')
+
+    await configurationApi.testNextFind()
+    await configurationApi.testTmdb()
+    await configurationApi.testPtSite('avistaz')
+    await configurationApi.testQbittorrent()
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/configuration/tests/nextfind',
+      '/api/configuration/tests/tmdb',
+      '/api/configuration/tests/pt-sites/avistaz',
+      '/api/configuration/tests/qbittorrent',
+    ])
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.method).toBe('POST')
+      expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-connection-test')
+      expect(init?.body).toBeUndefined()
+    }
+  })
+
+  it('reads metadata resolution status from the dedicated encoded job endpoint', async () => {
+    const fetchMock = vi.mocked(fetch)
+    const controller = new AbortController()
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        media_id: 'media /1',
+        job_id: 'job /1',
+        status: 'RUNNING',
+        error_code: null,
+        error_message: null,
+        created_at: '2026-08-11T00:00:00Z',
+        updated_at: '2026-08-11T00:00:01Z',
+      }),
+    )
+    setApiCsrfToken('csrf-secret-value')
+
+    const result = await mediaApi.resolveJob('media /1', 'job /1', controller.signal)
+
+    expect(result.status).toBe('RUNNING')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/media/media%20%2F1/resolve-jobs/job%20%2F1',
+      expect.objectContaining({
+        cache: 'no-store',
+        credentials: 'same-origin',
+        signal: controller.signal,
+      }),
+    )
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect(new Headers(init?.headers).has('X-CSRF-Token')).toBe(false)
   })
 
   it('accepts an empty 204 logout response', async () => {
@@ -125,6 +229,32 @@ describe('API request security', () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       intent_id: 'intent-1',
       nonce: `ei1_${'n'.repeat(32)}`,
+    })
+  })
+
+  it('protects the single candidate download confirmation with CSRF and idempotency', async () => {
+    const fetchMock = vi.mocked(fetch)
+    const idempotencyKey = `unin-${'b'.repeat(48)}`
+    setApiCsrfToken('csrf-session')
+    fetchMock.mockResolvedValueOnce(jsonResponse({ outcome: 'EXECUTION_CREATED' }, 201))
+
+    await approvalApi.confirmDownload(
+      'candidate /1',
+      'START_IMMEDIATELY',
+      idempotencyKey,
+    )
+
+    const [path, init] = fetchMock.mock.calls[0] ?? []
+    const headers = new Headers(init?.headers)
+    expect(path).toBe('/api/candidates/candidate%20%2F1/confirm-download')
+    expect(init?.method).toBe('POST')
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-session')
+    expect(headers.get('Idempotency-Key')).toBe(idempotencyKey)
+    expect(JSON.parse(String(init?.body))).toEqual({
+      acknowledges_hnr: true,
+      acknowledges_seeding: true,
+      acknowledges_plan_only: true,
+      launch_mode: 'START_IMMEDIATELY',
     })
   })
 

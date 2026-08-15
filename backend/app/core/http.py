@@ -51,6 +51,7 @@ class SafeAsyncHttpClient:
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
             follow_redirects=False,
+            trust_env=False,
         )
 
     async def aclose(self) -> None:
@@ -141,6 +142,20 @@ class SafeAsyncHttpClient:
                             "上游响应体超过安全限制",
                             status_code=502,
                         )
+            except httpx.TimeoutException as exc:
+                raise AppError(
+                    "UPSTREAM_TIMEOUT",
+                    "外部只读请求响应读取超时",
+                    status_code=504,
+                    retryable=True,
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise AppError(
+                    "UPSTREAM_NETWORK_ERROR",
+                    "外部只读请求响应读取中断",
+                    status_code=502,
+                    retryable=True,
+                ) from exc
             finally:
                 await response.aclose()
             return SafeHttpResult(

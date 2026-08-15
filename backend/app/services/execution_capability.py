@@ -59,7 +59,13 @@ def require_download_executor_ready_configuration(settings: Settings) -> None:
             "下载执行器目标分类或保存路径策略无效",
             status_code=409,
         )
-    validate_external_url(settings.avistaz_base_url, settings.allowed_external_hosts)
+    if settings.pt_site_architecture != "avistaz":
+        raise AppError(
+            "DOWNLOAD_EXECUTOR_NOT_READY",
+            "当前 PT 站点架构尚不支持下载执行",
+            status_code=409,
+        )
+    validate_external_url(settings.avistaz_base_url, settings.avistaz_allowed_hosts)
     base_url = settings.qb_base_url_value()
     parsed = urlparse(base_url or "")
     allowed_schemes = {"https", "http"} if settings.qb_allow_insecure_http else {"https"}
@@ -82,7 +88,7 @@ def download_executor_capability_fingerprint(settings: Settings) -> str:
     descriptor: dict[str, object] = {
         "version": 1,
         "avistaz_base_url": settings.avistaz_base_url.rstrip("/"),
-        "allowed_external_hosts": sorted(settings.allowed_external_hosts),
+        "avistaz_allowed_hosts": sorted(settings.avistaz_allowed_hosts),
         "qb_base_url": (settings.qb_base_url_value() or "").rstrip("/"),
         "qb_allowed_hosts": sorted(settings.qb_allowed_hosts),
         "qb_allow_insecure_http": settings.qb_allow_insecure_http,

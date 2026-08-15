@@ -12,6 +12,24 @@ export function formatShanghai(value: string | null | undefined): string {
   }).format(new Date(value))
 }
 
+const regionNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' })
+
+export function formatCountryCodes(value: string[] | null | undefined): string {
+  if (!value?.length) return ''
+
+  return value
+    .map((code) => code.trim().toUpperCase())
+    .filter(Boolean)
+    .map((code) => {
+      try {
+        return regionNames.of(code) || code
+      } catch {
+        return code
+      }
+    })
+    .join(' / ')
+}
+
 export function statusLabel(status: string): string {
   return (
     {

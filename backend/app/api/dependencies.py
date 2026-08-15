@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -11,6 +12,7 @@ from app.core.auth import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
+    AuthMaterial,
     Principal,
     parse_session_token,
     role_allows,
@@ -18,6 +20,7 @@ from app.core.auth import (
     validate_session_csrf,
 )
 from app.core.config import Settings, get_settings
+from app.core.runtime_config import RuntimeConfigError, runtime_store
 from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import AuthRole
@@ -33,7 +36,50 @@ def get_pt_site_catalog(settings: SettingsDep) -> PtSiteCatalog:
 PtCatalog = Annotated[PtSiteCatalog, Depends(get_pt_site_catalog)]
 
 
-def require_auth_material(settings: Settings) -> tuple[str, str, str, AuthRole]:
+def require_auth_material(settings: Settings) -> AuthMaterial:
+    if legacy_auth_fields_present(settings):
+        return _require_legacy_auth_material(settings)
+    try:
+        record = runtime_store(settings).auth_record()
+    except RuntimeConfigError as exc:
+        raise AppError(
+            "AUTH_NOT_CONFIGURED",
+            "本地认证配置无法读取",
+            status_code=503,
+        ) from exc
+    if record is None:
+        raise AppError(
+            "AUTH_SETUP_REQUIRED",
+            "请先创建本地管理员账号",
+            status_code=409,
+        )
+    return AuthMaterial(
+        username=record.username,
+        credential=record.password_digest,
+        credential_kind="pbkdf2_sha256",
+        signing_key=record.session_signing_key,
+        role=AuthRole.ADMIN,
+    )
+
+
+def legacy_auth_fields_present(settings: Settings) -> bool:
+    secret_values = (
+        settings.auth_local_username,
+        settings.auth_local_password,
+        settings.auth_session_signing_key,
+    )
+    if any(value is not None and bool(value.get_secret_value()) for value in secret_values):
+        return True
+    file_values = (
+        settings.auth_local_username_file,
+        settings.auth_local_password_file,
+        settings.auth_session_signing_key_file,
+    )
+    # Compose represents an empty Path setting as '.', which is not a valid Secret file.
+    return any(value is not None and str(value) not in {"", "."} for value in file_values)
+
+
+def _require_legacy_auth_material(settings: Settings) -> AuthMaterial:
     try:
         material = settings.auth_material()
     except OSError as exc:
@@ -45,19 +91,26 @@ def require_auth_material(settings: Settings) -> tuple[str, str, str, AuthRole]:
     if material is None:
         raise AppError(
             "AUTH_NOT_CONFIGURED",
-            "本地 API 认证尚未配置",
+            "本地 API 认证配置不完整",
             status_code=503,
         )
-    return material
+    username, password, signing_key, role = material
+    return AuthMaterial(
+        username=username,
+        credential=password,
+        credential_kind="plaintext",
+        signing_key=signing_key,
+        role=role,
+    )
 
 
 async def get_current_principal(request: Request, settings: SettingsDep) -> Principal:
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         raise AppError("AUTH_REQUIRED", "需要登录后才能访问", status_code=401)
-    username, _, signing_key, role = require_auth_material(settings)
-    principal = parse_session_token(token, signing_key)
-    if principal.username != username or principal.role != role:
+    material = require_auth_material(settings)
+    principal = parse_session_token(token, material.signing_key)
+    if principal.username != material.username or principal.role != material.role:
         raise AppError(
             "AUTH_SESSION_STALE",
             "账号配置已变化，请重新登录",
@@ -98,11 +151,11 @@ async def get_authenticated_mutation_principal(
 
 
 async def require_bootstrap_csrf(request: Request, settings: SettingsDep) -> None:
-    _, _, signing_key, _ = require_auth_material(settings)
+    material = require_auth_material(settings)
     validate_bootstrap_csrf(
         cookie_token=request.cookies.get(CSRF_COOKIE_NAME),
         header_token=request.headers.get(CSRF_HEADER_NAME),
-        signing_key=signing_key,
+        signing_key=material.signing_key,
         ttl_seconds=settings.auth_bootstrap_csrf_ttl_seconds,
     )
 
@@ -129,33 +182,39 @@ def _require_role(principal: Principal, required: AuthRole) -> Principal:
 ViewerPrincipal = Annotated[Principal, Depends(get_viewer_principal)]
 OperatorPrincipal = Annotated[Principal, Depends(get_operator_principal)]
 AdminPrincipal = Annotated[Principal, Depends(get_admin_principal)]
-AuthenticatedMutationPrincipal = Annotated[
-    Principal, Depends(get_authenticated_mutation_principal)
-]
+AuthenticatedMutationPrincipal = Annotated[Principal, Depends(get_authenticated_mutation_principal)]
 
 
-async def get_qb_adapter() -> AsyncIterator[ReadOnlyDownloaderAdapter]:
-    settings = get_settings()
-    if not settings.enable_qb_read_only:
+@asynccontextmanager
+async def open_qb_adapter(
+    settings: Settings | None = None,
+) -> AsyncIterator[ReadOnlyDownloaderAdapter]:
+    effective_settings = settings or get_settings()
+    if not effective_settings.enable_qb_read_only:
         raise AppError("QB_READ_ONLY_DISABLED", "qBittorrent 只读连接默认关闭", status_code=409)
-    credentials = settings.qb_credentials()
-    if credentials is None or not settings.qb_allowed_hosts:
+    credentials = effective_settings.qb_credentials()
+    if credentials is None or not effective_settings.qb_allowed_hosts:
         raise AppError("QB_NOT_CONFIGURED", "qBittorrent 运行时 Secret 未配置", status_code=409)
     base_url, username, password = credentials
     adapter = QbittorrentReadOnlyAdapter(
         base_url=base_url,
         username=username,
         password=password,
-        allowed_hosts=settings.qb_allowed_hosts,
-        allow_insecure_http=settings.qb_allow_insecure_http,
-        connect_timeout=settings.external_connect_timeout_seconds,
-        read_timeout=settings.external_read_timeout_seconds,
-        max_response_bytes=settings.external_max_response_bytes,
+        allowed_hosts=effective_settings.qb_allowed_hosts,
+        allow_insecure_http=effective_settings.qb_allow_insecure_http,
+        connect_timeout=effective_settings.external_connect_timeout_seconds,
+        read_timeout=effective_settings.external_read_timeout_seconds,
+        max_response_bytes=effective_settings.external_max_response_bytes,
     )
     try:
         yield adapter
     finally:
         await adapter.aclose()
+
+
+async def get_qb_adapter() -> AsyncIterator[ReadOnlyDownloaderAdapter]:
+    async with open_qb_adapter() as adapter:
+        yield adapter
 
 
 QbAdapter = Annotated[ReadOnlyDownloaderAdapter, Depends(get_qb_adapter)]

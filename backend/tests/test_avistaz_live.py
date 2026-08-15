@@ -10,7 +10,13 @@ import respx
 from app.adapters.pt_sites.avistaz_live import AvistaZAdapter
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.schemas.adapters import TorrentSearchRequest
+from app.schemas.adapters import (
+    MetadataRecord,
+    PtSearchMode,
+    TorrentCandidate,
+    TorrentSearchRequest,
+)
+from app.schemas.entities import TorrentSearchCreateRequest
 from app.workers.processor import JobProcessor
 
 BASE = "https://avistaz.to"
@@ -65,19 +71,22 @@ def raw_candidate() -> dict[str, object]:
 
 def jackett_candidate() -> dict[str, object]:
     return {
-        "torrent_id": 88,
-        "release_title": "Jackett Show 2026 S02E01-E03 2160p WEB-DL",
+        "file_name": "Jackett Show 2026 S02E01-E03 2160p WEB-DL",
+        "release_title": "Jackett Show",
+        "url": "https://avistaz.to/torrents/88?token=secret-token",
         "movie_tv": {
-            "type": "tv",
             "tmdb": 456,
             "imdb": "tt0456",
             "tvdb": 789,
         },
-        "video_quality": {"name": "2160p"},
-        "media": {"name": "WEB-DL"},
-        "format": {"name": "H.265"},
-        "audio": ["Japanese"],
-        "subtitle": ["Chinese", "English"],
+        "type": "TV-SHOW",
+        "video_quality": "2160p",
+        "format": "H.265",
+        "audio": [{"id": 1, "language": "Japanese"}],
+        "subtitle": [
+            {"id": 10, "language": "Chinese"},
+            {"id": 11, "language": "English"},
+        ],
         "file_size": 9_876_543_210,
         "file_count": 3,
         "seed": 11,
@@ -89,7 +98,6 @@ def jackett_candidate() -> dict[str, object]:
         "info_hash": "a" * 40,
         "created_at_iso": "2026-08-10T10:20:30Z",
         "download": "https://avistaz.to/download/secret?pid=test-pid",
-        "url": "https://avistaz.to/torrents/88?token=secret-token",
         "announce": "https://tracker.invalid/announce?passkey=secret-passkey",
     }
 
@@ -104,6 +112,8 @@ async def test_auth_success_search_and_download_url_is_discarded() -> None:
     def search(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer memory-token"
         assert request.url.params["tmdb"] == "123"
+        assert request.url.params["in"] == "1"
+        assert request.url.params["type"] == "2"
         return httpx.Response(200, json={"results": [raw_candidate()]})
 
     route = respx.get(f"{BASE}/api/v1/jackett/torrents").mock(side_effect=search)
@@ -116,12 +126,88 @@ async def test_auth_success_search_and_download_url_is_discarded() -> None:
     assert candidate.season == 1
     assert candidate.episodes == [3, 4, 5]
     assert candidate.details_ref.startswith("avistaz:details:")
+    assert candidate.hit_and_run is True
     serialized = candidate.model_dump_json().casefold()
     assert "https://avistaz.to/download" not in serialized
     assert "tracker.invalid" not in serialized
     assert "passkey" not in serialized
     assert "test-pid" not in serialized
     await avistaz.aclose()
+
+
+@pytest.mark.parametrize(
+    ("media_type", "qualities", "expected_type", "expected_qualities"),
+    (
+        (MediaType.MOVIE, ["2160p", "1080p"], "1", ["6", "3"]),
+        (MediaType.TV, ["1080i", "720p", "SD"], "2", ["7", "2", "1"]),
+        (None, ["unknown"], None, []),
+    ),
+)
+def test_search_params_use_avistaz_numeric_contract(
+    media_type: MediaType | None,
+    qualities: list[str],
+    expected_type: str | None,
+    expected_qualities: list[str],
+) -> None:
+    params = AvistaZAdapter._search_params(
+        TorrentSearchRequest(
+            tmdb=123,
+            type=media_type,
+            limit=100,
+            video_quality=qualities,
+            subtitle=["Chinese"],
+        )
+    )
+
+    assert params["in"] == "1"
+    assert params.get("type") == expected_type
+    assert params["limit"] == 100
+    assert params["tmdb"] == 123
+    assert params.get("video_quality[]", []) == expected_qualities
+    assert "subtitle[]" not in params
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_404_is_an_empty_result() -> None:
+    respx.post(f"{BASE}/api/v1/jackett/auth").mock(
+        return_value=httpx.Response(200, json={"token": "memory-token"})
+    )
+    route = respx.get(f"{BASE}/api/v1/jackett/torrents").mock(
+        return_value=httpx.Response(404)
+    )
+    avistaz = adapter()
+    try:
+        assert await avistaz.search(TorrentSearchRequest(tmdb=123)) == []
+    finally:
+        await avistaz.aclose()
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("status_code", "expected_error_code"),
+    ((400, "AVISTAZ_HTTP_ERROR"), (403, "AVISTAZ_HTTP_ERROR"), (500, "AVISTAZ_UNAVAILABLE")),
+)
+async def test_search_non_404_http_error_is_not_treated_as_empty(
+    status_code: int,
+    expected_error_code: str,
+) -> None:
+    respx.post(f"{BASE}/api/v1/jackett/auth").mock(
+        return_value=httpx.Response(200, json={"token": "memory-token"})
+    )
+    respx.get(f"{BASE}/api/v1/jackett/torrents").mock(
+        return_value=httpx.Response(status_code)
+    )
+    avistaz = adapter()
+    try:
+        with pytest.raises(AppError) as caught:
+            await avistaz.search(TorrentSearchRequest(tmdb=123))
+    finally:
+        await avistaz.aclose()
+
+    assert caught.value.error_code == expected_error_code
 
 
 @pytest.mark.asyncio
@@ -139,6 +225,7 @@ async def test_jackett_data_envelope_and_real_field_names_are_normalized() -> No
     assert len(results) == 1
     candidate = results[0]
     assert candidate.torrent_id == "88"
+    assert candidate.release_title == "Jackett Show 2026 S02E01-E03 2160p WEB-DL"
     assert candidate.tmdb_id == 456
     assert candidate.imdb_id == "tt0456"
     assert candidate.media_type == MediaType.TV
@@ -147,6 +234,7 @@ async def test_jackett_data_envelope_and_real_field_names_are_normalized() -> No
     assert candidate.resolution == "2160p"
     assert candidate.source == "WEB-DL"
     assert candidate.codec == "H.265"
+    assert candidate.audio == ["Japanese"]
     assert candidate.subtitles == ["Chinese", "English"]
     assert candidate.size_bytes == 9_876_543_210
     assert candidate.file_count == 3
@@ -174,6 +262,90 @@ async def test_jackett_data_envelope_and_real_field_names_are_normalized() -> No
         await avistaz.fetch_torrent(candidate.torrent_id)
     assert caught.value.error_code == "PHASE_NOT_ENABLED"
     await avistaz.aclose()
+
+
+@pytest.mark.asyncio
+async def test_text_search_retries_without_year_after_empty_result() -> None:
+    requests: list[TorrentSearchRequest] = []
+    expected = TorrentCandidate(
+        site_id="avistaz",
+        torrent_id="272233",
+        release_title="The Best Moment To Quit Your Job S01 2017 1080p WEB-DL",
+        details_ref="avistaz:details:test",
+        media_type=MediaType.TV,
+        tmdb_id=78111,
+    )
+
+    class RecordingAdapter:
+        async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]:
+            requests.append(request)
+            return [expected] if request.search == "The Best Moment To Quit Your Job" else []
+
+    metadata = MetadataRecord(
+        tmdb_id=78111,
+        imdb_id="tt33383615",
+        media_type=MediaType.TV,
+        title="离职的最佳时机",
+        chinese_title="离职的最佳时机",
+        english_title="The Best Moment To Quit Your Job",
+        original_title="회사를 관두는 최고의 순간",
+        year=2017,
+        confidence=1,
+    )
+    processor = object.__new__(JobProcessor)
+    results, strategy_log = await processor._search_with_fallbacks(
+        RecordingAdapter(),  # type: ignore[arg-type]
+        metadata,
+        TorrentSearchCreateRequest(
+            site_id="avistaz",
+            preferred_resolutions=["2160p", "1080p"],
+        ),
+        search_modes=(PtSearchMode.TMDB_ID, PtSearchMode.IMDB_ID, PtSearchMode.TEXT),
+    )
+
+    assert results == [expected]
+    assert [request.search for request in requests] == [
+        None,
+        None,
+        "The Best Moment To Quit Your Job 2017",
+        "The Best Moment To Quit Your Job",
+    ]
+    assert strategy_log[-2:] == [
+        {"strategy": "ENGLISH_TITLE_YEAR", "candidate_count": 0},
+        {"strategy": "ENGLISH_TITLE", "candidate_count": 1},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_text_search_falls_back_to_canonical_title() -> None:
+    requests: list[TorrentSearchRequest] = []
+
+    class RecordingAdapter:
+        async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]:
+            requests.append(request)
+            return []
+
+    metadata = MetadataRecord(
+        tmdb_id=123,
+        media_type=MediaType.MOVIE,
+        title="Only Title",
+        year=2026,
+        confidence=1,
+    )
+    processor = object.__new__(JobProcessor)
+    results, strategy_log = await processor._search_with_fallbacks(
+        RecordingAdapter(),  # type: ignore[arg-type]
+        metadata,
+        TorrentSearchCreateRequest(site_id="avistaz"),
+        search_modes=(PtSearchMode.TEXT,),
+    )
+
+    assert results == []
+    assert [request.search for request in requests] == ["Only Title 2026", "Only Title"]
+    assert strategy_log == [
+        {"strategy": "CANONICAL_TITLE_YEAR", "candidate_count": 0},
+        {"strategy": "CANONICAL_TITLE", "candidate_count": 0},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -230,6 +402,60 @@ async def test_torrent_fetch_is_explicitly_enabled_and_uses_only_in_memory_url()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "upstream_status_code",
+        "expected_error_code",
+        "expected_status_code",
+        "expected_retryable",
+    ),
+    (
+        (403, "AVISTAZ_TORRENT_FETCH_FORBIDDEN", 502, True),
+        (400, "AVISTAZ_TORRENT_FETCH_FAILED", 400, False),
+        (404, "AVISTAZ_TORRENT_FETCH_FAILED", 400, False),
+        (422, "AVISTAZ_TORRENT_FETCH_FAILED", 400, False),
+    ),
+)
+async def test_torrent_fetch_maps_deterministic_4xx_without_sensitive_details(
+    upstream_status_code: int,
+    expected_error_code: str,
+    expected_status_code: int,
+    expected_retryable: bool,
+) -> None:
+    download_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal download_calls
+        if request.url.path == "/api/v1/jackett/auth":
+            return httpx.Response(200, json={"token": "memory-token"})
+        if request.url.path == "/api/v1/jackett/torrents":
+            return httpx.Response(200, json={"data": [jackett_candidate()]})
+        if request.url.path == "/download/secret":
+            download_calls += 1
+            return httpx.Response(
+                upstream_status_code,
+                text="sensitive upstream response must not be retained",
+            )
+        raise AssertionError(request.url)
+
+    avistaz = adapter(httpx.MockTransport(handler), enable_torrent_fetch=True)
+    try:
+        candidate = (await avistaz.search(TorrentSearchRequest(tmdb=456)))[0]
+        with pytest.raises(AppError) as caught:
+            await avistaz.fetch_torrent(candidate.torrent_id)
+    finally:
+        await avistaz.aclose()
+
+    assert caught.value.error_code == expected_error_code
+    assert caught.value.status_code == expected_status_code
+    assert caught.value.retryable is expected_retryable
+    assert caught.value.details == {"upstream_status_code": upstream_status_code}
+    assert "sensitive upstream response" not in repr(caught.value.__dict__)
+    assert "test-pid" not in repr(caught.value.__dict__)
+    assert download_calls == 1
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_auth_failure_and_logs_do_not_disclose_credentials(
     caplog: pytest.LogCaptureFixture,
@@ -242,6 +468,23 @@ async def test_auth_failure_and_logs_do_not_disclose_credentials(
     for secret in ("test-user", "test-password", "test-pid"):
         assert secret not in caplog.text
     await avistaz.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ({"token": ""}, {"access_token": ""}, {"jwt": ""}))
+async def test_empty_auth_token_is_rejected(payload: dict[str, str]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/jackett/auth"
+        return httpx.Response(200, json=payload)
+
+    avistaz = adapter(httpx.MockTransport(handler))
+    try:
+        result = await avistaz.probe()
+    finally:
+        await avistaz.aclose()
+
+    assert result.healthy is False
+    assert result.error_code == "AVISTAZ_VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio

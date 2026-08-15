@@ -4,7 +4,7 @@ import asyncio
 import hmac
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,6 +19,7 @@ from app.adapters.pt_sites.execution_registry import (
     PtExecutionRegistry,
 )
 from app.core.config import Settings
+from app.core.pt_site_rules import effective_hnr_rule
 from app.core.security import sanitize_details
 from app.errors import AppError
 from app.models.entities import (
@@ -86,7 +87,17 @@ class QbExecutionAdapter(Protocol):
 
     async def authenticate(self) -> None: ...
 
-    async def list_torrents(self) -> list[QbTorrent]: ...
+    async def find_torrents_by_hashes(
+        self, hashes: Collection[str]
+    ) -> list[QbTorrent]: ...
+
+    async def ensure_category(
+        self,
+        category: str,
+        save_path: str,
+        *,
+        write_guard: Callable[[], Awaitable[None]] | None = None,
+    ) -> None: ...
 
     async def add_torrent(
         self,
@@ -97,6 +108,8 @@ class QbExecutionAdapter(Protocol):
         category: str,
         tags: tuple[str, ...] = (),
         start_immediately: bool = True,
+        category_prepared: bool = False,
+        category_write_guard: Callable[[], Awaitable[None]] | None = None,
         write_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> QbAddResult: ...
 
@@ -106,7 +119,9 @@ class QbExecutionAdapter(Protocol):
 class QbMonitorAdapter(Protocol):
     async def authenticate(self) -> None: ...
 
-    async def list_torrents(self) -> list[QbTorrent]: ...
+    async def find_torrents_by_hashes(
+        self, hashes: Collection[str]
+    ) -> list[QbTorrent]: ...
 
     async def aclose(self) -> None: ...
 
@@ -168,7 +183,8 @@ class DownloadExecutor:
         pt_site: PtExecutionAdapter | None = None
         qb: QbExecutionAdapter | None = None
         reservation_committed = False
-        external_write_may_have_occurred = False
+        category_write_may_have_occurred = False
+        torrent_add_may_have_occurred = False
         try:
             if not await self._ensure_external_action_allowed(
                 claim, expected_status=DownloadExecutionStatus.VALIDATING
@@ -228,6 +244,56 @@ class DownloadExecutor:
             )
             self._require_torrent_candidate_consistency(binding, candidate, metadata)
 
+            qb = self.qb_factory()
+            qb_expected_status = DownloadExecutionStatus.VALIDATING
+
+            async def qb_request_guard() -> None:
+                allowed = await self._ensure_external_action_allowed(
+                    claim,
+                    expected_status=qb_expected_status,
+                    external_write_may_have_occurred=torrent_add_may_have_occurred,
+                )
+                if not allowed:
+                    raise self._lease_lost()
+
+            self._install_request_guard(qb, qb_request_guard)
+            if not await self._ensure_external_action_allowed(
+                claim, expected_status=DownloadExecutionStatus.VALIDATING
+            ):
+                return
+            await qb.authenticate()
+
+            if not await self._ensure_external_action_allowed(
+                claim, expected_status=DownloadExecutionStatus.VALIDATING
+            ):
+                return
+            existing = self._find_unique_observation(
+                metadata,
+                await qb.find_torrents_by_hashes(sorted(metadata.identity_hashes)),
+            )
+
+            if existing is None:
+                if not await self._ensure_external_action_allowed(
+                    claim, expected_status=DownloadExecutionStatus.VALIDATING
+                ):
+                    return
+
+                async def category_write_guard() -> None:
+                    nonlocal category_write_may_have_occurred
+                    allowed = await self._ensure_external_action_allowed(
+                        claim,
+                        expected_status=DownloadExecutionStatus.VALIDATING,
+                    )
+                    if not allowed:
+                        raise self._lease_lost()
+                    category_write_may_have_occurred = True
+
+                await qb.ensure_category(
+                    binding.plan.category,
+                    self._required_save_path(),
+                    write_guard=category_write_guard,
+                )
+
             staged_status = await self._reserve_submission(claim, metadata)
             if staged_status == DownloadExecutionStatus.CANCELLED:
                 return
@@ -238,42 +304,15 @@ class DownloadExecutor:
                     status_code=409,
                 )
             reservation_committed = True
+            qb_expected_status = DownloadExecutionStatus.SUBMITTING
 
-            qb = self.qb_factory()
-
-            async def qb_request_guard() -> None:
-                allowed = await self._ensure_external_action_allowed(
-                    claim,
-                    expected_status=DownloadExecutionStatus.SUBMITTING,
-                    external_write_may_have_occurred=external_write_may_have_occurred,
-                )
-                if not allowed:
-                    raise self._lease_lost()
-
-            self._install_request_guard(qb, qb_request_guard)
-            if not await self._ensure_external_action_allowed(
-                claim, expected_status=DownloadExecutionStatus.SUBMITTING
-            ):
-                return
-            await qb.authenticate()
-
-            if not await self._ensure_external_action_allowed(
-                claim, expected_status=DownloadExecutionStatus.SUBMITTING
-            ):
-                return
-            existing = self._find_unique_observation(metadata, await qb.list_torrents())
             if existing is not None:
                 outcome = DownloadExecutionStatus.ALREADY_PRESENT
             else:
-                if not await self._ensure_external_action_allowed(
-                    claim, expected_status=DownloadExecutionStatus.SUBMITTING
-                ):
-                    return
-
-                async def write_guard() -> None:
-                    nonlocal external_write_may_have_occurred
+                async def torrent_add_write_guard() -> None:
+                    nonlocal torrent_add_may_have_occurred
                     await self._write_guard(claim)
-                    external_write_may_have_occurred = True
+                    torrent_add_may_have_occurred = True
 
                 add_result = await qb.add_torrent(
                     torrent_payload,
@@ -284,7 +323,8 @@ class DownloadExecutor:
                     start_immediately=(
                         binding.launch_mode == DownloadLaunchMode.START_IMMEDIATELY
                     ),
-                    write_guard=write_guard,
+                    category_prepared=True,
+                    write_guard=torrent_add_write_guard,
                 )
                 if add_result.info_hash.casefold() not in metadata.identity_hashes:
                     raise AppError(
@@ -297,10 +337,13 @@ class DownloadExecutor:
             if not await self._ensure_external_action_allowed(
                 claim,
                 expected_status=DownloadExecutionStatus.SUBMITTING,
-                external_write_may_have_occurred=external_write_may_have_occurred,
+                external_write_may_have_occurred=torrent_add_may_have_occurred,
             ):
                 return
-            observed = self._find_unique_observation(metadata, await qb.list_torrents())
+            observed = self._find_unique_observation(
+                metadata,
+                await qb.find_torrents_by_hashes(sorted(metadata.identity_hashes)),
+            )
             if observed is None:
                 raise AppError(
                     "QB_SUBMISSION_NOT_OBSERVED",
@@ -321,7 +364,7 @@ class DownloadExecutor:
             if not await self._ensure_external_action_allowed(
                 claim,
                 expected_status=DownloadExecutionStatus.SUBMITTING,
-                external_write_may_have_occurred=external_write_may_have_occurred,
+                external_write_may_have_occurred=torrent_add_may_have_occurred,
             ):
                 return
 
@@ -343,10 +386,16 @@ class DownloadExecutor:
                 await self._mark_reserved_failure(
                     claim,
                     exc,
-                    external_write_may_have_occurred=external_write_may_have_occurred,
+                    torrent_add_may_have_occurred=torrent_add_may_have_occurred,
                 )
             else:
-                await self._mark_validation_failure(claim, exc)
+                await self._mark_validation_failure(
+                    claim,
+                    exc,
+                    category_write_may_have_occurred=(
+                        category_write_may_have_occurred
+                    ),
+                )
         except Exception:
             error = AppError(
                 "DOWNLOAD_EXECUTOR_INTERNAL_ERROR",
@@ -358,10 +407,16 @@ class DownloadExecutor:
                 await self._mark_reserved_failure(
                     claim,
                     error,
-                    external_write_may_have_occurred=external_write_may_have_occurred,
+                    torrent_add_may_have_occurred=torrent_add_may_have_occurred,
                 )
             else:
-                await self._mark_validation_failure(claim, error)
+                await self._mark_validation_failure(
+                    claim,
+                    error,
+                    category_write_may_have_occurred=(
+                        category_write_may_have_occurred
+                    ),
+                )
         finally:
             if qb is not None:
                 with suppress(Exception):
@@ -446,7 +501,12 @@ class DownloadExecutor:
                 plan.preflight_policy_fingerprint,
                 self.settings,
             )
-            if qb_target_fingerprint(self.settings, plan, execution.launch_mode) != (
+            if qb_target_fingerprint(
+                self.settings,
+                plan,
+                execution.launch_mode,
+                snapshot.media_title,
+            ) != (
                 execution.qb_target_fingerprint
             ):
                 raise AppError(
@@ -676,7 +736,7 @@ class DownloadExecutor:
         if approval is None:
             return "AUTOMATION_APPROVAL_MISSING"
         snapshot = verify_snapshot(approval)
-        if snapshot.hit_and_run is None:
+        if not effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known:
             return "HNR_UNKNOWN"
         _, current = await get_current_policy(session)
         if execution.automation_policy_revision_id != current.id:
@@ -834,7 +894,11 @@ class DownloadExecutor:
             return len(stale)
 
     async def _mark_validation_failure(
-        self, claim: ExecutionClaim, error: AppError
+        self,
+        claim: ExecutionClaim,
+        error: AppError,
+        *,
+        category_write_may_have_occurred: bool = False,
     ) -> None:
         async with self.session_factory() as session:
             execution = await session.get(
@@ -864,19 +928,30 @@ class DownloadExecutor:
             execution.locked_by = None
             execution.lease_token = None
             execution.error_code = self._safe_error_code(error)
-            execution.error_message = "下载执行在写入前失败，请根据错误代码处理"
+            execution.error_message = self._validation_error_message(
+                error,
+                attempt=execution.attempts,
+                max_attempts=execution.max_attempts,
+                retry=retry,
+            )
+            event_details: dict[str, object] = {
+                "error_code": execution.error_code,
+                "attempt": execution.attempts,
+                "automatic_retry_allowed": retry,
+                "external_write_performed": False,
+            }
+            upstream_status_code = self._safe_upstream_status_code(error)
+            if upstream_status_code is not None:
+                event_details["upstream_status_code"] = upstream_status_code
+            if category_write_may_have_occurred:
+                event_details["category_write_may_have_occurred"] = True
             self._add_execution_event(
                 session,
                 execution,
                 event_type="VALIDATION_RETRY_SCHEDULED" if retry else "VALIDATION_FAILED",
                 from_status=previous,
                 to_status=target,
-                details={
-                    "error_code": execution.error_code,
-                    "attempt": execution.attempts,
-                    "automatic_retry_allowed": retry,
-                    "external_write_performed": False,
-                },
+                details=event_details,
             )
             await session.commit()
 
@@ -885,7 +960,7 @@ class DownloadExecutor:
         claim: ExecutionClaim,
         error: AppError,
         *,
-        external_write_may_have_occurred: bool,
+        torrent_add_may_have_occurred: bool,
     ) -> None:
         error_code = self._safe_error_code(error)
         async with self.session_factory() as session:
@@ -896,7 +971,7 @@ class DownloadExecutor:
                 return
             if execution.status != DownloadExecutionStatus.SUBMITTING:
                 return
-            if external_write_may_have_occurred:
+            if torrent_add_may_have_occurred:
                 await mark_outcome_unknown(
                     session,
                     claim.execution_id,
@@ -1068,10 +1143,14 @@ class DownloadExecutor:
                 "PT 站点候选 TMDB ID 与不可变审批不一致",
                 status_code=409,
             )
+        candidate_hnr = effective_hnr_rule(candidate.site_id, candidate.hit_and_run)
+        snapshot_hnr = effective_hnr_rule(
+            binding.snapshot.site_id, binding.snapshot.hit_and_run
+        )
         if binding.origin == Origin.AUTOMATION and (
-            candidate.hit_and_run is None
-            or binding.snapshot.hit_and_run is None
-            or candidate.hit_and_run != binding.snapshot.hit_and_run
+            not candidate_hnr.known
+            or not snapshot_hnr.known
+            or candidate_hnr.applies != snapshot_hnr.applies
         ):
             raise AppError(
                 _pt_error_code(
@@ -1158,6 +1237,36 @@ class DownloadExecutor:
             else "DOWNLOAD_EXECUTOR_INTERNAL_ERROR"
         )
 
+    @staticmethod
+    def _safe_upstream_status_code(error: AppError) -> int | None:
+        value = error.details.get("upstream_status_code")
+        return value if type(value) is int and 400 <= value <= 599 else None
+
+    @classmethod
+    def _validation_error_message(
+        cls,
+        error: AppError,
+        *,
+        attempt: int,
+        max_attempts: int,
+        retry: bool,
+    ) -> str:
+        upstream_status_code = cls._safe_upstream_status_code(error)
+        if upstream_status_code == 403 and error.error_code in {
+            "AVISTAZ_TORRENT_FETCH_FAILED",
+            "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
+        }:
+            retry_status = (
+                "已安排自动重试"
+                if retry
+                else "未安排自动重试或重试次数已耗尽"
+            )
+            return (
+                f"AvistaZ 返回 HTTP {upstream_status_code}，{retry_status}"
+                f"（第 {attempt}/{max_attempts} 次）"
+            )
+        return "下载执行在写入前失败，请根据错误代码处理"
+
     def _add_execution_event(
         self,
         session: AsyncSession,
@@ -1198,6 +1307,14 @@ class DownloadMonitor:
         if not self.monitor_id or len(self.monitor_id) > 120:
             raise ValueError("monitor_id must be between 1 and 120 characters")
 
+    def reconfigure(
+        self,
+        settings: Settings,
+        qb_factory: Callable[[], QbMonitorAdapter],
+    ) -> None:
+        self.settings = settings
+        self.qb_factory = qb_factory
+
     async def run_once(self) -> int:
         require_download_monitor_enabled(self.settings)
         expected_save_path = self.settings.qb_target_save_path
@@ -1217,7 +1334,14 @@ class DownloadMonitor:
         qb = self.qb_factory()
         try:
             await qb.authenticate()
-            observations = await qb.list_torrents()
+            hashes = {
+                info_hash
+                for job in jobs
+                for info_hash in self._job_hashes(job)
+            }
+            observations = (
+                await qb.find_torrents_by_hashes(sorted(hashes)) if hashes else []
+            )
         finally:
             await qb.aclose()
 
@@ -1279,12 +1403,17 @@ class DownloadMonitor:
             )
 
     @staticmethod
-    def _job_observation(
-        job: DownloadJob, observations: Sequence[QbTorrent]
-    ) -> QbTorrent | None:
+    def _job_hashes(job: DownloadJob) -> frozenset[str]:
         hashes = {value for value in (job.info_hash_v1, job.info_hash_v2) if value}
         if job.info_hash_v2 is not None:
             hashes.add(job.info_hash_v2[:40])
+        return frozenset(hashes)
+
+    @staticmethod
+    def _job_observation(
+        job: DownloadJob, observations: Sequence[QbTorrent]
+    ) -> QbTorrent | None:
+        hashes = DownloadMonitor._job_hashes(job)
         matches = [
             observed
             for observed in observations
