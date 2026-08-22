@@ -212,9 +212,7 @@ class FakeAvistaZ:
             },
         )
 
-    def set_before_request_guard(
-        self, guard: Callable[[], Awaitable[None]] | None
-    ) -> None:
+    def set_before_request_guard(self, guard: Callable[[], Awaitable[None]] | None) -> None:
         self.before_request = guard
 
     async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]:
@@ -294,13 +292,12 @@ class FakeQb:
         self.hash_queries: list[tuple[str, ...]] = []
         self.added_payloads: list[bytes] = []
         self.added_tags: list[tuple[str, ...]] = []
+        self.start_immediately_values: list[bool] = []
         self.category_write_guard_calls = 0
         self.write_guard_calls = 0
         self.before_request: Callable[[], Awaitable[None]] | None = None
 
-    def set_before_request_guard(
-        self, guard: Callable[[], Awaitable[None]] | None
-    ) -> None:
+    def set_before_request_guard(self, guard: Callable[[], Awaitable[None]] | None) -> None:
         self.before_request = guard
 
     async def _guard_request(self) -> None:
@@ -311,9 +308,7 @@ class FakeQb:
         await self._guard_request()
         self.calls.append("authenticate")
 
-    async def find_torrents_by_hashes(
-        self, hashes: Collection[str]
-    ) -> list[QbTorrent]:
+    async def find_torrents_by_hashes(self, hashes: Collection[str]) -> list[QbTorrent]:
         if self.before_list_request is not None:
             await self.before_list_request()
         await self._guard_request()
@@ -354,7 +349,8 @@ class FakeQb:
         category_write_guard: Callable[[], Awaitable[None]] | None = None,
         write_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> QbAddResult:
-        del expected_info_hash, start_immediately
+        del expected_info_hash
+        self.start_immediately_values.append(start_immediately)
         if not category_prepared:
             await self.ensure_category(
                 category,
@@ -451,6 +447,7 @@ async def seed_pending_execution(
     info_hash: str,
     *,
     automatic: bool = False,
+    launch_mode: DownloadLaunchMode = DownloadLaunchMode.ADD_PAUSED,
     site_id: str = "avistaz",
     media_type: MediaType = MediaType.MOVIE,
 ) -> str:
@@ -528,9 +525,7 @@ async def seed_pending_execution(
         preflight = PreflightResult(
             overall_status=PreflightStatus.PASS,
             checks=[
-                PreflightCheck(
-                    code="QB_CONNECTION", status=PreflightStatus.PASS, message="ok"
-                )
+                PreflightCheck(code="QB_CONNECTION", status=PreflightStatus.PASS, message="ok")
             ],
             checked_at=now,
             policy_fingerprint=preflight_policy_fingerprint(settings),
@@ -595,7 +590,7 @@ async def seed_pending_execution(
                 reason_codes=("APPROVED_PLAN_ELIGIBLE",),
                 evidence={
                     "approval_request_id": approval.id,
-                    "launch_mode": DownloadLaunchMode.ADD_PAUSED.value,
+                    "launch_mode": launch_mode.value,
                 },
             )
             stored, _ = await add_decision_once(session, decision)
@@ -603,7 +598,7 @@ async def seed_pending_execution(
         intent, nonce = await create_execution_intent(
             session,
             approval.id,
-            ExecutionIntentCreateRequest(launch_mode=DownloadLaunchMode.ADD_PAUSED),
+            ExecutionIntentCreateRequest(launch_mode=launch_mode),
             settings,
             actor="execution-admin",
             origin=origin,
@@ -1125,6 +1120,43 @@ async def test_executor_submits_only_exact_researched_torrent_and_creates_job(
         assert job is not None
         assert job.status == DownloadJobStatus.PAUSED
         assert job.hnr_status == HnrStatus.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_automatic_scheduled_start_uses_qb_queue(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    payload, info_hash = torrent_fixture()
+    settings = executor_settings(
+        enable_automation_engine=True,
+        enable_avistaz_live_search=True,
+    )
+    execution_id = await seed_pending_execution(
+        session_factory,
+        settings,
+        info_hash,
+        automatic=True,
+        launch_mode=DownloadLaunchMode.SCHEDULED_START,
+    )
+    avistaz = FakeAvistaZ([approved_candidate(info_hash)], payload)
+    observed = qb_observation(info_hash, state="queuedDL")
+    qb = FakeQb(
+        [[], [observed]],
+        add_result=QbAddResult(info_hash=info_hash, outcome="SUBMITTED"),
+    )
+    executor = DownloadExecutor(
+        session_factory,
+        "executor-test",
+        execution_registry(lambda: avistaz),
+        lambda: qb,
+        settings,
+    )
+
+    assert await executor.run_once() is True
+    async with session_factory() as session:
+        execution = await session.get(DownloadExecution, execution_id)
+        assert execution is not None and execution.error_code is None, execution.error_code
+    assert qb.start_immediately_values == [True]
 
 
 @pytest.mark.asyncio
@@ -1670,9 +1702,7 @@ async def test_retryable_validation_failure_is_sanitized_and_does_not_touch_qb(
         assert execution.status == DownloadExecutionStatus.RETRY_WAIT
         assert execution.actual_info_hash is None
         assert execution.next_retry_at is not None
-        serialized = repr(
-            [execution.error_message, *[event.sanitized_details for event in events]]
-        )
+        serialized = repr([execution.error_message, *[event.sanitized_details for event in events]])
         assert "secret-pid" not in serialized
         assert "secret-passkey" not in serialized
         assert "/download?" not in serialized
@@ -1732,9 +1762,7 @@ async def test_avistaz_fetch_403_records_safe_status_and_scheduled_retry(
         assert event is not None
         assert execution.status == DownloadExecutionStatus.RETRY_WAIT
         assert execution.next_retry_at is not None
-        assert execution.error_message == (
-            "AvistaZ 返回 HTTP 403，已安排自动重试（第 1/3 次）"
-        )
+        assert execution.error_message == ("AvistaZ 返回 HTTP 403，已安排自动重试（第 1/3 次）")
         assert event.sanitized_details == {
             "error_code": "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
             "attempt": 1,
@@ -1799,8 +1827,7 @@ async def test_avistaz_fetch_403_reports_exhausted_retry_budget(
         assert execution.attempts == execution.max_attempts == 3
         assert execution.next_retry_at is None
         assert execution.error_message == (
-            "AvistaZ 返回 HTTP 403，未安排自动重试或重试次数已耗尽"
-            "（第 3/3 次）"
+            "AvistaZ 返回 HTTP 403，未安排自动重试或重试次数已耗尽（第 3/3 次）"
         )
         assert event.sanitized_details == {
             "error_code": "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
@@ -2009,9 +2036,7 @@ async def test_invalidated_queued_approval_is_cancelled_before_any_external_acti
     async with session_factory() as session:
         execution = await session.get(DownloadExecution, execution_id)
         assert execution is not None
-        approval = await session.get(
-            ApprovalRequest, execution.approval_id, with_for_update=True
-        )
+        approval = await session.get(ApprovalRequest, execution.approval_id, with_for_update=True)
         assert approval is not None
         approval.status = approval_status
         approval.decided_at = datetime.now(UTC)

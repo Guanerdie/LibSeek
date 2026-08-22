@@ -331,7 +331,7 @@ function revisionModeSummary(revision: AutomationPolicyRevision): string {
             </label>
             <label v-if="executionAutomatic">
               <input v-model="store.draft.acknowledges_add_paused_only" type="checkbox" :disabled="!canAdminister" />
-              <span>我确认自动执行会真实添加任务，并且只允许 ADD_PAUSED。</span>
+              <span>我确认自动执行会真实添加任务，并且只允许添加后暂停或交由 qB 队列调度。</span>
             </label>
           </div>
           <div v-else class="automation-safe-note">当前未启用自动审批或自动执行，无需高风险确认。</div>
@@ -371,7 +371,7 @@ function revisionModeSummary(revision: AutomationPolicyRevision): string {
           <tbody>
             <tr v-for="revision in store.revisions" :key="revision.id">
               <td><strong>#{{ revision.revision_no }}</strong><small class="mono">{{ revision.id }}</small></td>
-              <td><strong>{{ revisionModeSummary(revision) }}</strong><small>执行模式固定 ADD_PAUSED</small></td>
+              <td><strong>{{ revisionModeSummary(revision) }}</strong><small>批次可选择添加后暂停或 qB 队列调度</small></td>
               <td><code :title="revision.policy_hash">{{ shortHash(revision.policy_hash) }}</code></td>
               <td><code :title="revision.previous_policy_hash ?? ''">{{ shortHash(revision.previous_policy_hash) }}</code></td>
               <td>{{ revision.created_by }}</td>

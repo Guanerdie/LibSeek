@@ -11,6 +11,7 @@ from app.api.routes import (
     automation,
     configuration,
     discovery,
+    download_batches,
     downloaders,
     executions,
     health,
@@ -76,6 +77,7 @@ app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(configuration.router, prefix=settings.api_prefix)
 app.include_router(discovery.router, prefix=settings.api_prefix)
+app.include_router(download_batches.router, prefix=settings.api_prefix)
 app.include_router(media.router, prefix=settings.api_prefix)
 app.include_router(adapters.router, prefix=settings.api_prefix)
 app.include_router(workflow.router, prefix=settings.api_prefix)

@@ -50,6 +50,7 @@ class ApprovalStatus(StrEnum):
 
 class DownloadLaunchMode(StrEnum):
     ADD_PAUSED = "ADD_PAUSED"
+    SCHEDULED_START = "SCHEDULED_START"
     START_IMMEDIATELY = "START_IMMEDIATELY"
 
 
@@ -142,3 +143,28 @@ class DecisionOutcome(StrEnum):
 class Origin(StrEnum):
     MANUAL = "MANUAL"
     AUTOMATION = "AUTOMATION"
+
+
+class DownloadBatchMode(StrEnum):
+    SEARCH_ONLY = "SEARCH_ONLY"
+    AUTO_SAFE = "AUTO_SAFE"
+
+
+class DownloadBatchStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    NEEDS_ATTENTION = "NEEDS_ATTENTION"
+    COMPLETED = "COMPLETED"
+
+
+class DownloadBatchItemStatus(StrEnum):
+    PENDING = "PENDING"
+    RESOLVING_IDENTITY = "RESOLVING_IDENTITY"
+    MANUAL_REQUIRED = "MANUAL_REQUIRED"
+    SEARCHING = "SEARCHING"
+    SELECTING = "SELECTING"
+    APPROVING = "APPROVING"
+    QUEUED = "QUEUED"
+    SUBMITTED = "SUBMITTED"
+    DOWNLOADING = "DOWNLOADING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"

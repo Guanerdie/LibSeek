@@ -84,9 +84,7 @@ class EligibilityResult:
     selected_id: str | None = None
 
 
-def stage_mode(
-    revision: AutomationPolicyRevision, stage: AutomationStage
-) -> AutomationMode:
+def stage_mode(revision: AutomationPolicyRevision, stage: AutomationStage) -> AutomationMode:
     return {
         AutomationStage.IDENTITY: revision.identity_mode,
         AutomationStage.TORRENT_SELECTION: revision.torrent_selection_mode,
@@ -109,9 +107,7 @@ async def require_stage_not_disabled(
     return revision
 
 
-def subject_is_new_for_revision(
-    created_at: datetime, revision: AutomationPolicyRevision
-) -> bool:
+def subject_is_new_for_revision(created_at: datetime, revision: AutomationPolicyRevision) -> bool:
     return _as_utc(created_at) >= _as_utc(revision.effective_from)
 
 
@@ -282,9 +278,11 @@ def evaluate_torrent_candidates(
     if media.media_type == MediaType.TV:
         if not media.missing_episodes:
             reasons.append("TV_MISSING_EPISODES_UNKNOWN")
-        elif not {"EPISODE_COVERAGE_EXACT", "EPISODE_COVERAGE_COMPLETE"}.intersection(
-            top.match_reasons
-        ):
+        elif not {
+            "EPISODE_COVERAGE_EXACT",
+            "EPISODE_COVERAGE_COMPLETE",
+            "SEASON_PACK_COVERS_TARGET_SEASON",
+        }.intersection(top.match_reasons):
             reasons.append("TV_EPISODE_COVERAGE_UNSAFE")
 
     unique_reasons = tuple(dict.fromkeys(reasons))
@@ -402,9 +400,7 @@ async def maybe_automate_identity(
     evidence = {
         "resolution_job_id": job.id,
         "candidate_count": len(matches),
-        "input_fingerprint_present": isinstance(
-            job.payload.get("input_fingerprint"), str
-        ),
+        "input_fingerprint_present": isinstance(job.payload.get("input_fingerprint"), str),
     }
     if mode_outcome is not None:
         outcome, reasons = mode_outcome
@@ -431,8 +427,7 @@ async def maybe_automate_identity(
         revision,
         resolution_job_id=job.id,
         input_fingerprint_matches=(
-            job.payload.get("input_fingerprint")
-            == metadata_resolution_input_fingerprint(media)
+            job.payload.get("input_fingerprint") == metadata_resolution_input_fingerprint(media)
         ),
     )
     if not eligibility.eligible or eligibility.selected_id is None:
@@ -487,10 +482,7 @@ async def maybe_automate_torrent_search_after_identity(
 ) -> Job | None:
     del trigger_created_at
     _, revision = await get_current_policy(session, for_update=True)
-    if (
-        stage_mode(revision, AutomationStage.TORRENT_SELECTION)
-        == AutomationMode.DISABLED
-    ):
+    if stage_mode(revision, AutomationStage.TORRENT_SELECTION) == AutomationMode.DISABLED:
         return None
 
     catalog = build_pt_site_catalog(settings)
@@ -533,6 +525,7 @@ async def maybe_automate_torrent_selection(
     media: MediaItem,
     settings: Settings,
 ) -> ApprovalRequest | None:
+    launch_mode = _batch_launch_mode(job)
     _, revision = await get_current_policy(session, for_update=True)
     mode_outcome = _mode_outcome(
         revision,
@@ -581,9 +574,7 @@ async def maybe_automate_torrent_selection(
     confirmed_identity: MetadataRecord | None = None
     if confirmed_review is not None:
         try:
-            confirmed_identity = MetadataRecord.model_validate(
-                confirmed_review.candidate_snapshot
-            )
+            confirmed_identity = MetadataRecord.model_validate(confirmed_review.candidate_snapshot)
         except ValueError:
             confirmed_identity = None
     eligibility = evaluate_torrent_candidates(
@@ -642,6 +633,7 @@ async def maybe_automate_torrent_selection(
                 session,
                 approval=approval,
                 settings=settings,
+                launch_mode=launch_mode,
             )
         return approval
     except AppError as exc:
@@ -673,6 +665,7 @@ async def maybe_automate_torrent_selection(
                 session,
                 approval=approval,
                 settings=settings,
+                launch_mode=launch_mode,
             )
         return approval
     await _record_stage_decision(
@@ -691,6 +684,7 @@ async def maybe_automate_torrent_selection(
         session,
         approval=approval,
         settings=settings,
+        launch_mode=launch_mode,
     )
     return approval
 
@@ -733,10 +727,7 @@ async def require_automatic_torrent_search_current(
             "自动 PT 搜索绑定的策略已不再是当前版本",
             status_code=409,
         )
-    if (
-        stage_mode(current, AutomationStage.TORRENT_SELECTION)
-        != AutomationMode.AUTO_IF_ELIGIBLE
-    ):
+    if stage_mode(current, AutomationStage.TORRENT_SELECTION) != AutomationMode.AUTO_IF_ELIGIBLE:
         raise AppError(
             "AUTOMATION_TORRENT_SELECTION_MODE_CHANGED",
             "当前策略不再允许自动 PT 搜索",
@@ -775,6 +766,7 @@ async def maybe_enqueue_automatic_preflight(
     *,
     approval: ApprovalRequest,
     settings: Settings,
+    launch_mode: DownloadLaunchMode = DownloadLaunchMode.ADD_PAUSED,
 ) -> Job | None:
     _, revision = await get_current_policy(session, for_update=True)
     mode_outcome = _mode_outcome(
@@ -881,6 +873,7 @@ async def maybe_enqueue_automatic_preflight(
             "media_id": approval.media_item_id,
             "approval_snapshot_hash": approval.snapshot_hash,
             "automation_policy_revision_id": revision.id,
+            "automation_launch_mode": launch_mode.value,
             "read_only": True,
         },
         max_attempts=settings.job_max_attempts,
@@ -937,6 +930,11 @@ async def maybe_finalize_automatic_approval(
     expected_snapshot_hash: str | None = None,
     trigger_job_id: str | None = None,
 ) -> DownloadPlan | None:
+    launch_mode = DownloadLaunchMode.ADD_PAUSED
+    if trigger_job_id is not None:
+        trigger_job = await session.get(Job, trigger_job_id)
+        if trigger_job is not None:
+            launch_mode = _automation_launch_mode(trigger_job.payload.get("automation_launch_mode"))
     _, revision = await get_current_policy(session, for_update=True)
     evidence: dict[str, Any] = {
         "approval_request_id": approval.id,
@@ -944,10 +942,7 @@ async def maybe_finalize_automatic_approval(
         "expected_policy_revision_id": expected_policy_revision_id,
         "trigger_job_id": trigger_job_id,
     }
-    if (
-        expected_policy_revision_id is not None
-        and revision.id != expected_policy_revision_id
-    ):
+    if expected_policy_revision_id is not None and revision.id != expected_policy_revision_id:
         await _record_stage_decision(
             session,
             revision,
@@ -1093,6 +1088,7 @@ async def maybe_finalize_automatic_approval(
         session,
         approval=approval,
         settings=settings,
+        launch_mode=launch_mode,
     )
     return plan
 
@@ -1102,6 +1098,7 @@ async def maybe_create_automatic_execution(
     *,
     approval: ApprovalRequest,
     settings: Settings,
+    launch_mode: DownloadLaunchMode = DownloadLaunchMode.ADD_PAUSED,
 ) -> DownloadExecution | None:
     _, revision = await get_current_policy(session, for_update=True)
     trigger_time = approval.decided_at or approval.requested_at
@@ -1115,7 +1112,7 @@ async def maybe_create_automatic_execution(
     evidence = {
         "approval_request_id": approval.id,
         "approval_snapshot_hash": approval.snapshot_hash,
-        "launch_mode": DownloadLaunchMode.ADD_PAUSED.value,
+        "launch_mode": launch_mode.value,
         "hnr_known": effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).known,
     }
     if mode_outcome is not None:
@@ -1165,9 +1162,7 @@ async def maybe_create_automatic_execution(
         )
         return None
     existing = await session.scalar(
-        select(DownloadExecution)
-        .where(DownloadExecution.approval_id == approval.id)
-        .limit(1)
+        select(DownloadExecution).where(DownloadExecution.approval_id == approval.id).limit(1)
     )
     if existing is not None:
         await verify_download_execution(session, existing)
@@ -1223,9 +1218,7 @@ async def maybe_create_automatic_execution(
     stored, created = await add_decision_once(session, decision)
     if not created:
         existing_execution: DownloadExecution | None = await session.scalar(
-            select(DownloadExecution)
-            .where(DownloadExecution.approval_id == approval.id)
-            .limit(1)
+            select(DownloadExecution).where(DownloadExecution.approval_id == approval.id).limit(1)
         )
         if existing_execution is None:
             raise AppError(
@@ -1239,7 +1232,7 @@ async def maybe_create_automatic_execution(
     intent, nonce = await create_execution_intent(
         session,
         approval.id,
-        ExecutionIntentCreateRequest(launch_mode=DownloadLaunchMode.ADD_PAUSED),
+        ExecutionIntentCreateRequest(launch_mode=launch_mode),
         settings,
         actor=actor,
         origin=Origin.AUTOMATION,
@@ -1262,6 +1255,38 @@ async def maybe_create_automatic_execution(
     finally:
         nonce = ""
     return execution
+
+
+def _automation_launch_mode(value: object) -> DownloadLaunchMode:
+    if not isinstance(value, str):
+        raise AppError(
+            "AUTOMATION_LAUNCH_MODE_INVALID",
+            "自动下载启动模式无效",
+            status_code=409,
+        )
+    try:
+        launch_mode = DownloadLaunchMode(value)
+    except (TypeError, ValueError) as exc:
+        raise AppError(
+            "AUTOMATION_LAUNCH_MODE_INVALID",
+            "自动下载启动模式无效",
+            status_code=409,
+        ) from exc
+    if launch_mode not in {
+        DownloadLaunchMode.ADD_PAUSED,
+        DownloadLaunchMode.SCHEDULED_START,
+    }:
+        raise AppError(
+            "AUTOMATION_LAUNCH_MODE_INVALID",
+            "自动下载只允许暂停添加或由 qBittorrent 队列调度",
+            status_code=409,
+        )
+    return launch_mode
+
+
+def _batch_launch_mode(job: Job) -> DownloadLaunchMode:
+    value = job.payload.get("download_batch_launch_mode")
+    return DownloadLaunchMode.ADD_PAUSED if value is None else _automation_launch_mode(value)
 
 
 async def _record_stage_decision(

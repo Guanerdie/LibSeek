@@ -1103,7 +1103,7 @@ describe('Approval views', () => {
     expect(wrapper.get('.page > .phase-banner').text()).toContain('管理员一次确认下载执行')
     expect(wrapper.get('.page > .phase-banner').text()).toContain('自动执行策略')
     expect(wrapper.get('.page > .phase-banner').text()).toContain('服务端执行总闸开启')
-    expect(wrapper.get('.acknowledgements').text()).toContain('独立 ADD_PAUSED 执行可能随即排队')
+    expect(wrapper.get('.acknowledgements').text()).toContain('受控下载执行可能随即排队')
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     for (const checkbox of checkboxes) await checkbox.setValue(true)
     const approveButton = wrapper

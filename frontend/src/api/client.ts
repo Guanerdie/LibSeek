@@ -13,6 +13,9 @@ import type {
   ConfirmDownloadResponse,
   CsrfResponse,
   DiscoveryRun,
+  DownloadBatch,
+  DownloadBatchCreateRequest,
+  DownloadBatchSummary,
   DownloadExecution,
   DownloadExecutionStatus,
   DownloadJob,
@@ -189,6 +192,7 @@ export const mediaApi = {
     confidence?: string
     region?: MediaRegion
     query?: string
+    discoveryStatus?: string
   }, signal?: AbortSignal) =>
     request<Page<MediaItem>>(
       `/api/media?${queryString({
@@ -198,6 +202,7 @@ export const mediaApi = {
         identity_confidence: params.confidence,
         region: params.region,
         query: params.query,
+        discovery_status: params.discoveryStatus,
       })}`,
       { signal },
     ),
@@ -223,6 +228,26 @@ export const mediaApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ metadata_match_id: metadataMatchId }),
     }),
+}
+
+export const downloadBatchApi = {
+  list: (page = 1, pageSize = 20) =>
+    request<Page<DownloadBatchSummary>>(
+      `/api/download-batches?${queryString({ page, page_size: pageSize })}`,
+    ),
+  get: (id: string, signal?: AbortSignal) =>
+    request<DownloadBatch>(`/api/download-batches/${encodeURIComponent(id)}`, { signal }),
+  create: (payload: DownloadBatchCreateRequest) =>
+    request<DownloadBatch>('/api/download-batches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  retry: (batchId: string, itemId: string) =>
+    request<DownloadBatch>(
+      `/api/download-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/retry`,
+      { method: 'POST' },
+    ),
 }
 
 export const discoveryApi = {

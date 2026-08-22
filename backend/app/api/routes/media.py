@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Query
 
 from app.api.dependencies import DbSession, ViewerPrincipal
@@ -22,6 +24,7 @@ async def get_media(
     identity_confidence: str | None = Query(default=None, max_length=30),
     region: MediaRegion | None = None,
     query: str | None = Query(default=None, max_length=200),
+    discovery_status: Literal["MISSING", "IN_LIBRARY", "ALL"] = Query(default="MISSING"),
 ) -> Page[MediaItemResponse]:
     items, total = await list_media_items(
         session,
@@ -31,6 +34,7 @@ async def get_media(
         identity_confidence=identity_confidence,
         region=region,
         query=query,
+        discovery_status=None if discovery_status == "ALL" else discovery_status,
     )
     return Page[MediaItemResponse](items=items, page=page, page_size=page_size, total=total)
 

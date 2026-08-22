@@ -11,6 +11,8 @@ import ConfigurationView from '../views/ConfigurationView.vue'
 import DiscoveryView from '../views/DiscoveryView.vue'
 import DownloadJobDetailView from '../views/DownloadJobDetailView.vue'
 import DownloadJobListView from '../views/DownloadJobListView.vue'
+import DownloadBatchListView from '../views/DownloadBatchListView.vue'
+import DownloadBatchDetailView from '../views/DownloadBatchDetailView.vue'
 import ExecutionDetailView from '../views/ExecutionDetailView.vue'
 import ExecutionListView from '../views/ExecutionListView.vue'
 import MediaView from '../views/MediaView.vue'
@@ -48,6 +50,8 @@ const router = createRouter({
     { path: '/executions/:id', component: ExecutionDetailView },
     { path: '/download-jobs', component: DownloadJobListView },
     { path: '/download-jobs/:id', component: DownloadJobDetailView },
+    { path: '/download-batches', component: DownloadBatchListView },
+    { path: '/download-batches/:id', component: DownloadBatchDetailView },
     { path: '/media-imports', component: MediaImportListView },
     {
       path: '/media-imports/new',

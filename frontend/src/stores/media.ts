@@ -37,6 +37,7 @@ export const useMediaStore = defineStore('media', () => {
   const confidence = ref('')
   const region = ref<MediaRegion | ''>('')
   const query = ref('')
+  const discoveryStatus = ref<'MISSING' | 'IN_LIBRARY' | 'ALL'>('MISSING')
   const loading = ref(false)
   const syncing = ref(false)
   const error = ref<string | null>(null)
@@ -65,6 +66,7 @@ export const useMediaStore = defineStore('media', () => {
         confidence: confidence.value || undefined,
         region: region.value || undefined,
         query: query.value || undefined,
+        discoveryStatus: discoveryStatus.value,
       }
       const response = options.signal
         ? await mediaApi.list(params, options.signal)
@@ -219,6 +221,7 @@ export const useMediaStore = defineStore('media', () => {
     confidence,
     region,
     query,
+    discoveryStatus,
     loading,
     syncing,
     error,

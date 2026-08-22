@@ -518,7 +518,7 @@ export interface DownloadPlan {
   created_at: string
 }
 
-export type DownloadLaunchMode = 'ADD_PAUSED' | 'START_IMMEDIATELY'
+export type DownloadLaunchMode = 'ADD_PAUSED' | 'SCHEDULED_START' | 'START_IMMEDIATELY'
 
 export type ExecutionIntentStatus = 'ACTIVE' | 'CONSUMED' | 'EXPIRED' | 'CANCELLED'
 
@@ -672,6 +672,59 @@ export interface DownloadJobTimelineItem {
 export interface DownloadJobTimeline {
   job_id: string
   items: DownloadJobTimelineItem[]
+}
+
+export type DownloadBatchMode = 'SEARCH_ONLY' | 'AUTO_SAFE'
+export type DownloadBatchStatus = 'ACTIVE' | 'NEEDS_ATTENTION' | 'COMPLETED'
+export type DownloadBatchItemStatus =
+  | 'PENDING' | 'RESOLVING_IDENTITY' | 'MANUAL_REQUIRED' | 'SEARCHING'
+  | 'SELECTING' | 'APPROVING' | 'QUEUED' | 'SUBMITTED' | 'DOWNLOADING'
+  | 'COMPLETED' | 'FAILED'
+
+export interface DownloadBatchCreateRequest {
+  name: string
+  media_ids: string[]
+  mode: DownloadBatchMode
+  launch_mode: DownloadLaunchMode
+  site_id: string
+  preferred_resolutions: string[]
+  preferred_sources: string[]
+  preferred_audio: string[]
+  preferred_subtitles: string[]
+  max_candidate_size_bytes?: number
+  max_total_size_bytes?: number
+}
+
+export interface DownloadBatchItem {
+  id: string
+  media_item_id: string
+  title: string
+  media_type: 'movie' | 'tv'
+  year: number | null
+  status: DownloadBatchItemStatus
+  error_code: string | null
+  error_message: string | null
+  updated_at: string
+}
+
+export interface DownloadBatchSummary {
+  id: string
+  name: string
+  mode: DownloadBatchMode
+  launch_mode: DownloadLaunchMode
+  status: DownloadBatchStatus
+  site_id: string
+  max_items: number
+  created_by: string
+  created_at: string
+  updated_at: string
+  counts: Record<string, number>
+}
+
+export interface DownloadBatch extends DownloadBatchSummary {
+  preferences: Record<string, unknown>
+  max_total_size_bytes: number | null
+  items: DownloadBatchItem[]
 }
 
 export type MediaImportStatus =

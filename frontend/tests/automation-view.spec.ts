@@ -173,7 +173,7 @@ describe('AutomationView', () => {
 
     expect(wrapper.findAll('.automation-acknowledgements input')).toHaveLength(4)
     expect(wrapper.text()).toContain('只生成不可变计划')
-    expect(wrapper.text()).toContain('只允许 ADD_PAUSED')
+    expect(wrapper.text()).toContain('只允许添加后暂停或交由 qB 队列调度')
   })
 
   it('keeps viewer and operator read-only and reacts to role changes', async () => {

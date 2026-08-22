@@ -65,7 +65,7 @@ function load(page = 1): void {
           <tr v-for="execution in store.executions" :key="execution.id">
             <td class="execution-id"><strong class="mono">{{ execution.id }}</strong><small class="mono">{{ execution.approval_id }}</small></td>
             <td><StatusPill :status="execution.status" /></td>
-            <td><strong>{{ execution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : '立即开始' }}</strong></td>
+            <td><strong>{{ execution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : execution.launch_mode === 'SCHEDULED_START' ? 'qB 队列调度' : '立即开始' }}</strong></td>
             <td><strong>{{ execution.attempts }} / {{ execution.max_attempts }}</strong><small>{{ execution.next_retry_at ? formatShanghai(execution.next_retry_at) : '无等待重试' }}</small></td>
             <td><strong :class="execution.requires_reconciliation ? 'risk-text' : ''">{{ execution.requires_reconciliation ? '需要人工对账' : '无需对账' }}</strong></td>
             <td><strong>{{ execution.requested_by }}</strong><small>{{ formatShanghai(execution.requested_at) }}</small></td>

@@ -210,6 +210,20 @@ async def test_media_pagination_and_not_found(
                 updated_at=now,
             )
         )
+        session.add(
+            MediaItem(
+                source="nextfind",
+                source_item_id="nextfind:archived",
+                media_type=MediaType.MOVIE,
+                tmdb_id=2,
+                title="Archived",
+                discovery_status="IN_LIBRARY",
+                identity_confidence=IdentityConfidence.HIGH,
+                metadata_status=MetadataStatus.RESOLVED,
+                discovered_at=now,
+                updated_at=now,
+            )
+        )
         await session.commit()
     async with api_client_factory() as client:
         response = await client.get("/api/media?page=1&page_size=20&media_type=movie")
@@ -217,6 +231,17 @@ async def test_media_pagination_and_not_found(
         assert response.json()["total"] == 1
         assert response.json()["items"][0]["title"] == "Example"
         assert response.json()["items"][0]["country_codes"] == ["JP", "US"]
+        archived = await client.get(
+            "/api/media?page=1&page_size=20&discovery_status=IN_LIBRARY"
+        )
+        assert archived.status_code == 200
+        assert archived.json()["total"] == 1
+        assert archived.json()["items"][0]["title"] == "Archived"
+        all_items = await client.get(
+            "/api/media?page=1&page_size=20&discovery_status=ALL"
+        )
+        assert all_items.status_code == 200
+        assert all_items.json()["total"] == 2
         missing = await client.get("/api/media/not-found")
         assert missing.status_code == 404
         assert missing.json()["error_code"] == "MEDIA_NOT_FOUND"

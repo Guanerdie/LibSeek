@@ -183,6 +183,89 @@ async def test_worker_upserts_by_tmdb_and_is_recoverable(
 
 
 @pytest.mark.asyncio
+async def test_successful_discovery_archives_items_no_longer_reported_and_restores_them(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    stale = MediaItem(
+        source="nextfind",
+        source_item_id="nextfind:43",
+        media_type=MediaType.TV,
+        tmdb_id=43,
+        title="Now in library",
+        discovery_status="MISSING",
+        identity_confidence=IdentityConfidence.HIGH,
+        metadata_status=MetadataStatus.RESOLVED,
+        discovered_at=now,
+        updated_at=now,
+    )
+    async with session_factory() as session:
+        session.add(stale)
+        first_run, _ = await create_discovery_run(session)
+        await session.commit()
+
+    processor = JobProcessor(session_factory, "worker-reconcile", FakeMediaSource)
+    assert await processor.run_once() is True
+
+    async with session_factory() as session:
+        archived = await session.get(MediaItem, stale.id)
+        run = await session.get(DiscoveryRun, first_run.id)
+        assert archived is not None and archived.discovery_status == "IN_LIBRARY"
+        assert run is not None
+        second_run, _ = await create_discovery_run(session)
+        await session.commit()
+
+    restored_item = media_fixture("Returned").model_copy(
+        update={"source_item_id": "nextfind:43", "tmdb_id": 43}
+    )
+    restored_processor = JobProcessor(
+        session_factory,
+        "worker-restore",
+        lambda: FixedMediaSource(restored_item),
+    )
+    assert await restored_processor.run_once() is True
+
+    async with session_factory() as session:
+        restored = await session.get(MediaItem, stale.id)
+        assert restored is not None and restored.discovery_status == "MISSING"
+        assert restored.title == "Returned"
+        assert await session.get(DiscoveryRun, second_run.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_discovery_does_not_archive_existing_missing_items(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    existing = MediaItem(
+        source="nextfind",
+        source_item_id="nextfind:44",
+        media_type=MediaType.TV,
+        tmdb_id=44,
+        title="Keep on failure",
+        discovery_status="MISSING",
+        identity_confidence=IdentityConfidence.HIGH,
+        metadata_status=MetadataStatus.RESOLVED,
+        discovered_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    async with session_factory() as session:
+        session.add(existing)
+        await create_discovery_run(session)
+        await session.commit()
+
+    processor = JobProcessor(
+        session_factory,
+        "worker-reconcile-failure",
+        lambda: FakeMediaSource(error=AppError("NEXTFIND_DOWN", "down")),
+    )
+    assert await processor.run_once() is True
+
+    async with session_factory() as session:
+        preserved = await session.get(MediaItem, existing.id)
+        assert preserved is not None and preserved.discovery_status == "MISSING"
+
+
+@pytest.mark.asyncio
 async def test_discovery_enqueues_new_missing_media_without_calling_tmdb(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -370,7 +453,7 @@ async def test_discovery_replaces_active_resolution_when_identity_input_changes(
 
 
 @pytest.mark.asyncio
-async def test_discovery_does_not_enqueue_non_missing_media(
+async def test_discovery_restores_and_requeues_media_reported_missing_again(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     now = datetime.now(UTC)
@@ -409,8 +492,10 @@ async def test_discovery_does_not_enqueue_non_missing_media(
                 .select_from(Job)
                 .where(Job.job_type.like("RESOLVE_METADATA:%"))
             )
-            == 0
+            == 1
         )
+        restored = await session.get(MediaItem, existing.id)
+        assert restored is not None and restored.discovery_status == "MISSING"
 
 
 @pytest.mark.asyncio

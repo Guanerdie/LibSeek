@@ -109,7 +109,7 @@ function formatBytes(value: number | null): string {
       <section class="source-strip execution-source">
         <div><span>执行 ID</span><strong class="mono">{{ store.selected.id }}</strong></div>
         <div><span>状态</span><StatusPill :status="store.selected.status" /></div>
-        <div><span>启动模式</span><strong>{{ store.selected.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : '立即开始' }}</strong></div>
+        <div><span>启动模式</span><strong>{{ store.selected.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : store.selected.launch_mode === 'SCHEDULED_START' ? 'qB 队列调度' : '立即开始' }}</strong></div>
         <div><span>尝试次数</span><strong>{{ store.selected.attempts }} / {{ store.selected.max_attempts }}</strong></div>
         <div><span>对账</span><strong :class="store.selected.requires_reconciliation ? 'risk-text' : ''">{{ store.selected.requires_reconciliation ? '需要人工处理' : '无需对账' }}</strong></div>
       </section>

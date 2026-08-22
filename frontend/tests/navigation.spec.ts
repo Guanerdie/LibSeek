@@ -24,6 +24,8 @@ describe('authenticated navigation', () => {
     expect(router.resolve('/qbittorrent').matched).toHaveLength(1)
     expect(router.resolve('/executions/execution-1').matched).toHaveLength(1)
     expect(router.resolve('/download-jobs/job-1').matched).toHaveLength(1)
+    expect(router.resolve('/download-batches').matched).toHaveLength(1)
+    expect(router.resolve('/download-batches/batch-1').matched).toHaveLength(1)
     expect(router.resolve('/media-imports').matched).toHaveLength(1)
     expect(router.resolve('/media-imports/new').matched).toHaveLength(1)
     expect(router.resolve('/media-imports/import-1').matched).toHaveLength(1)
@@ -51,6 +53,7 @@ describe('authenticated navigation', () => {
     ).toEqual([
       { href: '/media', text: '▦待处理' },
       { href: '/download-jobs', text: '↓下载' },
+      { href: '/download-batches', text: '≡批次' },
       { href: '/configuration', text: '⚙设置' },
     ])
     expect(wrapper.find('.nav-disclosure').exists()).toBe(false)

@@ -98,9 +98,8 @@ def score_torrent_candidate(
             reasons.append("SEASON_EXACT")
             required_episodes = required[candidate.season]
             if candidate.episodes is None and candidate.collection_type == "season":
-                score += 0.04
+                score += 0.07
                 reasons.append("SEASON_PACK_COVERS_TARGET_SEASON")
-                warnings.append("EPISODE_COVERAGE_UNKNOWN")
             elif candidate.episodes:
                 offered = set(candidate.episodes)
                 overlap = offered & required_episodes

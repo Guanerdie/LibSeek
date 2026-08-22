@@ -112,10 +112,7 @@ def qb_target_fingerprint(
     if any(
         not value.strip() or any(marker in value for marker in ("\x00", "\r", "\n"))
         for value in target_values
-    ) or (
-        len(plan.tags) > 20
-        or any("," in tag or len(tag) > 100 for tag in plan.tags)
-    ):
+    ) or (len(plan.tags) > 20 or any("," in tag or len(tag) > 100 for tag in plan.tags)):
         raise AppError(
             "EXECUTION_TARGET_INVALID",
             "qBittorrent 执行目标包含无效字段",
@@ -284,7 +281,7 @@ async def execute_approved_plan(
 ) -> tuple[DownloadExecution, bool]:
     _require_origin_binding(
         origin,
-        DownloadLaunchMode.ADD_PAUSED if origin == Origin.AUTOMATION else None,
+        None,
         automation_policy_revision_id=automation_policy_revision_id,
         automation_decision_id=automation_decision_id,
     )
@@ -368,9 +365,7 @@ async def execute_approved_plan(
             "执行意图已经用于其他下载执行请求",
             status_code=409,
         )
-    if intent.status == ExecutionIntentStatus.ACTIVE and _as_utc(intent.expires_at) <= _as_utc(
-        now
-    ):
+    if intent.status == ExecutionIntentStatus.ACTIVE and _as_utc(intent.expires_at) <= _as_utc(now):
         intent.status = ExecutionIntentStatus.EXPIRED
         _add_approval_event(
             session,
@@ -528,9 +523,7 @@ async def recover_idempotent_execution(
     )
 
 
-async def get_execution_for_approval(
-    session: AsyncSession, approval_id: str
-) -> DownloadExecution:
+async def get_execution_for_approval(session: AsyncSession, approval_id: str) -> DownloadExecution:
     approval = await session.get(ApprovalRequest, approval_id)
     if approval is None:
         raise AppError("APPROVAL_REQUEST_NOT_FOUND", "审批请求不存在", status_code=404)
@@ -538,9 +531,7 @@ async def get_execution_for_approval(
         select(DownloadExecution).where(DownloadExecution.approval_id == approval_id).limit(1)
     )
     if execution is None:
-        raise AppError(
-            "DOWNLOAD_EXECUTION_NOT_FOUND", "审批尚未创建下载执行记录", status_code=404
-        )
+        raise AppError("DOWNLOAD_EXECUTION_NOT_FOUND", "审批尚未创建下载执行记录", status_code=404)
     return await verify_download_execution(session, execution)
 
 
@@ -786,9 +777,7 @@ async def persist_info_hash_before_submission(
         )
         return execution
     verify_snapshot(approval)
-    if approval.status == ApprovalStatus.APPROVED and _as_utc(
-        approval.expires_at
-    ) <= _as_utc(now):
+    if approval.status == ApprovalStatus.APPROVED and _as_utc(approval.expires_at) <= _as_utc(now):
         previous_approval_status = approval.status
         approval.status = ApprovalStatus.EXPIRED
         approval.decided_at = now
@@ -934,9 +923,7 @@ async def finalize_download_submission(
     await _require_final_automation_submission_cas(
         session,
         execution,
-        snapshot_hit_and_run=effective_hnr_rule(
-            snapshot.site_id, snapshot.hit_and_run
-        ).applies,
+        snapshot_hit_and_run=effective_hnr_rule(snapshot.site_id, snapshot.hit_and_run).applies,
         settings=settings,
     )
     plan = await _get_verified_plan(session, approval)
@@ -945,9 +932,7 @@ async def finalize_download_submission(
         plan,
         execution.launch_mode,
         snapshot.media_title,
-    ) != (
-        execution.qb_target_fingerprint
-    ):
+    ) != (execution.qb_target_fingerprint):
         raise AppError(
             "EXECUTION_TARGET_CONFIG_CHANGED",
             "qBittorrent 执行目标与预留时不一致",
@@ -967,8 +952,7 @@ async def finalize_download_submission(
     if (
         outcome == DownloadExecutionStatus.SUBMITTED
         and execution.launch_mode == DownloadLaunchMode.ADD_PAUSED
-        and observed.state.casefold()
-        not in {"pauseddl", "pausedup", "stoppeddl", "stoppedup"}
+        and observed.state.casefold() not in {"pauseddl", "pausedup", "stoppeddl", "stoppedup"}
     ):
         raise AppError(
             "QB_ADD_PAUSED_NOT_OBSERVED",
@@ -1091,7 +1075,11 @@ async def _require_final_automation_submission_cas(
         return
     gates_enabled = all(
         (
-            execution.launch_mode == DownloadLaunchMode.ADD_PAUSED,
+            execution.launch_mode
+            in {
+                DownloadLaunchMode.ADD_PAUSED,
+                DownloadLaunchMode.SCHEDULED_START,
+            },
             settings.enable_automation_engine,
             settings.enable_download_execution_control_plane,
             settings.download_executor_enabled,
@@ -1160,9 +1148,7 @@ async def update_download_job_observation(
         ):
             job.status = DownloadJobStatus.ERROR
             job.error_code = "QB_TORRENT_BINDING_DRIFT"
-            job.error_message = (
-                "qBittorrent 种子的保存路径、分类或大小与已批准下载任务不一致"
-            )
+            job.error_message = "qBittorrent 种子的保存路径、分类或大小与已批准下载任务不一致"
         else:
             job.status = _download_job_status(observed)
             if job.status == DownloadJobStatus.ERROR:
@@ -1263,14 +1249,18 @@ async def verify_download_execution(
                 "下载执行记录的实际 info hash 与 v1/v2 摘要不一致",
                 status_code=409,
             )
-    if execution.status in {
-        DownloadExecutionStatus.SUBMITTING,
-        DownloadExecutionStatus.SUBMITTED,
-        DownloadExecutionStatus.ALREADY_PRESENT,
-        DownloadExecutionStatus.OUTCOME_UNKNOWN,
-        DownloadExecutionStatus.RECONCILIATION_REQUIRED,
-        DownloadExecutionStatus.RECONCILIATION_PENDING,
-    } and execution.actual_info_hash is None:
+    if (
+        execution.status
+        in {
+            DownloadExecutionStatus.SUBMITTING,
+            DownloadExecutionStatus.SUBMITTED,
+            DownloadExecutionStatus.ALREADY_PRESENT,
+            DownloadExecutionStatus.OUTCOME_UNKNOWN,
+            DownloadExecutionStatus.RECONCILIATION_REQUIRED,
+            DownloadExecutionStatus.RECONCILIATION_PENDING,
+        }
+        and execution.actual_info_hash is None
+    ):
         raise AppError(
             "DOWNLOAD_EXECUTION_BINDING_INVALID",
             "下载执行在提交或对账状态前未持久化实际 info hash",
@@ -1339,8 +1329,7 @@ async def verify_download_execution(
         or execution.qb_target_fingerprint != intent.qb_target_fingerprint
         or execution.launch_mode != intent.launch_mode
         or execution.origin != intent.origin
-        or execution.automation_policy_revision_id
-        != intent.automation_policy_revision_id
+        or execution.automation_policy_revision_id != intent.automation_policy_revision_id
         or execution.automation_decision_id != intent.automation_decision_id
         or execution.request_hash != expected_request_hash
     ):
@@ -1353,9 +1342,7 @@ async def verify_download_execution(
         revision = await session.get(
             AutomationPolicyRevision, execution.automation_policy_revision_id
         )
-        decision = await session.get(
-            AutomationDecision, execution.automation_decision_id
-        )
+        decision = await session.get(AutomationDecision, execution.automation_decision_id)
         if revision is None or decision is None:
             raise AppError(
                 "DOWNLOAD_EXECUTION_BINDING_INVALID",
@@ -1462,10 +1449,7 @@ def idempotency_key_digest(value: str) -> str:
 
 async def _get_locked_approval(session: AsyncSession, approval_id: str) -> ApprovalRequest:
     approval = await session.scalar(
-        select(ApprovalRequest)
-        .where(ApprovalRequest.id == approval_id)
-        .with_for_update()
-        .limit(1)
+        select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update().limit(1)
     )
     if approval is None:
         raise AppError("APPROVAL_REQUEST_NOT_FOUND", "审批请求不存在", status_code=404)
@@ -1478,9 +1462,7 @@ def _require_approved(
     session: AsyncSession,
     now: datetime,
 ) -> None:
-    if approval.status == ApprovalStatus.APPROVED and _as_utc(approval.expires_at) <= _as_utc(
-        now
-    ):
+    if approval.status == ApprovalStatus.APPROVED and _as_utc(approval.expires_at) <= _as_utc(now):
         previous = approval.status
         approval.status = ApprovalStatus.EXPIRED
         approval.decided_at = now
@@ -1503,9 +1485,7 @@ def _require_approved(
         )
 
 
-async def _get_verified_plan(
-    session: AsyncSession, approval: ApprovalRequest
-) -> DownloadPlan:
+async def _get_verified_plan(session: AsyncSession, approval: ApprovalRequest) -> DownloadPlan:
     plan = await session.scalar(
         select(DownloadPlan).where(DownloadPlan.approval_id == approval.id).limit(1)
     )
@@ -1765,13 +1745,20 @@ def _require_origin_binding(
             )
         return
     if (
-        launch_mode != DownloadLaunchMode.ADD_PAUSED
+        (
+            launch_mode is not None
+            and launch_mode
+            not in {
+                DownloadLaunchMode.ADD_PAUSED,
+                DownloadLaunchMode.SCHEDULED_START,
+            }
+        )
         or not automation_policy_revision_id
         or not automation_decision_id
     ):
         raise AppError(
             "AUTOMATION_EXECUTION_BINDING_INVALID",
-            "自动执行必须绑定策略、决策并使用添加后暂停模式",
+            "自动执行必须绑定策略、决策并使用受控启动模式",
             status_code=409,
         )
 
@@ -1790,8 +1777,7 @@ def _require_execution_lease(
         or not hmac.compare_digest(execution.lease_token, lease_token)
         or execution.locked_by is None
         or execution.locked_at is None
-        or _as_utc(execution.locked_at) + timedelta(seconds=lease_seconds)
-        <= _as_utc(now)
+        or _as_utc(execution.locked_at) + timedelta(seconds=lease_seconds) <= _as_utc(now)
     ):
         raise AppError(
             "DOWNLOAD_EXECUTION_LEASE_LOST",

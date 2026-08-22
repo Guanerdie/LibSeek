@@ -17,8 +17,11 @@ async def list_media_items(
     identity_confidence: str | None = None,
     region: MediaRegion | None = None,
     query: str | None = None,
+    discovery_status: str | None = "MISSING",
 ) -> tuple[list[MediaItem], int]:
     filters = []
+    if discovery_status:
+        filters.append(MediaItem.discovery_status == discovery_status)
     if media_type is not None:
         filters.append(MediaItem.media_type == media_type)
     if identity_confidence:
@@ -35,9 +38,7 @@ async def list_media_items(
         )
     if query:
         filters.append(MediaItem.title.ilike(f"%{query.strip()}%"))
-    total = (
-        await session.scalar(select(func.count()).select_from(MediaItem).where(*filters)) or 0
-    )
+    total = await session.scalar(select(func.count()).select_from(MediaItem).where(*filters)) or 0
     statement = (
         select(MediaItem)
         .where(*filters)

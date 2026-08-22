@@ -31,6 +31,9 @@ from app.models.enums import (
     AutomationMode,
     AutomationStage,
     DecisionOutcome,
+    DownloadBatchItemStatus,
+    DownloadBatchMode,
+    DownloadBatchStatus,
     DownloadExecutionStatus,
     DownloadJobStatus,
     DownloadLaunchMode,
@@ -144,6 +147,65 @@ class MediaItem(Base):
     )
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DownloadBatch(Base):
+    __tablename__ = "download_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    mode: Mapped[DownloadBatchMode] = mapped_column(
+        Enum(DownloadBatchMode, native_enum=False, length=20), nullable=False
+    )
+    launch_mode: Mapped[DownloadLaunchMode] = mapped_column(
+        Enum(DownloadLaunchMode, native_enum=False, length=30),
+        default=DownloadLaunchMode.SCHEDULED_START,
+        nullable=False,
+    )
+    status: Mapped[DownloadBatchStatus] = mapped_column(
+        Enum(DownloadBatchStatus, native_enum=False, length=30),
+        default=DownloadBatchStatus.ACTIVE,
+        nullable=False,
+        index=True,
+    )
+    site_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    preferences: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    max_total_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    max_items: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class DownloadBatchItem(Base):
+    __tablename__ = "download_batch_items"
+    __table_args__ = (Index("uq_download_batch_media", "batch_id", "media_item_id", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("download_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    media_item_id: Mapped[str] = mapped_column(
+        ForeignKey("media_items.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    status: Mapped[DownloadBatchItemStatus] = mapped_column(
+        Enum(DownloadBatchItemStatus, native_enum=False, length=30),
+        default=DownloadBatchItemStatus.PENDING,
+        nullable=False,
+        index=True,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
 
 class Job(Base):
@@ -417,7 +479,8 @@ class ExecutionIntent(Base):
             "((origin = 'MANUAL' AND automation_policy_revision_id IS NULL "
             "AND automation_decision_id IS NULL) OR "
             "(origin = 'AUTOMATION' AND automation_policy_revision_id IS NOT NULL "
-            "AND automation_decision_id IS NOT NULL AND launch_mode = 'ADD_PAUSED'))",
+            "AND automation_decision_id IS NOT NULL "
+            "AND launch_mode IN ('ADD_PAUSED', 'SCHEDULED_START')))",
             name="ck_execution_intents_automation_binding",
         ),
         Index(
@@ -553,7 +616,8 @@ class DownloadExecution(Base):
             "((origin = 'MANUAL' AND automation_policy_revision_id IS NULL "
             "AND automation_decision_id IS NULL) OR "
             "(origin = 'AUTOMATION' AND automation_policy_revision_id IS NOT NULL "
-            "AND automation_decision_id IS NOT NULL AND launch_mode = 'ADD_PAUSED'))",
+            "AND automation_decision_id IS NOT NULL "
+            "AND launch_mode IN ('ADD_PAUSED', 'SCHEDULED_START')))",
             name="ck_download_executions_automation_binding",
         ),
     )
@@ -571,9 +635,7 @@ class DownloadExecution(Base):
         unique=True,
         index=True,
     )
-    idempotency_key_sha256: Mapped[str] = mapped_column(
-        String(64), nullable=False, unique=True
-    )
+    idempotency_key_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     approval_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -598,9 +660,7 @@ class DownloadExecution(Base):
     )
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
-    next_retry_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(String(180))
     lease_token: Mapped[str | None] = mapped_column(String(36))
@@ -617,9 +677,7 @@ class DownloadExecution(Base):
     requested_by: Mapped[str] = mapped_column(String(120), nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reconciliation_requested_by: Mapped[str | None] = mapped_column(String(120))
-    reconciliation_requested_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    reconciliation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reconciliation_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
@@ -721,9 +779,7 @@ class DownloadJob(Base):
     )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_seen_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     error_code: Mapped[str | None] = mapped_column(String(80))
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -781,12 +837,10 @@ class MediaImportRequest(Base):
             "download_job_id",
             unique=True,
             postgresql_where=text(
-                "status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED', "
-                "'APPROVED_PLAN_ONLY')"
+                "status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED', 'APPROVED_PLAN_ONLY')"
             ),
             sqlite_where=text(
-                "status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED', "
-                "'APPROVED_PLAN_ONLY')"
+                "status IN ('PREFLIGHT_REQUIRED', 'REVIEW_REQUIRED', 'APPROVED_PLAN_ONLY')"
             ),
         ),
     )
@@ -984,9 +1038,7 @@ class MediaImportEvent(Base):
 class AutomationPolicyRevision(Base):
     __tablename__ = "automation_policy_revisions"
     __table_args__ = (
-        CheckConstraint(
-            "revision_no >= 1", name="ck_automation_policy_revision_number"
-        ),
+        CheckConstraint("revision_no >= 1", name="ck_automation_policy_revision_number"),
         CheckConstraint(
             portable_hex_check("policy_hash", (64,)),
             name="ck_automation_policy_revision_hash",
@@ -1083,16 +1135,12 @@ class AutomationDecision(Base):
     approval_request_id: Mapped[str | None] = mapped_column(
         ForeignKey("approval_requests.id", ondelete="RESTRICT"), index=True
     )
-    download_execution_id: Mapped[str | None] = mapped_column(
-        String(36), index=True
-    )
+    download_execution_id: Mapped[str | None] = mapped_column(String(36), index=True)
     reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    actor: Mapped[str] = mapped_column(
-        String(120), default="system:automation", nullable=False
-    )
+    actor: Mapped[str] = mapped_column(String(120), default="system:automation", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -1258,9 +1306,7 @@ def reject_download_execution_binding_update(
         if state.attrs[field].history.has_changes()
     ]
     if changed:
-        raise ValueError(
-            f"download execution immutable fields cannot change: {', '.join(changed)}"
-        )
+        raise ValueError(f"download execution immutable fields cannot change: {', '.join(changed)}")
     info_hash_history = state.attrs.actual_info_hash.history
     if (
         info_hash_history.has_changes()
@@ -1322,18 +1368,15 @@ def guard_media_import_request_update(
             raise ValueError(
                 f"invalid media import transition: {previous.value} -> {target.status.value}"
             )
-        allowed_decision_fields = _MEDIA_IMPORT_TRANSITION_DECISION_FIELDS.get(
-            target.status, set()
-        )
+        allowed_decision_fields = _MEDIA_IMPORT_TRANSITION_DECISION_FIELDS.get(target.status, set())
     elif target.status in _MEDIA_IMPORT_TERMINAL_STATUSES:
         raise ValueError("terminal media import requests are immutable")
     for field in _MEDIA_IMPORT_DECISION_FIELDS:
         history = state.attrs[field].history
         if not history.has_changes():
             continue
-        if (
-            field not in allowed_decision_fields
-            or (history.deleted and history.deleted[0] is not None)
+        if field not in allowed_decision_fields or (
+            history.deleted and history.deleted[0] is not None
         ):
             raise ValueError(f"media import decision field cannot change: {field}")
 

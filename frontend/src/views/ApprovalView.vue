@@ -294,7 +294,7 @@ async function approvePlan(): Promise<void> {
               <div><span class="eyebrow">EXECUTION CREATED</span><StatusPill :status="selectedExecution.status" /></div>
               <h3>已存在下载执行记录，不会重复创建</h3>
               <dl class="approval-facts">
-                <div><dt>启动模式</dt><dd>{{ selectedExecution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : '立即开始' }}</dd></div>
+                <div><dt>启动模式</dt><dd>{{ selectedExecution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : selectedExecution.launch_mode === 'SCHEDULED_START' ? 'qB 队列调度' : '立即开始' }}</dd></div>
                 <div><dt>请求时间</dt><dd>{{ formatShanghai(selectedExecution.requested_at) }}</dd></div>
                 <div><dt>尝试次数</dt><dd>{{ selectedExecution.attempts }} / {{ selectedExecution.max_attempts }}</dd></div>
                 <div><dt>执行错误</dt><dd>{{ selectedExecution.error_code ?? '无' }}</dd></div>
@@ -351,7 +351,7 @@ async function approvePlan(): Promise<void> {
             <div v-if="store.approval.status === 'PENDING'" class="acknowledgements">
               <label v-if="requiresHnrAcknowledgement"><input v-model="acknowledgesHnr" type="checkbox" :disabled="!canAdmin || store.working" />已了解该站 H&amp;R 规则</label>
               <label><input v-model="acknowledgesSeeding" type="checkbox" :disabled="!canAdmin || store.working" />下载完成后需要继续做种</label>
-              <label><input v-model="acknowledgesPlanOnly" type="checkbox" :disabled="!canAdmin || store.working" />我确认审批本身只生成不可执行计划；若已显式启用且满足自动执行策略，独立 ADD_PAUSED 执行可能随即排队</label>
+              <label><input v-model="acknowledgesPlanOnly" type="checkbox" :disabled="!canAdmin || store.working" />我确认审批本身只生成不可执行计划；若已显式启用且满足自动执行策略，受控下载执行可能随即排队</label>
             </div>
             <button
               v-if="store.approval.status === 'PENDING'"

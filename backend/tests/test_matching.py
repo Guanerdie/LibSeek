@@ -134,7 +134,7 @@ def test_candidate_score_emits_risk_warnings() -> None:
     assert "HNR_UNKNOWN" not in scored.warnings
 
 
-def test_season_pack_is_not_reported_as_exact_episode_coverage() -> None:
+def test_season_pack_can_safely_cover_missing_episodes() -> None:
     season_pack = TorrentCandidate(
         site_id="avistaz",
         torrent_id="season-pack",
@@ -157,4 +157,4 @@ def test_season_pack_is_not_reported_as_exact_episode_coverage() -> None:
 
     assert "EPISODE_COVERAGE_EXACT" not in scored.match_reasons
     assert "SEASON_PACK_COVERS_TARGET_SEASON" in scored.match_reasons
-    assert "EPISODE_COVERAGE_UNKNOWN" in scored.warnings
+    assert "EPISODE_COVERAGE_UNKNOWN" not in scored.warnings

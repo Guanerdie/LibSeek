@@ -11,6 +11,7 @@ const auth = useAuthStore()
 const primaryNavItems = [
   { to: '/media', label: '待处理', icon: '▦' },
   { to: '/download-jobs', label: '下载', icon: '↓' },
+  { to: '/download-batches', label: '批次', icon: '≡' },
   { to: '/configuration', label: '设置', icon: '⚙' },
 ]
 

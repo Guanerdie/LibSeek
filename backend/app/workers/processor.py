@@ -44,6 +44,7 @@ from app.schemas.entities import TorrentSearchCreateRequest
 from app.services.automation import (
     maybe_automate_identity,
     maybe_automate_torrent_search_after_identity,
+    maybe_automate_torrent_selection,
     require_automatic_torrent_search_current,
 )
 from app.services.matching import MatchPreferences, score_metadata_match, score_torrent_candidate
@@ -192,13 +193,9 @@ class JobProcessor:
             return False
         stop_renewal = asyncio.Event()
         work = asyncio.create_task(self._run_claimed_job(job))
-        renewal = asyncio.create_task(
-            self._renew_lease_loop(job.id, job.lease_token, stop_renewal)
-        )
+        renewal = asyncio.create_task(self._renew_lease_loop(job.id, job.lease_token, stop_renewal))
         try:
-            done, _ = await asyncio.wait(
-                {work, renewal}, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait({work, renewal}, return_when=asyncio.FIRST_COMPLETED)
             if work in done:
                 return await work
 
@@ -283,8 +280,9 @@ class JobProcessor:
                 adapter, result.items, result.warnings
             )
             items = await self._reuse_persisted_country_codes(items)
+
             async def checkpoint_country_codes(
-                values: dict[tuple[MediaType, int], list[str]]
+                values: dict[tuple[MediaType, int], list[str]],
             ) -> None:
                 await self._checkpoint_country_codes(
                     job.id,
@@ -349,9 +347,7 @@ class JobProcessor:
                     if exc.error_code != "TMDB_NOT_FOUND":
                         raise
                     opposite = (
-                        MediaType.TV
-                        if media.media_type == MediaType.MOVIE
-                        else MediaType.MOVIE
+                        MediaType.TV if media.media_type == MediaType.MOVIE else MediaType.MOVIE
                     )
                     try:
                         candidates = [await provider.get_by_tmdb_id(opposite, media.tmdb_id)]
@@ -436,10 +432,9 @@ class JobProcessor:
                 await session.commit()
                 return
             expected_fingerprint = job.payload.get("input_fingerprint")
-            if (
-                isinstance(expected_fingerprint, str)
-                and expected_fingerprint != metadata_resolution_input_fingerprint(media)
-            ):
+            if isinstance(
+                expected_fingerprint, str
+            ) and expected_fingerprint != metadata_resolution_input_fingerprint(media):
                 raise AppError(
                     "METADATA_INPUT_CHANGED",
                     "影视身份输入在 TMDB 查询期间发生变化，旧结果已丢弃",
@@ -452,9 +447,7 @@ class JobProcessor:
                 (
                     (
                         candidate,
-                        score_metadata_match(
-                            media, candidate, expected_tmdb_id=media.tmdb_id
-                        ),
+                        score_metadata_match(media, candidate, expected_tmdb_id=media.tmdb_id),
                     )
                     for candidate in unique.values()
                 ),
@@ -523,6 +516,31 @@ class JobProcessor:
                     trigger_created_at=review.created_at,
                     settings=get_settings(),
                 )
+            if review is not None and isinstance(job.payload.get("download_batch_id"), str):
+                search_job = await session.scalar(
+                    select(Job)
+                    .where(
+                        Job.job_type.like(f"TORRENT_SEARCH:%:{media.id}"),
+                        Job.status.in_(
+                            (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.RETRY_WAIT)
+                        ),
+                    )
+                    .order_by(Job.created_at.desc())
+                    .limit(1)
+                )
+                if search_job is not None:
+                    search_job.payload = {
+                        **search_job.payload,
+                        "download_batch_id": job.payload["download_batch_id"],
+                        "download_batch_mode": job.payload.get("download_batch_mode"),
+                        "download_batch_launch_mode": job.payload.get(
+                            "download_batch_launch_mode"
+                        ),
+                        "download_batch_site_id": job.payload.get("download_batch_site_id"),
+                        "download_batch_preferences": job.payload.get(
+                            "download_batch_preferences"
+                        ),
+                    }
             session.add(
                 AuditEvent(
                     event_type="METADATA_CANDIDATES_READY",
@@ -614,13 +632,12 @@ class JobProcessor:
             adapter = await self.pt_site_registry.create(site_id)
             before_request: Callable[[], Awaitable[None]] | None = None
             if isinstance(job.payload.get("automation_policy_revision_id"), str):
+
                 async def guard_automatic_search() -> None:
                     await self._guard_automatic_torrent_search(job.id, job.lease_token)
 
                 before_request = guard_automatic_search
-                set_request_guard = getattr(
-                    adapter, "set_before_request_guard", None
-                )
+                set_request_guard = getattr(adapter, "set_before_request_guard", None)
                 if not callable(set_request_guard):
                     raise AppError(
                         "AUTOMATION_REQUEST_GUARD_UNAVAILABLE",
@@ -710,13 +727,9 @@ class JobProcessor:
         }
         strategies: list[tuple[str, TorrentSearchRequest]] = []
         if PtSearchMode.TMDB_ID in search_modes:
-            strategies.append(
-                ("TMDB_ID", TorrentSearchRequest(tmdb=metadata.tmdb_id, **common))
-            )
+            strategies.append(("TMDB_ID", TorrentSearchRequest(tmdb=metadata.tmdb_id, **common)))
         if PtSearchMode.IMDB_ID in search_modes and metadata.imdb_id:
-            strategies.append(
-                ("IMDB_ID", TorrentSearchRequest(imdb=metadata.imdb_id, **common))
-            )
+            strategies.append(("IMDB_ID", TorrentSearchRequest(imdb=metadata.imdb_id, **common)))
         if PtSearchMode.TEXT in search_modes:
             text_values = [
                 ("ENGLISH_TITLE", metadata.english_title),
@@ -731,19 +744,13 @@ class JobProcessor:
             for name, value in text_values:
                 if not value:
                     continue
-                queries = (
-                    [(f"{name}_YEAR", f"{value} {metadata.year}")]
-                    if metadata.year
-                    else []
-                )
+                queries = [(f"{name}_YEAR", f"{value} {metadata.year}")] if metadata.year else []
                 queries.append((name, value))
                 for strategy_name, query in queries:
                     if query.casefold() in seen_queries:
                         continue
                     seen_queries.add(query.casefold())
-                    strategies.append(
-                        (strategy_name, TorrentSearchRequest(search=query, **common))
-                    )
+                    strategies.append((strategy_name, TorrentSearchRequest(search=query, **common)))
         log: list[dict[str, object]] = []
         for name, request in strategies:
             if before_request is not None:
@@ -772,9 +779,7 @@ class JobProcessor:
                 status_code=409,
             ) from exc
 
-    async def _guard_automatic_torrent_search(
-        self, job_id: str, lease_token: str | None
-    ) -> None:
+    async def _guard_automatic_torrent_search(self, job_id: str, lease_token: str | None) -> None:
         async with self.session_factory() as session:
             job = await session.get(Job, job_id)
             if job is None or not self._owns_lease(job, lease_token):
@@ -876,15 +881,10 @@ class JobProcessor:
             current_fingerprint = torrent_search_input_fingerprint(
                 media, review, requested, get_settings()
             )
-            automatic_job = isinstance(
-                job.payload.get("automation_policy_revision_id"), str
-            )
-            if (
-                (automatic_job and not isinstance(expected_fingerprint, str))
-                or (
-                    isinstance(expected_fingerprint, str)
-                    and expected_fingerprint != current_fingerprint
-                )
+            automatic_job = isinstance(job.payload.get("automation_policy_revision_id"), str)
+            if (automatic_job and not isinstance(expected_fingerprint, str)) or (
+                isinstance(expected_fingerprint, str)
+                and expected_fingerprint != current_fingerprint
             ):
                 raise AppError(
                     "TORRENT_SEARCH_INPUT_STALE",
@@ -923,9 +923,7 @@ class JobProcessor:
             session.add(
                 AuditEvent(
                     event_type=(
-                        "TORRENT_CANDIDATES_READY"
-                        if candidates
-                        else "TORRENT_SEARCH_NO_CANDIDATE"
+                        "TORRENT_CANDIDATES_READY" if candidates else "TORRENT_SEARCH_NO_CANDIDATE"
                     ),
                     entity_type="torrent_search_run",
                     entity_id=run.id,
@@ -937,6 +935,15 @@ class JobProcessor:
                     },
                 )
             )
+            await session.flush()
+            if candidates and job.payload.get("download_batch_mode") == "AUTO_SAFE":
+                await maybe_automate_torrent_selection(
+                    session,
+                    job=job,
+                    run=run,
+                    media=media,
+                    settings=get_settings(),
+                )
             await session.commit()
 
     @staticmethod
@@ -1016,9 +1023,7 @@ class JobProcessor:
         items: list[MediaItemData],
         warnings: list[DiscoveryWarning],
         *,
-        checkpoint: Callable[
-            [dict[tuple[MediaType, int], list[str]]], Awaitable[None]
-        ]
+        checkpoint: Callable[[dict[tuple[MediaType, int], list[str]]], Awaitable[None]]
         | None = None,
     ) -> tuple[list[MediaItemData], list[DiscoveryWarning]]:
         pending_keys: list[tuple[MediaType, int]] = []
@@ -1062,8 +1067,8 @@ class JobProcessor:
             checkpoint_values: dict[tuple[MediaType, int], list[str]] = {}
             for index, (media_type, tmdb_id) in enumerate(pending_keys, start=1):
                 try:
-                    country_codes_by_key[(media_type, tmdb_id)] = (
-                        await provider.get_country_codes(media_type, tmdb_id)
+                    country_codes_by_key[(media_type, tmdb_id)] = await provider.get_country_codes(
+                        media_type, tmdb_id
                     )
                 except AppError as exc:
                     if exc.error_code != "TMDB_NOT_FOUND":
@@ -1143,9 +1148,7 @@ class JobProcessor:
             return items
 
         tmdb_ids = {item.tmdb_id for item in unresolved if item.tmdb_id is not None}
-        source_item_ids = {
-            item.source_item_id for item in unresolved if item.tmdb_id is None
-        }
+        source_item_ids = {item.source_item_id for item in unresolved if item.tmdb_id is None}
         predicates = []
         if tmdb_ids:
             predicates.append(MediaItem.tmdb_id.in_(tmdb_ids))
@@ -1169,9 +1172,7 @@ class JobProcessor:
             if existing.country_codes is None:
                 continue
             identity: int | str = (
-                existing.tmdb_id
-                if existing.tmdb_id is not None
-                else existing.source_item_id
+                existing.tmdb_id if existing.tmdb_id is not None else existing.source_item_id
             )
             persisted[(existing.source, existing.media_type.value, identity)] = (
                 existing.country_codes
@@ -1212,6 +1213,8 @@ class JobProcessor:
                 return
             created_count = 0
             updated_count = 0
+            restored_count = 0
+            seen_media: list[MediaItem] = []
             resolution_candidates: list[tuple[MediaItem, bool]] = []
             for item in unique_items.values():
                 if item.tmdb_id is not None:
@@ -1235,18 +1238,42 @@ class JobProcessor:
                     resolution_candidates.append((media, False))
                     created_count += 1
                 else:
+                    was_in_library = existing.discovery_status.casefold() == "in_library"
+                    existing.discovery_status = "MISSING"
                     previous_identity_fingerprint = metadata_resolution_input_fingerprint(existing)
                     for key, value in values.items():
                         if key == "country_codes" and value is None:
                             continue
                         setattr(existing, key, value)
-                    if (
-                        previous_identity_fingerprint
-                        != metadata_resolution_input_fingerprint(existing)
+                    if previous_identity_fingerprint != metadata_resolution_input_fingerprint(
+                        existing
                     ):
                         resolution_candidates.append((existing, True))
+                    if was_in_library and existing.discovery_status.casefold() == "missing":
+                        restored_count += 1
+                    media = existing
                     updated_count += 1
+                seen_media.append(media)
             await session.flush()
+
+            seen_media_ids = {media.id for media in seen_media}
+            source_names = {item.source for item in unique_items.values()} or {run.source}
+            stale_statement = select(MediaItem).where(
+                MediaItem.source.in_(source_names),
+                MediaItem.discovery_status == "MISSING",
+            )
+            if seen_media_ids:
+                stale_statement = stale_statement.where(MediaItem.id.not_in(seen_media_ids))
+            archived_items = list((await session.scalars(stale_statement)).all())
+            reconciliation_time = utc_now()
+            for archived in archived_items:
+                archived.discovery_status = "IN_LIBRARY"
+                archived.updated_at = reconciliation_time
+                await cancel_active_metadata_resolution_jobs(
+                    session,
+                    archived.id,
+                    evidence="NEXTFIND_ITEM_NO_LONGER_MISSING",
+                )
 
             metadata_resolution_queued_count = 0
             metadata_resolution_deduplicated_count = 0
@@ -1296,10 +1323,10 @@ class JobProcessor:
                         "discovered_count": len(unique_items),
                         "created_count": created_count,
                         "updated_count": updated_count,
+                        "archived_count": len(archived_items),
+                        "restored_count": restored_count,
                         "isolated_warning_count": len(warnings),
-                        "metadata_resolution_queued_count": (
-                            metadata_resolution_queued_count
-                        ),
+                        "metadata_resolution_queued_count": (metadata_resolution_queued_count),
                         "metadata_resolution_deduplicated_count": (
                             metadata_resolution_deduplicated_count
                         ),
@@ -1308,9 +1335,7 @@ class JobProcessor:
             )
             await session.commit()
 
-    async def _fail(
-        self, job_id: str, error: AppError, *, lease_token: str | None
-    ) -> None:
+    async def _fail(self, job_id: str, error: AppError, *, lease_token: str | None) -> None:
         async with self.session_factory() as session:
             unlocked_job = await session.get(Job, job_id)
             media_id = unlocked_job.payload.get("media_id") if unlocked_job is not None else None
@@ -1350,9 +1375,7 @@ class JobProcessor:
             job.locked_by = None
             job.lease_token = None
             job.next_retry_at = (
-                utc_now() + timedelta(seconds=retry_delay)
-                if retry_delay is not None
-                else None
+                utc_now() + timedelta(seconds=retry_delay) if retry_delay is not None else None
             )
             run = await session.get(DiscoveryRun, job.run_id) if job.run_id else None
             if run is not None:
@@ -1421,9 +1444,7 @@ class JobProcessor:
                 session.add(
                     AuditEvent(
                         event_type=(
-                            "TORRENT_SEARCH_RETRY_SCHEDULED"
-                            if retry
-                            else "TORRENT_SEARCH_FAILED"
+                            "TORRENT_SEARCH_RETRY_SCHEDULED" if retry else "TORRENT_SEARCH_FAILED"
                         ),
                         entity_type="torrent_search_run",
                         entity_id=search_run.id,

@@ -159,7 +159,7 @@ function detailsLabel(details: Record<string, unknown>): string {
             <div><dt>执行状态</dt><dd><StatusPill :status="store.summary.execution.status" /></dd></div>
             <div><dt>审批记录</dt><dd><RouterLink class="inline-record-link" :to="`/approvals/${store.summary.approval.id}`">{{ store.summary.approval.id }}</RouterLink></dd></div>
             <div><dt>执行记录</dt><dd><RouterLink class="inline-record-link" :to="`/executions/${store.summary.execution.id}`">{{ store.summary.execution.id }}</RouterLink></dd></div>
-            <div><dt>启动模式</dt><dd>{{ store.summary.execution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : '立即开始' }}</dd></div>
+            <div><dt>启动模式</dt><dd>{{ store.summary.execution.launch_mode === 'ADD_PAUSED' ? '添加后暂停' : store.summary.execution.launch_mode === 'SCHEDULED_START' ? 'qB 队列调度' : '立即开始' }}</dd></div>
             <div><dt>需要对账</dt><dd :class="store.summary.execution.requires_reconciliation ? 'risk-text' : ''">{{ store.summary.execution.requires_reconciliation ? '是' : '否' }}</dd></div>
             <div><dt>校验 / 提交 / 验证</dt><dd>{{ formatShanghai(store.summary.execution.validated_at) }} / {{ formatShanghai(store.summary.execution.submitted_at) }} / {{ formatShanghai(store.summary.execution.verified_at) }}</dd></div>
             <div><dt>审批过期</dt><dd>{{ formatShanghai(store.summary.approval.expires_at) }}</dd></div>

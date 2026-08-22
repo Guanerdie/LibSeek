@@ -81,15 +81,11 @@ _TERMINAL_EXECUTION_STATES = {
 
 
 class QbExecutionAdapter(Protocol):
-    def set_before_request_guard(
-        self, guard: Callable[[], Awaitable[None]] | None
-    ) -> None: ...
+    def set_before_request_guard(self, guard: Callable[[], Awaitable[None]] | None) -> None: ...
 
     async def authenticate(self) -> None: ...
 
-    async def find_torrents_by_hashes(
-        self, hashes: Collection[str]
-    ) -> list[QbTorrent]: ...
+    async def find_torrents_by_hashes(self, hashes: Collection[str]) -> list[QbTorrent]: ...
 
     async def ensure_category(
         self,
@@ -119,9 +115,7 @@ class QbExecutionAdapter(Protocol):
 class QbMonitorAdapter(Protocol):
     async def authenticate(self) -> None: ...
 
-    async def find_torrents_by_hashes(
-        self, hashes: Collection[str]
-    ) -> list[QbTorrent]: ...
+    async def find_torrents_by_hashes(self, hashes: Collection[str]) -> list[QbTorrent]: ...
 
     async def aclose(self) -> None: ...
 
@@ -309,6 +303,7 @@ class DownloadExecutor:
             if existing is not None:
                 outcome = DownloadExecutionStatus.ALREADY_PRESENT
             else:
+
                 async def torrent_add_write_guard() -> None:
                     nonlocal torrent_add_may_have_occurred
                     await self._write_guard(claim)
@@ -321,7 +316,11 @@ class DownloadExecutor:
                     category=binding.plan.category,
                     tags=tuple(binding.plan.tags),
                     start_immediately=(
-                        binding.launch_mode == DownloadLaunchMode.START_IMMEDIATELY
+                        binding.launch_mode
+                        in {
+                            DownloadLaunchMode.START_IMMEDIATELY,
+                            DownloadLaunchMode.SCHEDULED_START,
+                        }
                     ),
                     category_prepared=True,
                     write_guard=torrent_add_write_guard,
@@ -392,9 +391,7 @@ class DownloadExecutor:
                 await self._mark_validation_failure(
                     claim,
                     exc,
-                    category_write_may_have_occurred=(
-                        category_write_may_have_occurred
-                    ),
+                    category_write_may_have_occurred=(category_write_may_have_occurred),
                 )
         except Exception:
             error = AppError(
@@ -413,9 +410,7 @@ class DownloadExecutor:
                 await self._mark_validation_failure(
                     claim,
                     error,
-                    category_write_may_have_occurred=(
-                        category_write_may_have_occurred
-                    ),
+                    category_write_may_have_occurred=(category_write_may_have_occurred),
                 )
         finally:
             if qb is not None:
@@ -479,9 +474,7 @@ class DownloadExecutor:
             await verify_download_execution(session, execution)
             approval = await session.get(ApprovalRequest, execution.approval_id)
             if approval is None:
-                raise AppError(
-                    "APPROVAL_REQUEST_NOT_FOUND", "审批请求不存在", status_code=404
-                )
+                raise AppError("APPROVAL_REQUEST_NOT_FOUND", "审批请求不存在", status_code=404)
             snapshot = verify_snapshot(approval)
             if approval.status != ApprovalStatus.APPROVED:
                 raise AppError(
@@ -493,9 +486,7 @@ class DownloadExecutor:
                 select(DownloadPlan).where(DownloadPlan.approval_id == approval.id).limit(1)
             )
             if plan is None:
-                raise AppError(
-                    "DOWNLOAD_PLAN_NOT_FOUND", "审批没有对应下载计划", status_code=409
-                )
+                raise AppError("DOWNLOAD_PLAN_NOT_FOUND", "审批没有对应下载计划", status_code=409)
             verify_download_plan(plan, approval)
             require_preflight_policy_current(
                 plan.preflight_policy_fingerprint,
@@ -506,9 +497,7 @@ class DownloadExecutor:
                 plan,
                 execution.launch_mode,
                 snapshot.media_title,
-            ) != (
-                execution.qb_target_fingerprint
-            ):
+            ) != (execution.qb_target_fingerprint):
                 raise AppError(
                     "EXECUTION_TARGET_CONFIG_CHANGED",
                     "qBittorrent 目标配置与执行意图不一致",
@@ -608,9 +597,7 @@ class DownloadExecutor:
                 plan.preflight_policy_fingerprint,
                 self.settings,
             )
-            automation_error = await self._automation_fence_error(
-                session, execution, approval
-            )
+            automation_error = await self._automation_fence_error(session, execution, approval)
             if automation_error is not None:
                 if external_write_may_have_occurred:
                     raise AppError(
@@ -630,10 +617,9 @@ class DownloadExecutor:
             if expected_status == DownloadExecutionStatus.VALIDATING:
                 if approval is not None:
                     verify_snapshot(approval)
-                    if (
-                        approval.status == ApprovalStatus.APPROVED
-                        and _as_utc(approval.expires_at) <= _as_utc(now)
-                    ):
+                    if approval.status == ApprovalStatus.APPROVED and _as_utc(
+                        approval.expires_at
+                    ) <= _as_utc(now):
                         previous_approval = approval.status
                         approval.status = ApprovalStatus.EXPIRED
                         approval.decided_at = now
@@ -684,9 +670,7 @@ class DownloadExecutor:
             await session.commit()
             return True
 
-    async def _heartbeat(
-        self, claim: ExecutionClaim, stop_event: asyncio.Event
-    ) -> None:
+    async def _heartbeat(self, claim: ExecutionClaim, stop_event: asyncio.Event) -> None:
         interval = self.settings.download_execution_lease_renew_interval_seconds
         while not stop_event.is_set():
             try:
@@ -727,7 +711,11 @@ class DownloadExecutor:
         if execution.origin != Origin.AUTOMATION:
             return None
         if (
-            execution.launch_mode != DownloadLaunchMode.ADD_PAUSED
+            execution.launch_mode
+            not in {
+                DownloadLaunchMode.ADD_PAUSED,
+                DownloadLaunchMode.SCHEDULED_START,
+            }
             or not self.settings.enable_automation_engine
             or not self.settings.enable_download_execution_control_plane
             or not self.settings.download_executor_enabled
@@ -855,9 +843,7 @@ class DownloadExecutor:
                     target = DownloadExecutionStatus.RECONCILIATION_REQUIRED
                     execution.next_retry_at = None
                     execution.error_code = "EXECUTOR_STALE_AFTER_RESERVATION"
-                    execution.error_message = (
-                        "提交预留后的执行租约过期，必须人工对账，禁止自动重试"
-                    )
+                    execution.error_message = "提交预留后的执行租约过期，必须人工对账，禁止自动重试"
                     event_type = "STALE_SUBMISSION_REQUIRES_RECONCILIATION"
                 else:
                     retry = execution.attempts < execution.max_attempts
@@ -911,18 +897,12 @@ class DownloadExecutor:
             if execution.status != DownloadExecutionStatus.VALIDATING:
                 return
             retry = error.retryable and execution.attempts < execution.max_attempts
-            target = (
-                DownloadExecutionStatus.RETRY_WAIT
-                if retry
-                else DownloadExecutionStatus.FAILED
-            )
+            target = DownloadExecutionStatus.RETRY_WAIT if retry else DownloadExecutionStatus.FAILED
             previous = execution.status
             execution.status = target
             now = await _database_now(session)
             execution.next_retry_at = (
-                now + timedelta(seconds=self._retry_delay(execution.attempts))
-                if retry
-                else None
+                now + timedelta(seconds=self._retry_delay(execution.attempts)) if retry else None
             )
             execution.locked_at = None
             execution.locked_by = None
@@ -979,9 +959,7 @@ class DownloadExecutor:
                     lease_token=claim.lease_token,
                     lease_seconds=self.settings.download_execution_lease_seconds,
                     error_code=error_code,
-                    error_message=(
-                        "qBittorrent 写入可能已经发生，必须人工对账，禁止自动重试"
-                    ),
+                    error_message=("qBittorrent 写入可能已经发生，必须人工对账，禁止自动重试"),
                 )
             else:
                 await mark_reconciliation_required(
@@ -991,9 +969,7 @@ class DownloadExecutor:
                     lease_token=claim.lease_token,
                     lease_seconds=self.settings.download_execution_lease_seconds,
                     error_code=error_code,
-                    error_message=(
-                        "提交已预留但未完成验证，必须人工确认后续动作，禁止自动重试"
-                    ),
+                    error_message=("提交已预留但未完成验证，必须人工确认后续动作，禁止自动重试"),
                 )
             await session.commit()
 
@@ -1016,9 +992,7 @@ class DownloadExecutor:
         if expires_at <= _as_utc(now):
             raise self._lease_lost()
 
-    def _require_matching_lease(
-        self, execution: DownloadExecution, claim: ExecutionClaim
-    ) -> None:
+    def _require_matching_lease(self, execution: DownloadExecution, claim: ExecutionClaim) -> None:
         if not self._owns_lease(execution, claim):
             raise self._lease_lost()
 
@@ -1040,9 +1014,7 @@ class DownloadExecutor:
         )
 
     def _retry_delay(self, attempts: int) -> int:
-        delay: int = self.settings.download_execution_retry_base_seconds * 2 ** max(
-            attempts - 1, 0
-        )
+        delay: int = self.settings.download_execution_retry_base_seconds * 2 ** max(attempts - 1, 0)
         return int(min(delay, self.settings.download_execution_retry_max_seconds))
 
     def _required_save_path(self) -> str:
@@ -1065,15 +1037,10 @@ class DownloadExecutor:
             "limit": 100,
         }
         requests: list[TorrentSearchRequest] = []
-        if (
-            PtSearchMode.TMDB_ID in search_modes
-            and binding.snapshot.tmdb_id is not None
-        ):
+        if PtSearchMode.TMDB_ID in search_modes and binding.snapshot.tmdb_id is not None:
             requests.append(TorrentSearchRequest(tmdb=binding.snapshot.tmdb_id, **common))
         if PtSearchMode.TEXT in search_modes:
-            requests.append(
-                TorrentSearchRequest(search=binding.plan.release_title, **common)
-            )
+            requests.append(TorrentSearchRequest(search=binding.plan.release_title, **common))
         if not requests:
             raise AppError(
                 "PT_SITE_EXECUTION_SEARCH_UNSUPPORTED",
@@ -1144,9 +1111,7 @@ class DownloadExecutor:
                 status_code=409,
             )
         candidate_hnr = effective_hnr_rule(candidate.site_id, candidate.hit_and_run)
-        snapshot_hnr = effective_hnr_rule(
-            binding.snapshot.site_id, binding.snapshot.hit_and_run
-        )
+        snapshot_hnr = effective_hnr_rule(binding.snapshot.site_id, binding.snapshot.hit_and_run)
         if binding.origin == Origin.AUTOMATION and (
             not candidate_hnr.known
             or not snapshot_hnr.known
@@ -1256,11 +1221,7 @@ class DownloadExecutor:
             "AVISTAZ_TORRENT_FETCH_FAILED",
             "AVISTAZ_TORRENT_FETCH_FORBIDDEN",
         }:
-            retry_status = (
-                "已安排自动重试"
-                if retry
-                else "未安排自动重试或重试次数已耗尽"
-            )
+            retry_status = "已安排自动重试" if retry else "未安排自动重试或重试次数已耗尽"
             return (
                 f"AvistaZ 返回 HTTP {upstream_status_code}，{retry_status}"
                 f"（第 {attempt}/{max_attempts} 次）"
@@ -1334,14 +1295,8 @@ class DownloadMonitor:
         qb = self.qb_factory()
         try:
             await qb.authenticate()
-            hashes = {
-                info_hash
-                for job in jobs
-                for info_hash in self._job_hashes(job)
-            }
-            observations = (
-                await qb.find_torrents_by_hashes(sorted(hashes)) if hashes else []
-            )
+            hashes = {info_hash for job in jobs for info_hash in self._job_hashes(job)}
+            observations = await qb.find_torrents_by_hashes(sorted(hashes)) if hashes else []
         finally:
             await qb.aclose()
 
@@ -1410,14 +1365,10 @@ class DownloadMonitor:
         return frozenset(hashes)
 
     @staticmethod
-    def _job_observation(
-        job: DownloadJob, observations: Sequence[QbTorrent]
-    ) -> QbTorrent | None:
+    def _job_observation(job: DownloadJob, observations: Sequence[QbTorrent]) -> QbTorrent | None:
         hashes = DownloadMonitor._job_hashes(job)
         matches = [
-            observed
-            for observed in observations
-            if not hashes.isdisjoint(observed.identity_hashes)
+            observed for observed in observations if not hashes.isdisjoint(observed.identity_hashes)
         ]
         if len(matches) > 1:
             raise AppError(

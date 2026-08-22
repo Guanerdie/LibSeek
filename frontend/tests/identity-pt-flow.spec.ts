@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: { id: 'media-1' } }),
+  useRouter: () => ({ push: vi.fn() }),
 }))
 
 vi.mock('../src/api/client', () => ({

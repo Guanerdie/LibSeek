@@ -17,6 +17,7 @@ UNIN 当前版本为 `0.8.0`。系统已实现从 NextFind 发现未入库影视
 - Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2 async、Alembic、PostgreSQL 16、httpx；前端为 Vue 3、Pinia、Vue Router、Vite 和 Vitest。
 - 本地管理员认证与分级授权：首次页面创建管理员、PBKDF2 密码哈希、签名会话 Cookie、登录前 bootstrap CSRF、所有已登录状态变更双提交 CSRF，以及 `viewer`/`operator`/`admin` 角色层级。
 - NextFind 只读发现：从使用者在“连接配置”页面录入的服务地址获取未入库条目，使用独立 Cookie、专用 HTTPS 主机白名单、重定向复验、NDJSON 坏行隔离、分页循环检测和响应大小限制；不能借用全局 TMDB/AvistaZ 白名单发送 NextFind 凭据。
+- NextFind 成功同步对账：按来源、媒体类型和 TMDB ID（缺失时使用来源条目 ID）更新本轮结果；只有完整同步成功后，才把本轮未再返回的旧条目软归档为 `IN_LIBRARY` 并取消其待处理身份解析任务。条目再次出现时恢复为 `MISSING`。失败或中断的同步绝不执行反向归档；管理端默认只显示 `MISSING`，可切换查看已入库历史或全部状态。
 - TMDB 只读补全：优先使用 NextFind 提供的 TMDB ID，否则按标题、年份和类型返回最多 5 个候选；保存中英文名、IMDb 等外部 ID、已播季集矩阵和冲突。默认由人工确认；只有身份阶段设为 `AUTO_IF_ELIGIBLE`、总闸已开启且候选通过分数、差值、类型、标题/年份或 TMDB ID 精确绑定等全部硬条件时才会自动确认。
 - PT 搜索与审阅：AvistaZ 支持 TMDB/IMDb/标题降级搜索、限速和稳定错误；候选展示季集覆盖、规格、音轨、字幕、活跃度、促销、H&R、评分理由和风险警告。目录中的 AvistaZ 声明为 `manual_only=false`，仅表示代码具备受保守策略约束的自动化路径，不代表自动化或实时搜索已开启。默认仍只排序供人工选择；自动选种还要求 AvistaZ 站点绑定、候选 TMDB ID 与已确认影视 TMDB ID 精确一致、无警告、H&R 已知、有效 info hash/大小、做种数和电视剧季集覆盖全部满足策略。IMDb-only 候选转人工确认。
 - 多 PT 扩展底座：API、普通 Worker 和下载执行器共享不含 Secret 的 `PtSiteCatalog`；`GET /api/pt-sites/catalog` 只公开站点名称、可用性、搜索模式、媒体类型和能力标记。创建搜索必须显式提交 `site_id`，目录中的 `default_site_id` 只是界面提示，不是服务端回退。搜索任务、Worker、候选、审批、计划和执行均绑定同一站点；`PtSiteRegistry` 与 `PtExecutionRegistry` 分别选择搜索工厂和可选取种工厂，未知、禁用、未就绪、能力或绑定不一致时失败关闭。生产目录和两类生产工厂仍只接入 `avistaz`；`synthetic-two` 仅用于完全离线测试，没有任何真实 NexusPHP/国内 PT 站点经过验证。
@@ -31,6 +32,7 @@ UNIN 当前版本为 `0.8.0`。系统已实现从 NextFind 发现未入库影视
 - 独立只读监控器：读取 qB 状态并更新任务进度、速度、上传量、Ratio 和完成时间；它不推断 H&R，未知值保持 `UNKNOWN`，已有人工或外部写入的 `AT_RISK`/`SATISFIED` 不会被覆盖。
 - 阶段 7A 媒体入库规划控制面：只允许为进度 100% 且处于 `SEEDING`、`COMPLETED` 或 `PAUSED` 的已核验下载任务创建 `HARDLINK`/`COPY` 提案。客户端清单和目标映射始终是不受信提案；不可变计划、追加式只读预检和人工决定以 SHA-256 绑定，固定保留源文件并禁止覆盖目标。当前没有真实媒体路径挂载、文件检查 Worker 或文件执行器。
 - Vue 管理端读取无 Secret PT 目录，创建搜索时要求选择站点，并在历史运行、候选表格和移动端候选卡中显示站点；发现、TMDB 解析和 PT 搜索提供有界自动刷新及可见错误，失效审批可重新发起，执行记录可直接进入关联下载总结。管理端还包含自动化策略/决策审计页、审批两步执行确认（默认 `ADD_PAUSED`）、人工对账和媒体入库规划页面。各页面始终显示“仅规划，不操作媒体文件”，`viewer` 只读，不提供暂停、恢复、删除、重校验或媒体文件操作。
+- 下载批次：媒体列表支持当前页多选并创建 `SEARCH_ONLY` 或 `AUTO_SAFE` 批次，可从当前可用 PT 目录选择站点，并选择 `ADD_PAUSED` 或 `SCHEDULED_START`。批次复用现有身份解析、PT 搜索、保守自动选种、审批、预检和执行链路；整季资源可用于补齐同季少量缺集。`SCHEDULED_START` 以非暂停状态提交，由 qBittorrent 自身队列限制实际活动下载并发；异常条目可单独重试且不会阻塞其他条目。
 - Docker Compose 默认启动 API、普通 Worker、前端和 PostgreSQL；`automation-preflight`、`download-execution` 与 `download-monitor` profile 分别启用独立自动预检 Worker、下载执行器和只读监控器。API 与前端端口只绑定 `127.0.0.1`。
 
 架构见 [docs/architecture.md](docs/architecture.md)，安全边界见 [docs/security.md](docs/security.md)，测试说明见 [docs/testing.md](docs/testing.md)，PT Profile 接入约束见 [docs/pt-site-profiles.md](docs/pt-site-profiles.md)。
@@ -146,6 +148,14 @@ qBittorrent 公开命名空间始终只有以上两个 `GET`。系统没有直�
 - `GET /api/download-jobs/{id}`
 - `GET /api/download-jobs/{id}/timeline`
 - `GET /api/download-jobs/{id}/summary`
+
+下载批次 API：
+
+- `POST /api/download-batches`：`operator` 从 1 至 200 个显式媒体 ID 创建批次。
+- `GET /api/download-batches`、`GET /api/download-batches/{id}`：`viewer` 查看汇总与逐项状态。
+- `POST /api/download-batches/{id}/items/{item_id}/retry`：`operator` 重新排队单个异常条目。
+
+`AUTO_SAFE` 使用当前全局自动化策略和全部既有门禁；没有候选通过规则时进入 `MANUAL_REQUIRED`，不会降低阈值。`SEARCH_ONLY` 在候选搜索完成后结束，不创建审批或执行。批次创建不会改变 qB 队列设置，自动提交仍为暂停添加；需要在 qBittorrent 中配置活动下载数量，下载完成后的 cd2/115 流程不属于 UNIN 的权限边界。
 
 执行与下载任务列表使用有界分页和稳定排序。API 不返回 intent nonce 的持久副本、幂等摘要、lease token、Worker ID、真实 qB URL、真实保存路径或 Secret；内部错误只暴露稳定 `error_code` 和固定提示。`reconcile` 只登记人工对账请求，不进行 qB 外部调用，也不会把不确定结果改成成功。
 
