@@ -18,7 +18,6 @@ from app.core.runtime_config import (
     runtime_store,
 )
 from app.core.security import validate_public_external_target
-from app.db.session import SessionFactory
 from app.errors import AppError
 from app.models.enums import AuthRole
 from app.schemas.adapters import ProbeResult
@@ -35,7 +34,6 @@ from app.schemas.configuration import (
     QbittorrentConfigurationResponse,
     TmdbConfigurationResponse,
 )
-from app.services.site_rate_limit import PostgresAdvisoryRequestGate
 
 router = APIRouter(prefix="/configuration", tags=["configuration"])
 
@@ -177,11 +175,6 @@ async def test_pt_site_configuration(
             (host,),
             resolve_timeout=effective.external_connect_timeout_seconds,
         )
-        request_gate = PostgresAdvisoryRequestGate(
-            SessionFactory,
-            site.site_id,
-            cooldown_seconds=effective.avistaz_min_interval_seconds,
-        )
         probe = NexusPhpConnectionProbe(
             site.base_url,
             allowed_hosts=(host,),
@@ -189,7 +182,6 @@ async def test_pt_site_configuration(
             connect_timeout=effective.external_connect_timeout_seconds,
             read_timeout=effective.external_read_timeout_seconds,
             max_response_bytes=min(effective.external_max_response_bytes, 2 * 1024 * 1024),
-            request_gate=request_gate.limit,
         )
         try:
             return _test_response("pt_site", await probe.probe())
@@ -214,11 +206,6 @@ async def test_pt_site_configuration(
         (host,),
         resolve_timeout=effective.external_connect_timeout_seconds,
     )
-    request_gate = PostgresAdvisoryRequestGate(
-        SessionFactory,
-        "avistaz",
-        cooldown_seconds=effective.avistaz_min_interval_seconds,
-    )
     adapter = AvistaZAdapter(
         username=username,
         password=password,
@@ -228,8 +215,7 @@ async def test_pt_site_configuration(
         connect_timeout=effective.external_connect_timeout_seconds,
         read_timeout=effective.external_read_timeout_seconds,
         max_response_bytes=effective.external_max_response_bytes,
-        min_interval_seconds=0,
-        request_gate=request_gate.limit,
+        min_interval_seconds=effective.avistaz_min_interval_seconds,
         enable_torrent_fetch=False,
     )
     try:

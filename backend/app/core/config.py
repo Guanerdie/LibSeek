@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.models.enums import AuthRole
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     app_name: str = "UNIN 影视缺失资源编排系统"
     app_env: str = "development"
     api_prefix: str = "/api"
-    database_url: str = "postgresql+psycopg://unin:unin@postgres:5432/unin"
+    database_url: str = "sqlite+aiosqlite:///./unin.db"
     runtime_config_dir: Path = Field(
         default=Path("/var/lib/unin"),
         validation_alias=AliasChoices("UNIN_RUNTIME_CONFIG_DIR", "runtime_config_dir"),
@@ -51,7 +51,6 @@ class Settings(BaseSettings):
     nextfind_password: SecretStr | None = None
     nextfind_username_file: Path | None = None
     nextfind_password_file: Path | None = None
-    enable_tmdb_live: bool = False
     tmdb_base_url: str = "https://api.themoviedb.org"
     tmdb_access_token: SecretStr | None = None
     tmdb_access_token_file: Path | None = None
@@ -59,7 +58,6 @@ class Settings(BaseSettings):
     tmdb_cache_ttl_seconds: int = 24 * 60 * 60
     tmdb_cache_max_entries: int = 512
     tmdb_allow_future_episodes: bool = False
-    enable_avistaz_live_search: bool = False
     avistaz_base_url: str = "https://avistaz.to"
     avistaz_allowed_hosts: tuple[str, ...] = ("avistaz.to",)
     avistaz_username: SecretStr | None = None
@@ -74,7 +72,6 @@ class Settings(BaseSettings):
     pt_site_display_name: str = "AvistaZ"
     pt_site_runtime_configured: bool | None = None
     pt_site_runtime_supported: bool = True
-    enable_qb_read_only: bool = False
     qb_base_url: SecretStr | None = None
     qb_username: SecretStr | None = None
     qb_password: SecretStr | None = None
@@ -85,80 +82,15 @@ class Settings(BaseSettings):
     qb_allow_insecure_http: bool = False
     qb_target_category: str | None = None
     qb_target_save_path: str | None = None
-    qb_save_path_ref: str = "qb-default-save-path"
-    qb_allowed_save_paths: tuple[str, ...] = ()
     qb_plan_tags: tuple[str, ...] = ()
-    qb_target_instance_ref: str = "qb-primary"
-    avistaz_forbidden_qb_versions: tuple[str, ...] = ()
-    enable_download_execution_control_plane: bool = False
-    enable_download_executor: bool = False
-    enable_avistaz_torrent_fetch: bool = False
     enable_qb_write: bool = False
-    enable_download_monitor: bool = False
-    enable_automation_engine: bool = False
-    enable_media_import_control_plane: bool = False
-    media_import_target_root_refs: tuple[str, ...] = ()
-    media_import_preflight_max_age_seconds: int = Field(default=300, ge=30, le=3600)
-    execution_intent_default_ttl_seconds: int = Field(default=300, ge=30, le=3600)
-    execution_intent_max_ttl_seconds: int = Field(default=900, ge=30, le=3600)
-    download_execution_lease_seconds: int = Field(default=300, ge=30, le=3600)
-    download_execution_lease_renew_interval_seconds: float = Field(
-        default=60, ge=1, le=1800
-    )
-    download_execution_retry_base_seconds: int = Field(default=30, ge=1, le=3600)
-    download_execution_retry_max_seconds: int = Field(default=900, ge=1, le=86_400)
-    download_executor_poll_seconds: float = Field(default=2, ge=0.1, le=60)
-    download_executor_ready_ttl_seconds: int = Field(default=90, ge=15, le=300)
-    automation_preflight_ready_ttl_seconds: int = Field(default=90, ge=15, le=300)
-    download_monitor_interval_seconds: float = Field(default=15, ge=1, le=3600)
-    download_monitor_batch_size: int = Field(default=100, ge=1, le=500)
     torrent_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     torrent_max_files: int = Field(default=20_000, ge=1, le=100_000)
-    approval_default_ttl_minutes: int = 60
-    approval_max_ttl_minutes: int = 7 * 24 * 60
-    approval_preflight_max_age_seconds: int = 300
     preferred_resolutions: tuple[str, ...] = ("2160p", "1080p")
     preferred_sources: tuple[str, ...] = ("BluRay", "WEB-DL")
     preferred_audio: tuple[str, ...] = ()
     preferred_subtitles: tuple[str, ...] = ("Chinese", "中文")
     max_candidate_size_bytes: int | None = None
-    worker_poll_seconds: float = Field(default=2.0, ge=0.1, le=60)
-    worker_heartbeat_stale_seconds: int = Field(default=30, ge=5, le=3600)
-    job_max_attempts: int = Field(default=3, ge=1, le=20)
-    job_lease_seconds: int = Field(default=300, ge=30, le=3600)
-    job_lease_renew_interval_seconds: float = Field(default=60, ge=1, le=1800)
-
-    @model_validator(mode="after")
-    def validate_job_lease(self) -> Self:
-        if self.job_lease_renew_interval_seconds >= self.job_lease_seconds:
-            raise ValueError("job lease renewal interval must be shorter than the lease")
-        return self
-
-    @model_validator(mode="after")
-    def validate_execution_intent_ttl(self) -> Self:
-        if self.execution_intent_default_ttl_seconds > self.execution_intent_max_ttl_seconds:
-            raise ValueError("execution intent default TTL cannot exceed the maximum TTL")
-        if not self.qb_target_instance_ref.strip() or len(self.qb_target_instance_ref) > 180:
-            raise ValueError("qb target instance ref must be between 1 and 180 characters")
-        if (
-            self.download_execution_lease_renew_interval_seconds
-            >= self.download_execution_lease_seconds
-        ):
-            raise ValueError("download execution lease renewal must be shorter than the lease")
-        if self.download_execution_retry_base_seconds > self.download_execution_retry_max_seconds:
-            raise ValueError("download execution retry base cannot exceed retry maximum")
-        return self
-
-    @property
-    def download_executor_enabled(self) -> bool:
-        return all(
-            (
-                self.enable_download_executor,
-                self.enable_avistaz_torrent_fetch,
-                self.enable_qb_write,
-            )
-        )
-
     @field_validator(
         "allowed_external_hosts",
         "nextfind_allowed_hosts",
@@ -177,10 +109,7 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "qb_allowed_save_paths",
         "qb_plan_tags",
-        "avistaz_forbidden_qb_versions",
-        "media_import_target_root_refs",
         mode="before",
     )
     @classmethod
@@ -309,7 +238,6 @@ class Settings(BaseSettings):
             self.pt_site_architecture == "avistaz"
             and self.pt_site_runtime_supported
             and self.pt_site_configured
-            and self.enable_avistaz_live_search
         )
 
     @property

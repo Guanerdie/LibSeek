@@ -4,32 +4,17 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.routes import (
-    adapters,
-    approvals,
-    auth,
-    automation,
-    configuration,
-    discovery,
-    download_batches,
-    downloaders,
-    executions,
-    health,
-    jobs,
-    media,
-    media_imports,
-    pt_sites,
-    workflow,
-)
+from app.api.routes import auth, configuration, health
 from app.core.config import get_settings
 from app.core.security import sanitize_details
 from app.errors import AppError
 from app.schemas.common import ErrorResponse
+from app.simple import routes as daily
 
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    version="0.8.0",
+    version="0.9.0",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
@@ -76,15 +61,4 @@ def _configuration_no_store_headers(request: Request) -> dict[str, str] | None:
 app.include_router(health.router, prefix=settings.api_prefix)
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(configuration.router, prefix=settings.api_prefix)
-app.include_router(discovery.router, prefix=settings.api_prefix)
-app.include_router(download_batches.router, prefix=settings.api_prefix)
-app.include_router(media.router, prefix=settings.api_prefix)
-app.include_router(adapters.router, prefix=settings.api_prefix)
-app.include_router(workflow.router, prefix=settings.api_prefix)
-app.include_router(approvals.router, prefix=settings.api_prefix)
-app.include_router(automation.router, prefix=settings.api_prefix)
-app.include_router(downloaders.router, prefix=settings.api_prefix)
-app.include_router(executions.router, prefix=settings.api_prefix)
-app.include_router(jobs.router, prefix=settings.api_prefix)
-app.include_router(media_imports.router, prefix=settings.api_prefix)
-app.include_router(pt_sites.router, prefix=settings.api_prefix)
+app.include_router(daily.router, prefix=settings.api_prefix)

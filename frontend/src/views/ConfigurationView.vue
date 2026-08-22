@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import { ApiError } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { useConfigurationStore } from '../stores/configuration'
-import { useSystemStore } from '../stores/system'
 import type {
   AvistaZConfigurationSnapshot,
   ConfigurationSection,
@@ -22,7 +20,6 @@ import { formatShanghai } from '../utils/format'
 
 const auth = useAuthStore()
 const store = useConfigurationStore()
-const system = useSystemStore()
 
 const fallbackPtArchitectures: PtSiteArchitectureOption[] = [
   {
@@ -529,7 +526,6 @@ watch(
   },
 )
 void store.refresh()
-void system.refresh()
 </script>
 
 <template>
@@ -649,8 +645,8 @@ void system.refresh()
           <label><span>Web 地址</span><input v-model="form.qbUrl" name="qb_url" type="url" maxlength="2048" placeholder="https://qb.example.internal" required /></label>
           <label><span>用户名</span><input v-model="form.qbUsername" name="qb_username" maxlength="120" required /></label>
           <label><span>密码</span><input v-model="qbPassword" name="qb_password" type="password" autocomplete="new-password" :placeholder="secretPlaceholder(store.data.qbittorrent.configured)" :required="!store.data.qbittorrent.configured || qbIdentityChanged" maxlength="8192" /></label>
-          <label><span>保存路径</span><input v-model="form.qbSavePath" name="qb_save_path" maxlength="2048" /></label>
-          <label><span>分类（可选）</span><input v-model="form.qbCategory" name="qb_category" maxlength="180" /></label>
+          <label><span>保存路径</span><input v-model="form.qbSavePath" name="qb_save_path" maxlength="2048" required /></label>
+          <label><span>分类</span><input v-model="form.qbCategory" name="qb_category" maxlength="180" required /></label>
           <label class="configuration-checkbox"><input v-model="form.qbAllowInsecureHttp" name="qb_allow_http" type="checkbox" /><span>允许受信内网使用 HTTP 明文连接</span></label>
         </div>
         <div v-if="feedback.qbittorrent" :class="['configuration-message', feedback.qbittorrent.status]" :role="feedback.qbittorrent.status === 'error' ? 'alert' : 'status'">
@@ -665,42 +661,5 @@ void system.refresh()
         </div>
       </form>
     </div>
-
-    <template v-if="system.data">
-      <section class="configuration-band" aria-labelledby="runtime-status-title">
-        <div class="panel-title"><span class="eyebrow">RUNTIME STATUS</span><h2 id="runtime-status-title">运行状态</h2></div>
-        <div class="status-grid compact-status-grid">
-          <article v-for="(component, name) in { API: system.data.api, Worker: system.data.worker, PostgreSQL: system.data.postgres }" :key="name" class="status-card">
-            <span class="health-dot" :class="component.healthy ? 'healthy' : 'unhealthy'"></span>
-            <strong>{{ name }}</strong><p>{{ component.message }}</p><small>检查于 {{ formatShanghai(component.checked_at) }}</small>
-          </article>
-        </div>
-      </section>
-
-      <section class="configuration-band" aria-labelledby="download-gates-title">
-        <div class="panel-title"><span class="eyebrow">DOWNLOAD SAFETY GATES</span><h2 id="download-gates-title">下载执行门禁</h2><p>连接配置不会开启取种、写入 qBittorrent、下载监控或自动执行。</p></div>
-        <div
-          v-for="gate in [
-            ['人工执行控制面', system.data.download_control_plane_enabled],
-            ['下载执行器', system.data.download_executor_enabled],
-            ['PT 站点取种', system.data.avistaz_torrent_fetch_enabled],
-            ['qBittorrent 写入', system.data.qb_write_enabled],
-            ['下载监控', system.data.download_monitor_enabled],
-            ['自动化引擎', system.data.automation_engine_enabled],
-          ]"
-          :key="String(gate[0])"
-          class="config-row"
-        >
-          <div><strong>{{ gate[0] }}</strong><p>{{ gate[1] ? '服务端开关已启用' : '默认安全关闭' }}</p></div>
-          <span :class="['config-state', gate[1] ? 'configured' : 'disabled']">{{ gate[1] ? '已启用' : '关闭' }}</span>
-        </div>
-      </section>
-    </template>
-
-    <nav class="configuration-links" aria-label="配置详情">
-      <RouterLink to="/adapters"><strong>适配器能力</strong><small>查看站点与元数据适配器声明</small></RouterLink>
-      <RouterLink to="/automation"><strong>自动化策略</strong><small>查看当前策略与安全闸门</small></RouterLink>
-      <RouterLink to="/qbittorrent"><strong>qBittorrent 状态</strong><small>查看只读连接与任务状态</small></RouterLink>
-    </nav>
   </section>
 </template>

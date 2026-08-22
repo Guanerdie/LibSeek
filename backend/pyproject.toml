@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unin-media-orchestrator"
-version = "0.8.0"
-description = "Secure media discovery, approval, download execution, monitoring, and plan-only import orchestration"
+version = "0.9.0"
+description = "Daily missing-media discovery, release selection, and qBittorrent submission"
 requires-python = ">=3.12"
 dependencies = [
+  "aiosqlite>=0.20,<1",
   "alembic>=1.14,<2",
   "bencodepy>=0.9.5,<1",
   "beautifulsoup4>=4.12,<5",
@@ -22,7 +23,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "aiosqlite>=0.20,<1",
   "mypy>=1.14,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<1",

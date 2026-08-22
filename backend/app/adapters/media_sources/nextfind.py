@@ -563,28 +563,6 @@ class NextFindAdapter(MediaSourceAdapter):
                 await self.retry_sleep(0.25 * (2**attempt))
         raise RuntimeError("unreachable")
 
-    async def read_first_discover_page_for_contract_probe(self) -> tuple[str, bytes]:
-        """Read only the first discover page for the manual schema contract probe."""
-        if not self._authenticated:
-            await self.authenticate(allow_redirects=False, retry_attempts=1)
-        params: dict[str, str | int] = {
-            "status": "未入库",
-            "page": 1,
-            "page_size": 100,
-            "sort": "updated_at",
-        }
-        async with self._open_response(
-            "GET",
-            "/api/discover",
-            params=params,
-            allow_redirects=False,
-        ) as response:
-            self._raise_for_status(response)
-            self._require_json_content(response)
-            content_type = response.headers.get("content-type", "").lower()
-            payload_bytes = await self._read_limited(response)
-        return content_type, payload_bytes
-
     async def list_missing_media(self) -> MediaDiscoveryResult:
         merged: dict[tuple[str, str, int | str], MediaItemData] = {}
         all_warnings: list[DiscoveryWarning] = []

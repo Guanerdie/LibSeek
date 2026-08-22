@@ -1,13 +1,8 @@
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.adapters.base import ReadOnlyDownloaderAdapter
-from app.adapters.downloaders import QbittorrentReadOnlyAdapter
-from app.adapters.pt_sites.catalog import PtSiteCatalog, build_pt_site_catalog
 from app.core.auth import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -27,14 +22,6 @@ from app.models.enums import AuthRole
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
-
-
-def get_pt_site_catalog(settings: SettingsDep) -> PtSiteCatalog:
-    return build_pt_site_catalog(settings)
-
-
-PtCatalog = Annotated[PtSiteCatalog, Depends(get_pt_site_catalog)]
-
 
 def require_auth_material(settings: Settings) -> AuthMaterial:
     if legacy_auth_fields_present(settings):
@@ -183,38 +170,3 @@ ViewerPrincipal = Annotated[Principal, Depends(get_viewer_principal)]
 OperatorPrincipal = Annotated[Principal, Depends(get_operator_principal)]
 AdminPrincipal = Annotated[Principal, Depends(get_admin_principal)]
 AuthenticatedMutationPrincipal = Annotated[Principal, Depends(get_authenticated_mutation_principal)]
-
-
-@asynccontextmanager
-async def open_qb_adapter(
-    settings: Settings | None = None,
-) -> AsyncIterator[ReadOnlyDownloaderAdapter]:
-    effective_settings = settings or get_settings()
-    if not effective_settings.enable_qb_read_only:
-        raise AppError("QB_READ_ONLY_DISABLED", "qBittorrent 只读连接默认关闭", status_code=409)
-    credentials = effective_settings.qb_credentials()
-    if credentials is None or not effective_settings.qb_allowed_hosts:
-        raise AppError("QB_NOT_CONFIGURED", "qBittorrent 运行时 Secret 未配置", status_code=409)
-    base_url, username, password = credentials
-    adapter = QbittorrentReadOnlyAdapter(
-        base_url=base_url,
-        username=username,
-        password=password,
-        allowed_hosts=effective_settings.qb_allowed_hosts,
-        allow_insecure_http=effective_settings.qb_allow_insecure_http,
-        connect_timeout=effective_settings.external_connect_timeout_seconds,
-        read_timeout=effective_settings.external_read_timeout_seconds,
-        max_response_bytes=effective_settings.external_max_response_bytes,
-    )
-    try:
-        yield adapter
-    finally:
-        await adapter.aclose()
-
-
-async def get_qb_adapter() -> AsyncIterator[ReadOnlyDownloaderAdapter]:
-    async with open_qb_adapter() as adapter:
-        yield adapter
-
-
-QbAdapter = Annotated[ReadOnlyDownloaderAdapter, Depends(get_qb_adapter)]

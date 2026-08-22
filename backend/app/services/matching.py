@@ -3,11 +3,17 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from app.core.pt_site_rules import effective_hnr_rule
-from app.models.entities import MediaItem
 from app.models.enums import MediaType
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
+
+
+class MediaForScoring(Protocol):
+    media_type: MediaType
+    title: str
+    year: int | None
 
 
 @dataclass(frozen=True)
@@ -28,7 +34,7 @@ class MetadataMatchScore:
 
 
 def score_metadata_match(
-    media: MediaItem, candidate: MetadataRecord, *, expected_tmdb_id: int | None
+    media: MediaForScoring, candidate: MetadataRecord, *, expected_tmdb_id: int | None
 ) -> MetadataMatchScore:
     score = 0.0
     reasons: list[str] = []

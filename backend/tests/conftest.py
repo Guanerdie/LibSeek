@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import AuditEvent, DiscoveryRun, Job, MediaItem, WorkerHeartbeat  # noqa: F401
+from app.simple import models as simplified_models  # noqa: F401
 
 
 @pytest_asyncio.fixture
@@ -22,4 +22,3 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
-

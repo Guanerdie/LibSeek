@@ -72,8 +72,8 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
             adapter_type="downloader",
             version="1.0",
             enabled=True,
-            mode="LIVE_WRITE_GATED" if self.enable_write else "WRITE_DISABLED",
-            description="受执行审批和幂等检查保护的 qBittorrent 添加能力",
+            mode="LIVE_WRITE" if self.enable_write else "WRITE_DISABLED",
+            description="提交经过校验且已查重的 torrent 到 qBittorrent",
             capabilities={
                 "login": True,
                 "list_torrents": True,

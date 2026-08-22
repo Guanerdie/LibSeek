@@ -10,14 +10,7 @@ import respx
 from app.adapters.pt_sites.avistaz_live import AvistaZAdapter
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.schemas.adapters import (
-    MetadataRecord,
-    PtSearchMode,
-    TorrentCandidate,
-    TorrentSearchRequest,
-)
-from app.schemas.entities import TorrentSearchCreateRequest
-from app.workers.processor import JobProcessor
+from app.schemas.adapters import TorrentSearchRequest
 
 BASE = "https://avistaz.to"
 
@@ -264,90 +257,6 @@ async def test_jackett_data_envelope_and_real_field_names_are_normalized() -> No
     await avistaz.aclose()
 
 
-@pytest.mark.asyncio
-async def test_text_search_retries_without_year_after_empty_result() -> None:
-    requests: list[TorrentSearchRequest] = []
-    expected = TorrentCandidate(
-        site_id="avistaz",
-        torrent_id="272233",
-        release_title="The Best Moment To Quit Your Job S01 2017 1080p WEB-DL",
-        details_ref="avistaz:details:test",
-        media_type=MediaType.TV,
-        tmdb_id=78111,
-    )
-
-    class RecordingAdapter:
-        async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]:
-            requests.append(request)
-            return [expected] if request.search == "The Best Moment To Quit Your Job" else []
-
-    metadata = MetadataRecord(
-        tmdb_id=78111,
-        imdb_id="tt33383615",
-        media_type=MediaType.TV,
-        title="离职的最佳时机",
-        chinese_title="离职的最佳时机",
-        english_title="The Best Moment To Quit Your Job",
-        original_title="회사를 관두는 최고의 순간",
-        year=2017,
-        confidence=1,
-    )
-    processor = object.__new__(JobProcessor)
-    results, strategy_log = await processor._search_with_fallbacks(
-        RecordingAdapter(),  # type: ignore[arg-type]
-        metadata,
-        TorrentSearchCreateRequest(
-            site_id="avistaz",
-            preferred_resolutions=["2160p", "1080p"],
-        ),
-        search_modes=(PtSearchMode.TMDB_ID, PtSearchMode.IMDB_ID, PtSearchMode.TEXT),
-    )
-
-    assert results == [expected]
-    assert [request.search for request in requests] == [
-        None,
-        None,
-        "The Best Moment To Quit Your Job 2017",
-        "The Best Moment To Quit Your Job",
-    ]
-    assert strategy_log[-2:] == [
-        {"strategy": "ENGLISH_TITLE_YEAR", "candidate_count": 0},
-        {"strategy": "ENGLISH_TITLE", "candidate_count": 1},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_text_search_falls_back_to_canonical_title() -> None:
-    requests: list[TorrentSearchRequest] = []
-
-    class RecordingAdapter:
-        async def search(self, request: TorrentSearchRequest) -> list[TorrentCandidate]:
-            requests.append(request)
-            return []
-
-    metadata = MetadataRecord(
-        tmdb_id=123,
-        media_type=MediaType.MOVIE,
-        title="Only Title",
-        year=2026,
-        confidence=1,
-    )
-    processor = object.__new__(JobProcessor)
-    results, strategy_log = await processor._search_with_fallbacks(
-        RecordingAdapter(),  # type: ignore[arg-type]
-        metadata,
-        TorrentSearchCreateRequest(site_id="avistaz"),
-        search_modes=(PtSearchMode.TEXT,),
-    )
-
-    assert results == []
-    assert [request.search for request in requests] == ["Only Title 2026", "Only Title"]
-    assert strategy_log == [
-        {"strategy": "CANONICAL_TITLE_YEAR", "candidate_count": 0},
-        {"strategy": "CANONICAL_TITLE", "candidate_count": 0},
-    ]
-
-
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -565,7 +474,7 @@ async def test_429_honors_retry_after_before_retrying() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_final_429_preserves_bounded_retry_after_for_job_rescheduling() -> None:
+async def test_final_429_preserves_bounded_retry_after() -> None:
     delays: list[float] = []
 
     async def record_sleep(seconds: float) -> None:
@@ -593,7 +502,6 @@ async def test_final_429_preserves_bounded_retry_after_for_job_rescheduling() ->
     assert caught.value.error_code == "AVISTAZ_RATE_LIMITED"
     assert caught.value.retryable is True
     assert caught.value.details == {"retry_after_seconds": 29.0}
-    assert JobProcessor._retry_delay_seconds(caught.value, attempts=1) == 29.0
 
 
 @pytest.mark.parametrize(

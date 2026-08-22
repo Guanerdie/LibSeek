@@ -25,7 +25,7 @@ def test_example_dotenv_uses_supported_comma_separated_and_empty_values(
         "avistaz.to",
     )
     assert settings.nextfind_allowed_hosts == ("nextfind.example",)
-    assert settings.media_import_target_root_refs == ()
+    assert settings.qb_plan_tags == ()
     assert settings.max_candidate_size_bytes is None
     assert settings.auth_material() is None
     assert settings.tmdb_configured is False
@@ -37,17 +37,10 @@ def test_tuple_settings_parse_compose_style_environment(
     _clear_settings_environment(monkeypatch)
     monkeypatch.setenv("ALLOWED_EXTERNAL_HOSTS", "Example.COM, api.example.com")
     monkeypatch.setenv("NEXTFIND_ALLOWED_HOSTS", "NextFind.EXAMPLE.com")
-    monkeypatch.setenv(
-        "MEDIA_IMPORT_TARGET_ROOT_REFS", "library-movies, library-tv"
-    )
     monkeypatch.setenv("QB_PLAN_TAGS", "unin, imported")
 
     settings = Settings(_env_file=None)
 
     assert settings.allowed_external_hosts == ("example.com", "api.example.com")
     assert settings.nextfind_allowed_hosts == ("nextfind.example.com",)
-    assert settings.media_import_target_root_refs == (
-        "library-movies",
-        "library-tv",
-    )
     assert settings.qb_plan_tags == ("unin", "imported")

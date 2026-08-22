@@ -1,2 +1,2 @@
-"""External-system adapter contracts and phase-safe implementations."""
+"""Adapters for the four external systems used by the daily workflow."""
 

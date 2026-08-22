@@ -130,7 +130,7 @@ async def test_configuration_requires_admin_csrf_and_never_returns_secrets(
         "pid_configured": True,
         "configured": True,
         "runtime_supported": True,
-        "search_ready": False,
+        "search_ready": True,
     }
     assert body["pt_sites"] == {
         "avistaz": body["pt_site"],
@@ -445,17 +445,12 @@ async def test_qb_http_requires_explicit_opt_in(
     assert allowed.json()["qbittorrent"]["allow_insecure_http"] is True
 
 
-def test_runtime_configuration_derives_custom_hosts_without_enabling_external_access(
+def test_runtime_configuration_derives_custom_hosts_without_enabling_qb_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base = runtime_settings(
         tmp_path,
-        enable_download_execution_control_plane=False,
-        enable_download_executor=False,
-        enable_avistaz_torrent_fetch=False,
         enable_qb_write=False,
-        enable_download_monitor=False,
-        enable_automation_engine=False,
         allowed_external_hosts=("nextfind.example.test", "pt.example.test"),
     )
     runtime_store(base).save_configuration(complete_payload())
@@ -464,20 +459,12 @@ def test_runtime_configuration_derives_custom_hosts_without_enabling_external_ac
     assert effective.nextfind_allowed_hosts == ("nextfind.example.test",)
     assert effective.avistaz_allowed_hosts == ("pt.example.test",)
     assert effective.qb_allowed_hosts == ("qb.local",)
-    assert effective.enable_tmdb_live is False
-    assert effective.enable_avistaz_live_search is False
-    assert effective.enable_qb_read_only is False
-    assert effective.enable_download_execution_control_plane is False
-    assert effective.enable_download_executor is False
-    assert effective.enable_avistaz_torrent_fetch is False
     assert effective.enable_qb_write is False
-    assert effective.enable_download_monitor is False
-    assert effective.enable_automation_engine is False
 
     monkeypatch.setenv("UNIN_RUNTIME_CONFIG_DIR", str(tmp_path))
     reloaded = get_settings()
     assert reloaded.tmdb_token_value() == "tmdb-secret"
-    assert reloaded.enable_tmdb_live is False
+    assert reloaded.enable_qb_write is False
 
 
 def test_tampered_persisted_qb_url_is_rejected(tmp_path: Path) -> None:

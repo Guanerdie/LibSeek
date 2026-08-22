@@ -9,9 +9,8 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const primaryNavItems = [
-  { to: '/media', label: '待处理', icon: '▦' },
-  { to: '/download-jobs', label: '下载', icon: '↓' },
-  { to: '/download-batches', label: '批次', icon: '≡' },
+  { to: '/library', label: '缺失', icon: '▦' },
+  { to: '/downloads', label: '下载', icon: '↓' },
   { to: '/configuration', label: '设置', icon: '⚙' },
 ]
 
@@ -47,14 +46,13 @@ async function logout(): Promise<void> {
       </nav>
       <div class="phase-note">
         <span class="status-dot"></span>
-        <div><strong>人工确认</strong><small>默认工作模式</small></div>
+        <div><strong>日常模式</strong><small>发现 · 选择 · 下载</small></div>
       </div>
     </aside>
     <main class="main-content">
       <header class="topbar">
-        <div><span class="eyebrow">CONTROL PLANE</span><span class="divider">/</span> 本地管理端</div>
+        <div><span class="eyebrow">UNIN</span><span class="divider">/</span> 影视资源助手</div>
         <div class="topbar-actions">
-          <span class="safe-badge">高风险写操作需显式确认</span>
           <div v-if="auth.principal" class="session-summary">
             <span><strong>{{ auth.principal.username }}</strong><small>{{ auth.roleLabel }}</small></span>
             <button class="button secondary small" :disabled="auth.working" @click="logout">

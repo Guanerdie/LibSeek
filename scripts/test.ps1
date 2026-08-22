@@ -1,38 +1,30 @@
-$ErrorActionPreference = 'Stop'
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+[CmdletBinding()]
+param()
 
-function Invoke-NativeCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$Command,
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
+$projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Description failed with exit code $LASTEXITCODE"
-    }
-}
-
-Push-Location (Join-Path $ProjectRoot 'backend')
+Push-Location (Join-Path $projectRoot 'backend')
 try {
-    Invoke-NativeCommand { uv sync --extra dev } 'Backend dependency sync'
-    Invoke-NativeCommand { uv run pytest } 'Backend tests'
-    Invoke-NativeCommand { uv run ruff check . } 'Backend lint'
-    Invoke-NativeCommand { uv run mypy app } 'Backend type check'
-    Invoke-NativeCommand { uv run alembic upgrade head --sql | Out-Null } 'Alembic offline migration'
+    & uv run pytest -q --basetemp=.pytest-tmp-script
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & uv run ruff check app tests
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & uv run mypy app
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-finally { Pop-Location }
+finally {
+    Pop-Location
+}
 
-Push-Location (Join-Path $ProjectRoot 'frontend')
+Push-Location (Join-Path $projectRoot 'frontend')
 try {
-    Invoke-NativeCommand { npm.cmd ci } 'Frontend dependency install'
-    Invoke-NativeCommand { npm.cmd test } 'Frontend tests'
-    Invoke-NativeCommand { npm.cmd run build } 'Frontend build'
-    Invoke-NativeCommand { npm.cmd run lint } 'Frontend lint'
+    & npm test
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & npm run build
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & npm run lint
+    exit $LASTEXITCODE
 }
-finally { Pop-Location }
-
-& (Join-Path $PSScriptRoot 'verify-compose.ps1')
-& (Join-Path $PSScriptRoot 'verify-startup-gates.ps1')
+finally {
+    Pop-Location
+}

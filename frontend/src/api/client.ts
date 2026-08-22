@@ -1,53 +1,19 @@
 import type {
-  AdapterManifest,
-  AutomationDecision,
-  AutomationDecisionOutcome,
-  AutomationPolicy,
-  AutomationPolicyRevision,
-  AutomationStage,
-  ApprovalRequest,
   AuthSetupStatus,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
-  ConfirmDownloadResponse,
   CsrfResponse,
-  DiscoveryRun,
-  DownloadBatch,
-  DownloadBatchCreateRequest,
-  DownloadBatchSummary,
-  DownloadExecution,
-  DownloadExecutionStatus,
-  DownloadJob,
-  DownloadJobStatus,
-  DownloadJobSummary,
-  DownloadJobTimeline,
-  DownloadLaunchMode,
-  DownloadPlan,
-  ExecutionIntent,
-  IdentityReview,
+  DailyDownload,
+  DailyDownloadState,
+  DailyMedia,
+  DailyMediaDetail,
+  DailyMediaState,
+  DailySearch,
   LoginResponse,
-  MediaImportApproveRequest,
-  MediaImportCreateRequest,
-  MediaImportRequest,
-  MediaImportRequestSummary,
-  MediaImportStatus,
-  MediaItem,
-  MetadataMatch,
-  MetadataResolutionJob,
   Page,
   Principal,
-  PtSiteCatalog,
-  SystemStatus,
-  QbStatus,
-  QbTorrent,
-  ResolveAccepted,
-  TorrentCandidateResult,
-  TorrentSearchCreateRequest,
-  TorrentSearchRun,
-  CreateAutomationPolicyRevision,
 } from '../types'
-import type { MediaRegion } from '../utils/mediaRegions'
 
 interface ErrorPayload {
   error_code?: string
@@ -96,11 +62,7 @@ async function request<T>(
 
   let response: Response
   try {
-    response = await fetch(path, {
-      ...init,
-      headers,
-      credentials: 'same-origin',
-    })
+    response = await fetch(path, { ...init, headers, credentials: 'same-origin' })
   } catch (caught) {
     if (caught instanceof Error && caught.name === 'AbortError') throw caught
     throw new ApiError('NETWORK_ERROR', '无法连接后端服务', 0)
@@ -110,7 +72,7 @@ async function request<T>(
     try {
       payload = (await response.json()) as ErrorPayload
     } catch {
-      // Deliberately ignore untrusted non-JSON error bodies.
+      // Ignore untrusted non-JSON error bodies.
     }
     const error = new ApiError(
       payload.error_code ?? 'API_ERROR',
@@ -132,10 +94,6 @@ function queryString(values: Record<string, string | number | undefined>): strin
     if (value !== undefined && value !== '') params.set(key, String(value))
   }
   return params.toString()
-}
-
-export const systemApi = {
-  status: () => request<SystemStatus>('/api/system/status'),
 }
 
 export const authApi = {
@@ -184,381 +142,49 @@ export const configurationApi = {
     }),
 }
 
-export const mediaApi = {
-  list: (params: {
-    page: number
-    pageSize: number
-    mediaType?: string
-    confidence?: string
-    region?: MediaRegion
-    query?: string
-    discoveryStatus?: string
-  }, signal?: AbortSignal) =>
-    request<Page<MediaItem>>(
-      `/api/media?${queryString({
-        page: params.page,
-        page_size: params.pageSize,
-        media_type: params.mediaType,
-        identity_confidence: params.confidence,
-        region: params.region,
-        query: params.query,
-        discovery_status: params.discoveryStatus,
+export const dailyApi = {
+  syncMedia: () =>
+    request<{ created: number; updated: number }>('/api/library/sync', { method: 'POST' }),
+  media: (params: { page?: number; pageSize?: number; state?: DailyMediaState } = {}) =>
+    request<Page<DailyMedia>>(
+      `/api/library?${queryString({
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 30,
+        state: params.state,
       })}`,
-      { signal },
     ),
-  get: (id: string, signal?: AbortSignal) =>
-    request<MediaItem>(`/api/media/${encodeURIComponent(id)}`, { signal }),
-  resolve: (id: string) =>
-    request<ResolveAccepted>(
-      `/api/media/${encodeURIComponent(id)}/resolve`,
-      { method: 'POST' },
-    ),
-  resolveJob: (mediaId: string, jobId: string, signal?: AbortSignal) =>
-    request<MetadataResolutionJob>(
-      `/api/media/${encodeURIComponent(mediaId)}/resolve-jobs/${encodeURIComponent(jobId)}`,
-      { cache: 'no-store', signal },
-    ),
-  metadataCandidates: (id: string, signal?: AbortSignal) =>
-    request<MetadataMatch[]>(`/api/media/${encodeURIComponent(id)}/metadata-candidates`, {
-      signal,
-    }),
-  confirmIdentity: (id: string, metadataMatchId: string) =>
-    request<IdentityReview>(`/api/media/${encodeURIComponent(id)}/identity-confirmations`, {
+  mediaDetail: (mediaId: string) =>
+    request<DailyMediaDetail>(`/api/library/${encodeURIComponent(mediaId)}`),
+  identify: (mediaId: string, tmdbId?: number) =>
+    request<DailyMedia>(`/api/library/${encodeURIComponent(mediaId)}/identify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ metadata_match_id: metadataMatchId }),
+      body: JSON.stringify({ tmdb_id: tmdbId }),
     }),
-}
-
-export const downloadBatchApi = {
-  list: (page = 1, pageSize = 20) =>
-    request<Page<DownloadBatchSummary>>(
-      `/api/download-batches?${queryString({ page, page_size: pageSize })}`,
-    ),
-  get: (id: string, signal?: AbortSignal) =>
-    request<DownloadBatch>(`/api/download-batches/${encodeURIComponent(id)}`, { signal }),
-  create: (payload: DownloadBatchCreateRequest) =>
-    request<DownloadBatch>('/api/download-batches', {
+  createSearch: (mediaId: string, siteIds: string[]) =>
+    request<DailySearch>(`/api/library/${encodeURIComponent(mediaId)}/searches`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ site_ids: siteIds }),
     }),
-  retry: (batchId: string, itemId: string) =>
-    request<DownloadBatch>(
-      `/api/download-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/retry`,
-      { method: 'POST' },
-    ),
-}
-
-export const discoveryApi = {
-  list: (page: number, pageSize: number, signal?: AbortSignal) =>
-    request<Page<DiscoveryRun>>(
-      `/api/discovery-runs?${queryString({ page, page_size: pageSize })}`,
-      { signal },
-    ),
-  get: (id: string, signal?: AbortSignal) =>
-    request<DiscoveryRun>(`/api/discovery-runs/${encodeURIComponent(id)}`, { signal }),
-  create: () => request<DiscoveryRun>('/api/discovery-runs', { method: 'POST' }),
-}
-
-export const adapterApi = {
-  list: () => request<AdapterManifest[]>('/api/adapters'),
-}
-
-export const ptSiteApi = {
-  catalog: () => request<PtSiteCatalog>('/api/pt-sites/catalog'),
-}
-
-export const torrentApi = {
-  create: (
-    mediaId: string,
-    payload: TorrentSearchCreateRequest,
-  ) =>
-    request<TorrentSearchRun & { job_id: string; deduplicated: boolean }>(
-      `/api/media/${encodeURIComponent(mediaId)}/torrent-searches`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      },
-    ),
-  list: (mediaId: string) =>
-    request<TorrentSearchRun[]>(`/api/media/${encodeURIComponent(mediaId)}/torrent-searches`),
-  get: (searchId: string, signal?: AbortSignal) =>
-    request<TorrentSearchRun>(`/api/torrent-searches/${encodeURIComponent(searchId)}`, { signal }),
-  candidates: (searchId: string, signal?: AbortSignal) =>
-    request<TorrentCandidateResult[]>(
-      `/api/torrent-searches/${encodeURIComponent(searchId)}/candidates`,
-      { signal },
-    ),
-}
-
-export const approvalApi = {
-  confirmDownload: (
-    candidateId: string,
-    launchMode: DownloadLaunchMode,
-    idempotencyKey: string,
-    signal?: AbortSignal,
-  ) =>
-    request<ConfirmDownloadResponse>(
-      `/api/candidates/${encodeURIComponent(candidateId)}/confirm-download`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': idempotencyKey,
-        },
-        body: JSON.stringify({
-          acknowledges_hnr: true,
-          acknowledges_seeding: true,
-          acknowledges_plan_only: true,
-          launch_mode: launchMode,
-        }),
-        signal,
-      },
-    ),
-  create: (candidateId: string, expiresInMinutes: number) =>
-    request<ApprovalRequest>(
-      `/api/candidates/${encodeURIComponent(candidateId)}/approval-requests`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expires_in_minutes: expiresInMinutes }),
-      },
-    ),
-  list: (candidateId?: string) =>
-    request<ApprovalRequest[]>(
-      `/api/approval-requests?${queryString({ candidate_id: candidateId })}`,
-    ),
-  get: (approvalId: string) =>
-    request<ApprovalRequest>(`/api/approval-requests/${encodeURIComponent(approvalId)}`),
-  preflight: (approvalId: string) =>
-    request<ApprovalRequest>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/preflight`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      },
-    ),
-  approve: (
-    approvalId: string,
-    payload: {
-      acknowledges_hnr: boolean
-      acknowledges_seeding: boolean
-      acknowledges_plan_only: boolean
-    },
-  ) =>
-    request<ApprovalRequest>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/approve`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      },
-    ),
-  reject: (approvalId: string, reason?: string) =>
-    request<ApprovalRequest>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/reject`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason || null }),
-      },
-    ),
-  revoke: (approvalId: string, reason?: string) =>
-    request<ApprovalRequest>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/revoke`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason || null }),
-      },
-    ),
-  plan: (approvalId: string) =>
-    request<DownloadPlan>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/download-plan`,
-    ),
-}
-
-export const executionApi = {
-  createIntent: (
-    approvalId: string,
-    launchMode: DownloadLaunchMode,
-    expiresInSeconds?: number,
-  ) =>
-    request<ExecutionIntent>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/execution-intents`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          launch_mode: launchMode,
-          ...(expiresInSeconds === undefined ? {} : { expires_in_seconds: expiresInSeconds }),
-        }),
-      },
-    ),
-  execute: (
-    approvalId: string,
-    intentId: string,
-    nonce: string,
-    idempotencyKey: string,
-  ) =>
-    request<DownloadExecution>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/execute`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': idempotencyKey,
-        },
-        body: JSON.stringify({ intent_id: intentId, nonce }),
-      },
-    ),
-  forApproval: (approvalId: string) =>
-    request<DownloadExecution>(
-      `/api/approval-requests/${encodeURIComponent(approvalId)}/download-execution`,
-    ),
-  list: (params: {
-    page: number
-    pageSize: number
-    status?: DownloadExecutionStatus
-  }) =>
-    request<Page<DownloadExecution>>(
-      `/api/download-executions?${queryString({
-        page: params.page,
-        page_size: params.pageSize,
-        status: params.status,
-      })}`,
-    ),
-  get: (executionId: string) =>
-    request<DownloadExecution>(`/api/download-executions/${encodeURIComponent(executionId)}`),
-  downloadJob: (executionId: string, signal?: AbortSignal) =>
-    request<DownloadJob>(
-      `/api/download-executions/${encodeURIComponent(executionId)}/download-job`,
-      { signal },
-    ),
-  reconcile: (executionId: string, reason?: string) =>
-    request<DownloadExecution>(
-      `/api/download-executions/${encodeURIComponent(executionId)}/reconcile`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason?.trim() || null }),
-      },
-    ),
-}
-
-export const downloadJobApi = {
-  list: (params: { page: number; pageSize: number; status?: DownloadJobStatus }) =>
-    request<Page<DownloadJob>>(
-      `/api/download-jobs?${queryString({
-        page: params.page,
-        page_size: params.pageSize,
-        status: params.status,
-      })}`,
-    ),
-  get: (jobId: string) =>
-    request<DownloadJob>(`/api/download-jobs/${encodeURIComponent(jobId)}`),
-  summary: (jobId: string) =>
-    request<DownloadJobSummary>(`/api/download-jobs/${encodeURIComponent(jobId)}/summary`),
-  timeline: (jobId: string) =>
-    request<DownloadJobTimeline>(`/api/download-jobs/${encodeURIComponent(jobId)}/timeline`),
-}
-
-export const mediaImportApi = {
-  list: (params: {
-    page: number
-    pageSize: number
-    status?: MediaImportStatus
-    downloadJobId?: string
-  }) =>
-    request<Page<MediaImportRequestSummary>>(
-      `/api/media-import-requests?${queryString({
-        page: params.page,
-        page_size: params.pageSize,
-        status: params.status,
-        download_job_id: params.downloadJobId?.trim(),
-      })}`,
-    ),
-  get: (requestId: string) =>
-    request<MediaImportRequest>(
-      `/api/media-import-requests/${encodeURIComponent(requestId)}`,
-    ),
-  create: (payload: MediaImportCreateRequest) =>
-    request<MediaImportRequest>('/api/media-import-requests', {
+  search: (searchId: string) =>
+    request<DailySearch>(`/api/searches/${encodeURIComponent(searchId)}`),
+  downloadCandidate: (candidateId: string, confirmWarnings = false) =>
+    request<DailyDownload>(`/api/candidates/${encodeURIComponent(candidateId)}/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ confirm_warnings: confirmWarnings }),
     }),
-  approve: (requestId: string, payload: MediaImportApproveRequest) =>
-    request<MediaImportRequest>(
-      `/api/media-import-requests/${encodeURIComponent(requestId)}/approve`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      },
-    ),
-  reject: (requestId: string, reason?: string) =>
-    request<MediaImportRequest>(
-      `/api/media-import-requests/${encodeURIComponent(requestId)}/reject`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason?.trim() || null }),
-      },
-    ),
-  revoke: (requestId: string, reason?: string) =>
-    request<MediaImportRequest>(
-      `/api/media-import-requests/${encodeURIComponent(requestId)}/revoke`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason?.trim() || null }),
-      },
-    ),
-}
-
-export const automationApi = {
-  policy: () => request<AutomationPolicy>('/api/automation/policy'),
-  revisions: (params: { page: number; pageSize: number }) =>
-    request<Page<AutomationPolicyRevision>>(
-      `/api/automation/policy-revisions?${queryString({
-        page: params.page,
-        page_size: params.pageSize,
+  downloads: (
+    params: { page?: number; pageSize?: number; state?: DailyDownloadState } = {},
+  ) =>
+    request<Page<DailyDownload>>(
+      `/api/downloads?${queryString({
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 30,
+        state: params.state,
       })}`,
     ),
-  publishRevision: (payload: CreateAutomationPolicyRevision) =>
-    request<AutomationPolicy>('/api/automation/policy-revisions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }),
-  decisions: (params: {
-    page: number
-    pageSize: number
-    stage?: AutomationStage
-    outcome?: AutomationDecisionOutcome
-    mediaItemId?: string
-  }) =>
-    request<Page<AutomationDecision>>(
-      `/api/automation/decisions?${queryString({
-        page: params.page,
-        page_size: params.pageSize,
-        stage: params.stage,
-        outcome: params.outcome,
-        media_item_id: params.mediaItemId?.trim(),
-      })}`,
-    ),
-  decision: (decisionId: string) =>
-    request<AutomationDecision>(
-      `/api/automation/decisions/${encodeURIComponent(decisionId)}`,
-    ),
-}
-
-export const qbApi = {
-  status: () => request<QbStatus>('/api/downloaders/qbittorrent/status'),
-  torrents: () =>
-    request<{ items: QbTorrent[]; total: number }>('/api/downloaders/qbittorrent/torrents'),
+  syncDownloads: () =>
+    request<{ created: number; updated: number }>('/api/downloads/sync', { method: 'POST' }),
 }

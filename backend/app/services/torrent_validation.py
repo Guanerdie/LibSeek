@@ -120,7 +120,7 @@ def validate_torrent(
         ):
             raise AppError(
                 "TORRENT_INFO_HASH_MISMATCH",
-                "种子文件与已审批候选的 info hash 不一致",
+                "种子文件与已选择候选的 info hash 不一致",
                 status_code=409,
             )
     return result

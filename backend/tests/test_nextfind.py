@@ -8,11 +8,9 @@ import pytest
 import respx
 
 from app.adapters.media_sources.nextfind import NextFindAdapter, NextFindRawItem
-from app.core.config import Settings
 from app.errors import AppError
 from app.models.enums import IdentityConfidence, MediaType
 from app.schemas.adapters import LibraryDetails
-from app.workers import main as worker_main
 
 BASE_URL = "https://nextfind.example"
 
@@ -261,7 +259,7 @@ async def test_probe_accepts_real_ndjson_data_and_control_segment_shape(
     ),
 )
 @respx.mock
-async def test_probe_rejects_ndjson_without_a_strict_data_contract(
+async def test_probe_rejects_malformed_ndjson(
     adapter: NextFindAdapter, content: bytes
 ) -> None:
     respx.post(f"{BASE_URL}/api/admin/login").mock(
@@ -354,27 +352,6 @@ async def test_persistent_login_404_is_retryable_after_bounded_retries(
     assert caught.value.error_code == "UPSTREAM_AUTH_UNAVAILABLE"
     assert caught.value.retryable is True
     assert adapter._authenticated is False
-    await adapter.aclose()
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_contract_probe_authentication_keeps_single_login_request_contract(
-    adapter: NextFindAdapter,
-) -> None:
-    login = respx.post(f"{BASE_URL}/api/admin/login").mock(
-        return_value=httpx.Response(404)
-    )
-    discover = respx.get(f"{BASE_URL}/api/discover").mock(
-        return_value=httpx.Response(200, json={"data": []})
-    )
-
-    with pytest.raises(AppError) as caught:
-        await adapter.read_first_discover_page_for_contract_probe()
-
-    assert login.call_count == 1
-    assert discover.call_count == 0
-    assert caught.value.error_code == "UPSTREAM_AUTH_UNAVAILABLE"
     await adapter.aclose()
 
 
@@ -1553,97 +1530,6 @@ async def test_login_body_is_not_forwarded_across_origins(redirect_url: str) -> 
     assert caught.value.error_code == "UPSTREAM_CROSS_ORIGIN_REDIRECT"
     assert not redirected.called
     await broad_adapter.aclose()
-
-
-@pytest.mark.asyncio
-async def test_worker_factory_scopes_nextfind_to_base_url_host(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = Settings(
-        nextfind_base_url=BASE_URL,
-        nextfind_username="reader",
-        nextfind_password="super-secret",
-        allowed_external_hosts=(
-            "nextfind.example",
-            "api.themoviedb.org",
-            "avistaz.to",
-        ),
-    )
-    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
-
-    built_adapter = worker_main.build_nextfind_adapter()
-
-    assert built_adapter.allowed_hosts == ("nextfind.example",)
-    await built_adapter.aclose()
-
-
-@pytest.mark.asyncio
-async def test_worker_factory_uses_the_runtime_configured_nextfind_host() -> None:
-    settings = Settings(
-        nextfind_base_url="https://nextfind.example.test",
-        nextfind_allowed_hosts=("nextfind.example.test",),
-        nextfind_username="reader",
-        nextfind_password="super-secret",
-        allowed_external_hosts=("nextfind.example.test",),
-    )
-
-    built_adapter = worker_main.build_nextfind_adapter(settings)
-
-    assert built_adapter.base_url == "https://nextfind.example.test"
-    assert built_adapter.allowed_hosts == ("nextfind.example.test",)
-    await built_adapter.aclose()
-
-
-@pytest.mark.asyncio
-async def test_worker_factory_uses_the_runtime_configured_avistaz_host() -> None:
-    settings = Settings(
-        enable_avistaz_live_search=True,
-        avistaz_base_url="https://pt.example.test",
-        avistaz_allowed_hosts=("pt.example.test",),
-        avistaz_username="reader",
-        avistaz_password="super-secret",
-        avistaz_pid="pid-secret",
-        allowed_external_hosts=("pt.example.test",),
-    )
-
-    built_adapter = worker_main.build_avistaz_adapter(settings)
-
-    assert built_adapter.http.base_url == "https://pt.example.test"
-    assert built_adapter.http.allowed_hosts == ("pt.example.test",)
-    await built_adapter.aclose()
-
-
-@pytest.mark.parametrize(
-    "borrowed_url",
-    ("https://api.themoviedb.org", "https://avistaz.to"),
-)
-def test_worker_factory_rejects_borrowing_a_global_host_for_nextfind(
-    monkeypatch: pytest.MonkeyPatch,
-    borrowed_url: str,
-) -> None:
-    private_username = "private-nextfind-user"
-    private_password = "PRIVATE-NEXTFIND-PASSWORD"
-    settings = Settings(
-        nextfind_base_url=borrowed_url,
-        nextfind_allowed_hosts=("nextfind.example",),
-        nextfind_username=private_username,
-        nextfind_password=private_password,
-        allowed_external_hosts=(
-            "nextfind.example",
-            "api.themoviedb.org",
-            "avistaz.to",
-        ),
-    )
-    monkeypatch.setattr(worker_main, "get_settings", lambda: settings)
-
-    with pytest.raises(AppError) as caught:
-        worker_main.build_nextfind_adapter()
-
-    assert caught.value.error_code == "EXTERNAL_HOST_NOT_ALLOWED"
-    serialized_error = f"{caught.value.message} {caught.value.details}"
-    assert borrowed_url.partition("://")[2] not in serialized_error
-    assert private_username not in serialized_error
-    assert private_password not in serialized_error
 
 
 @pytest.mark.asyncio

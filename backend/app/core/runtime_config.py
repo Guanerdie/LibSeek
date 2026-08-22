@@ -149,7 +149,6 @@ class RuntimeConfiguration:
             values["qb_password_file"] = None
         if self.qb_save_path is not None:
             values["qb_target_save_path"] = self.qb_save_path or None
-            values["qb_allowed_save_paths"] = (self.qb_save_path,) if self.qb_save_path else ()
         if self.qb_category is not None:
             values["qb_target_category"] = self.qb_category or None
         if self.qb_allow_insecure_http is not None:
