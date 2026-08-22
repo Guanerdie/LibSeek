@@ -68,6 +68,9 @@ class RuntimeConfiguration:
     nextfind_username: str | None = None
     nextfind_password: str | None = field(default=None, repr=False)
     tmdb_token: str | None = field(default=None, repr=False)
+    outbound_proxy_url: str | None = None
+    outbound_proxy_username: str | None = None
+    outbound_proxy_password: str | None = field(default=None, repr=False)
     pt_site_architecture: Literal["avistaz", "nexusphp"] | None = None
     avistaz_site: RuntimePtSite | None = None
     nexusphp_site: RuntimePtSite | None = None
@@ -114,6 +117,13 @@ class RuntimeConfiguration:
         if self.tmdb_token is not None:
             values["tmdb_access_token"] = self.tmdb_token
             values["tmdb_access_token_file"] = None
+        has_runtime_proxy_identity = (
+            self.outbound_proxy_url is not None or self.outbound_proxy_username is not None
+        )
+        if has_runtime_proxy_identity:
+            values["outbound_proxy_url"] = self.outbound_proxy_url or None
+            values["outbound_proxy_username"] = self.outbound_proxy_username
+            values["outbound_proxy_password"] = self.outbound_proxy_password
         active_site = self.pt_site
         if active_site is not None:
             values["pt_site_architecture"] = active_site.architecture
@@ -325,11 +335,12 @@ def _effective_values(settings: Settings, runtime: RuntimeConfiguration) -> dict
 def _merge_configuration(
     current: RuntimeConfiguration, updates: Mapping[str, Mapping[str, object]]
 ) -> RuntimeConfiguration:
-    allowed_groups = {"nextfind", "tmdb", "pt_site", "qbittorrent"}
+    allowed_groups = {"nextfind", "tmdb", "outbound_proxy", "pt_site", "qbittorrent"}
     if set(updates) - allowed_groups:
         raise RuntimeConfigError("runtime integration update is invalid")
     nextfind = updates.get("nextfind", {})
     tmdb = updates.get("tmdb", {})
+    proxy = updates.get("outbound_proxy", {})
     qb = updates.get("qbittorrent", {})
     try:
         nextfind_base_url = _optional_public_update(
@@ -350,6 +361,28 @@ def _merge_configuration(
             current.nextfind_password if same_nextfind_identity else None,
         )
         tmdb_token = _optional_secret_update(tmdb, "token", current.tmdb_token)
+        proxy_url = _optional_public_update(
+            proxy, "url", current.outbound_proxy_url, maximum=2048
+        )
+        if proxy_url:
+            proxy_url = _validate_proxy_origin(proxy_url)
+        proxy_username = _optional_public_update(
+            proxy, "username", current.outbound_proxy_username, maximum=120
+        )
+        same_proxy_identity = (
+            proxy_url == current.outbound_proxy_url
+            and proxy_username == current.outbound_proxy_username
+        )
+        proxy_password = _optional_secret_update(
+            proxy,
+            "password",
+            current.outbound_proxy_password if same_proxy_identity else None,
+        )
+        if not proxy_url:
+            proxy_username = None
+            proxy_password = None
+        elif bool(proxy_username) != bool(proxy_password):
+            raise ValueError
         pt_site_architecture, avistaz_site, nexusphp_site = _merge_pt_sites(
             current, updates.get("pt_site")
         )
@@ -372,6 +405,9 @@ def _merge_configuration(
         nextfind_username=nextfind_username,
         nextfind_password=nextfind_password,
         tmdb_token=tmdb_token,
+        outbound_proxy_url=proxy_url,
+        outbound_proxy_username=proxy_username,
+        outbound_proxy_password=proxy_password,
         pt_site_architecture=pt_site_architecture,
         avistaz_site=avistaz_site,
         nexusphp_site=nexusphp_site,
@@ -464,6 +500,26 @@ def _validate_https_origin(value: str) -> str:
     return value.rstrip("/")
 
 
+def _validate_proxy_origin(value: str) -> str:
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ValueError
+    return value.rstrip("/")
+
+
 def _url_host(value: str) -> str:
     validated = _validate_https_origin(value)
     host = urlsplit(validated).hostname
@@ -535,6 +591,11 @@ def _configuration_payload(configuration: RuntimeConfiguration) -> dict[str, obj
             "password": configuration.nextfind_password,
         },
         "tmdb": {"token": configuration.tmdb_token},
+        "outbound_proxy": {
+            "url": configuration.outbound_proxy_url,
+            "username": configuration.outbound_proxy_username,
+            "password": configuration.outbound_proxy_password,
+        },
         "pt_sites": {
             "active_architecture": configuration.pt_site_architecture,
             "avistaz": _pt_site_payload(configuration.avistaz_site),
@@ -572,6 +633,7 @@ def _configuration_from_payload(
 ) -> RuntimeConfiguration:
     nextfind = _mapping(payload.get("nextfind"))
     tmdb = _mapping(payload.get("tmdb"))
+    proxy = _mapping(payload.get("outbound_proxy", {}))
     qb = _mapping(payload.get("qbittorrent"))
     allow = qb.get("allow_insecure_http")
     if allow is not None and type(allow) is not bool:
@@ -583,6 +645,15 @@ def _configuration_from_payload(
         nextfind_base_url = _validate_https_origin(nextfind_base_url)
     qb_url = _stored_optional_string(qb.get("url"), 2048)
     _validate_qb_url(qb_url, allow_insecure_http=bool(allow))
+    proxy_url = _stored_optional_string(proxy.get("url"), 2048)
+    if proxy_url:
+        proxy_url = _validate_proxy_origin(proxy_url)
+    proxy_username = _stored_optional_string(proxy.get("username"), 120)
+    proxy_password = _stored_optional_string(proxy.get("password"), 8192)
+    if not proxy_url and (proxy_username is not None or proxy_password is not None):
+        raise ValueError
+    if proxy_url and bool(proxy_username) != bool(proxy_password):
+        raise ValueError
     pt_site_architecture: Literal["avistaz", "nexusphp"] | None
     if version == 1:
         avistaz_site = _v1_avistaz_site(payload, settings)
@@ -613,6 +684,9 @@ def _configuration_from_payload(
         nextfind_username=_stored_optional_string(nextfind.get("username"), 120),
         nextfind_password=_stored_optional_string(nextfind.get("password"), 8192),
         tmdb_token=_stored_optional_string(tmdb.get("token"), 8192),
+        outbound_proxy_url=proxy_url,
+        outbound_proxy_username=proxy_username,
+        outbound_proxy_password=proxy_password,
         pt_site_architecture=pt_site_architecture,
         avistaz_site=avistaz_site,
         nexusphp_site=nexusphp_site,

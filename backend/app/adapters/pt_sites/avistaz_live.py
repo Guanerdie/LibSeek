@@ -144,6 +144,7 @@ class AvistaZAdapter(PtSiteAdapter):
         base_url: str = "https://avistaz.to",
         allowed_hosts: tuple[str, ...] = ("avistaz.to",),
         transport: httpx.AsyncBaseTransport | None = None,
+        proxy: httpx.Proxy | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 30.0,
         max_response_bytes: int = 10 * 1024 * 1024,
@@ -166,6 +167,7 @@ class AvistaZAdapter(PtSiteAdapter):
             read_timeout=read_timeout,
             max_response_bytes=max_response_bytes,
             transport=transport,
+            proxy=proxy,
         )
         self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.sleep = sleep

@@ -62,6 +62,17 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .button.small { padding: 6px 10px; }
 .panel { padding: 18px; border: 1px solid var(--line); border-radius: 11px; background: linear-gradient(145deg, rgba(16,31,44,.92), rgba(10,22,32,.92)); box-shadow: 0 18px 60px rgba(0,0,0,.12); }
 
+.library-filters { display: grid; gap: 16px; margin-bottom: 22px; }
+.filter-heading, .filter-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.filter-heading > div { display: grid; gap: 5px; }
+.filter-heading strong { font-size: 15px; }
+.filter-grid { display: grid; grid-template-columns: minmax(180px, 2fr) repeat(4, minmax(120px, 1fr)); gap: 12px; }
+.filter-grid label { display: grid; gap: 7px; min-width: 0; color: var(--muted); font-size: 10px; }
+.filter-grid input, .filter-grid select { width: 100%; min-width: 0; height: 40px; padding: 0 11px; color: var(--text); border: 1px solid var(--line); border-radius: 7px; outline: none; background: #07131c; font-size: 12px; }
+.filter-grid input:focus, .filter-grid select:focus { border-color: #2f6e68; }
+.filter-grid input::placeholder { color: #536a7b; }
+.filter-actions { justify-content: flex-end; }
+
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .media-card, .candidate-card, .download-card { display: grid; gap: 16px; }
 .media-card-heading, .candidate-main, .download-heading, .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
@@ -104,10 +115,13 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .configuration-field-grid.three-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .configuration-field-grid.single-field { grid-template-columns: minmax(0, 1fr); max-width: 540px; }
 .configuration-field-grid label:not(.configuration-checkbox) { display: grid; gap: 7px; min-width: 0; color: var(--muted); font-size: 10px; }
+.configuration-field-grid label a { color: var(--accent); text-decoration: none; }
+.configuration-field-grid label a:hover { text-decoration: underline; }
 .configuration-field-grid input:not([type=checkbox]), .configuration-field-grid select { width: 100%; min-width: 0; height: 42px; padding: 0 12px; color: var(--text); border: 1px solid var(--line); border-radius: 7px; outline: none; background: #07131c; font-size: 12px; }
 .configuration-field-grid input:not([type=checkbox]):focus, .configuration-field-grid select:focus { border-color: #2f6e68; }
 .configuration-field-grid input::placeholder { color: #536a7b; }
 .pt-dynamic-fields { margin-top: 14px; }
+.configuration-field-note { margin: 12px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .configuration-checkbox { display: flex; align-items: center; gap: 9px; min-height: 42px; padding-top: 17px; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .configuration-checkbox input { flex: 0 0 auto; width: 16px; height: 16px; accent-color: var(--accent); }
 .configuration-message { display: grid; gap: 5px; margin-top: 16px; padding: 11px 12px; border-left: 3px solid var(--accent); font-size: 10px; line-height: 1.45; }
@@ -142,6 +156,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   .phase-note { justify-content: center; }
   .phase-note div { display: none; }
   .configuration-field-grid.three-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 720px) {
@@ -157,7 +172,10 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   .page-header, .media-card-heading, .candidate-main, .download-heading, .section-heading { align-items: start; flex-direction: column; }
   .page-header .button, .media-card .button, .candidate-card .button { width: 100%; justify-content: center; }
   .compact-panel { flex-direction: column; }
-  .identity-prompt, .configuration-field-grid, .configuration-field-grid.three-fields { grid-template-columns: 1fr; }
+  .identity-prompt, .configuration-field-grid, .configuration-field-grid.three-fields, .filter-grid { grid-template-columns: 1fr; }
+  .filter-heading { align-items: flex-start; }
+  .filter-actions { align-items: stretch; flex-direction: column-reverse; }
+  .filter-actions .button { width: 100%; }
   .configuration-progress { justify-items: start; }
   .integration-config-section > header { align-items: flex-start; }
   .configuration-checkbox { padding-top: 0; }

@@ -16,13 +16,17 @@ const setupMode = computed(() => auth.adminInitialized === false)
 const formReady = computed(() => auth.adminInitialized !== null)
 const canSubmit = computed(() => {
   if (!formReady.value || auth.working || !username.value.trim() || !password.value) return false
-  return !setupMode.value || Boolean(passwordConfirmation.value)
+  return !setupMode.value || (password.value.length >= 6 && Boolean(passwordConfirmation.value))
 })
 
 async function submit(): Promise<void> {
   const normalizedUsername = username.value.trim()
   if (!normalizedUsername || !password.value) return
   validationError.value = null
+  if (setupMode.value && password.value.length < 6) {
+    validationError.value = '管理员密码至少需要 6 位'
+    return
+  }
   if (setupMode.value && password.value !== passwordConfirmation.value) {
     validationError.value = '两次输入的密码不一致'
     password.value = ''
@@ -53,7 +57,7 @@ async function submit(): Promise<void> {
       <div class="login-brand"><span class="brand-mark">U</span><div><strong>UNIN</strong><small>MEDIA ORCHESTRATOR</small></div></div>
       <span class="eyebrow">LOCAL CONTROL PLANE</span>
       <h1 id="login-title">{{ setupMode ? '创建管理员' : '登录本地管理端' }}</h1>
-      <p v-if="setupMode">首次使用只需创建一个本地管理员，随后在管理页面完成连接配置。</p>
+      <p v-if="setupMode">首次使用只需创建一个本地管理员，密码至少 6 位，随后在管理页面完成连接配置。</p>
       <p v-else-if="formReady">使用本地管理账号登录。凭据不会写入浏览器存储。</p>
       <p v-else>正在检查本机初始化状态…</p>
       <form v-if="formReady" @submit.prevent="submit">
@@ -74,6 +78,8 @@ async function submit(): Promise<void> {
             name="password"
             type="password"
             :autocomplete="setupMode ? 'new-password' : 'current-password'"
+            :minlength="setupMode ? 6 : undefined"
+            maxlength="1024"
             required
           />
         </label>
@@ -84,6 +90,8 @@ async function submit(): Promise<void> {
             name="password_confirmation"
             type="password"
             autocomplete="new-password"
+            minlength="6"
+            maxlength="1024"
             required
           />
         </label>

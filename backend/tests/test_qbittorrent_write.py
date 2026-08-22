@@ -379,6 +379,49 @@ async def test_missing_category_is_created_and_verified_before_add() -> None:
 
 
 @pytest.mark.asyncio
+async def test_default_save_path_is_omitted_from_category_and_torrent_requests() -> None:
+    torrent, info_hash = torrent_fixture()
+    category_created = False
+    create_form: dict[str, list[str]] = {}
+    add_body = b""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal category_created, create_form, add_body
+        if request.url.path == "/api/v2/auth/login":
+            return login_response()
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        if request.url.path == "/api/v2/app/webapiVersion":
+            return httpx.Response(200, text="2.11.4")
+        if request.url.path == "/api/v2/torrents/categories":
+            return categories_response("avistaz") if category_created else categories_response()
+        if request.url.path == "/api/v2/torrents/createCategory":
+            create_form = parse_qs(request.content.decode("utf-8"))
+            category_created = True
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            add_body = request.content
+            return httpx.Response(200, text="Ok.")
+        raise AssertionError(request.url.path)
+
+    client = adapter(httpx.MockTransport(handler))
+    try:
+        await client.authenticate()
+        result = await client.add_torrent(
+            torrent,
+            expected_info_hash=info_hash,
+            save_path=None,
+            category="avistaz",
+        )
+    finally:
+        await client.aclose()
+
+    assert result.outcome == "SUBMITTED"
+    assert create_form == {"category": ["avistaz"]}
+    assert b'name="savepath"' not in add_body
+
+
+@pytest.mark.asyncio
 async def test_category_creation_not_observed_prevents_add() -> None:
     torrent, info_hash = torrent_fixture()
     paths: list[str] = []

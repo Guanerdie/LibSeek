@@ -41,6 +41,8 @@ const fallbackPtArchitectures: PtSiteArchitectureOption[] = [
 const form = reactive({
   nextfindBaseUrl: 'https://nextfind.example',
   nextfindUsername: '',
+  proxyUrl: '',
+  proxyUsername: '',
   ptArchitecture: 'avistaz' as PtSiteArchitecture,
   avistazBaseUrl: 'https://avistaz.to',
   avistazUsername: '',
@@ -55,6 +57,7 @@ const form = reactive({
 })
 const nextfindPassword = ref('')
 const tmdbToken = ref('')
+const proxyPassword = ref('')
 const avistazPassword = ref('')
 const avistazPid = ref('')
 const nexusCookie = ref('')
@@ -77,6 +80,7 @@ const feedback = reactive<Partial<Record<ConfigurationSection, SectionFeedback>>
 const dirty = reactive<Record<ConfigurationSection, boolean>>({
   nextfind: false,
   tmdb: false,
+  outbound_proxy: false,
   pt_site: false,
   qbittorrent: false,
 })
@@ -151,6 +155,11 @@ const qbIdentityChanged = computed(
     form.qbUrl.trim() !== store.data?.qbittorrent.url ||
     form.qbUsername.trim() !== store.data?.qbittorrent.username,
 )
+const proxyIdentityChanged = computed(
+  () =>
+    form.proxyUrl.trim() !== store.data?.outbound_proxy.url ||
+    form.proxyUsername.trim() !== store.data?.outbound_proxy.username,
+)
 
 const configuredCount = computed(() => {
   if (!store.data) return 0
@@ -169,6 +178,8 @@ function applySnapshot(snapshot: ConfigurationSnapshot | null): void {
   hydrating = true
   form.nextfindBaseUrl = snapshot.nextfind.base_url
   form.nextfindUsername = snapshot.nextfind.username
+  form.proxyUrl = snapshot.outbound_proxy.url
+  form.proxyUsername = snapshot.outbound_proxy.username
   form.ptArchitecture =
     snapshot.pt_site?.architecture ?? snapshot.pt_site_architectures?.[0]?.architecture ?? 'avistaz'
   const avistaz =
@@ -206,6 +217,11 @@ function applySectionSnapshot(
     return
   }
   if (section === 'tmdb') return
+  if (section === 'outbound_proxy') {
+    form.proxyUrl = snapshot.outbound_proxy.url
+    form.proxyUsername = snapshot.outbound_proxy.username
+    return
+  }
   if (section === 'pt_site') {
     const site = snapshot.pt_site
     if (!site) return
@@ -274,6 +290,14 @@ function sectionPayload(section: ConfigurationSection): ConfigurationUpdateReque
   if (section === 'tmdb') {
     return { tmdb: tmdbToken.value ? { token: tmdbToken.value } : {} }
   }
+  if (section === 'outbound_proxy') {
+    const outboundProxy: NonNullable<ConfigurationUpdateRequest['outbound_proxy']> = {
+      url: form.proxyUrl.trim(),
+      username: form.proxyUsername.trim(),
+    }
+    if (proxyPassword.value) outboundProxy.password = proxyPassword.value
+    return { outbound_proxy: outboundProxy }
+  }
   if (section === 'pt_site') return { pt_site: ptSitePayload() }
   const qbittorrent: NonNullable<ConfigurationUpdateRequest['qbittorrent']> = {
       url: form.qbUrl.trim(),
@@ -289,6 +313,7 @@ function sectionPayload(section: ConfigurationSection): ConfigurationUpdateReque
 function clearSectionSecrets(section: ConfigurationSection): void {
   if (section === 'nextfind') nextfindPassword.value = ''
   else if (section === 'tmdb') tmdbToken.value = ''
+  else if (section === 'outbound_proxy') proxyPassword.value = ''
   else if (section === 'pt_site') clearPtSecrets()
   else qbPassword.value = ''
 }
@@ -297,6 +322,7 @@ function configured(section: ConfigurationSection): boolean {
   if (!store.data) return false
   if (section === 'nextfind') return store.data.nextfind.configured
   if (section === 'tmdb') return store.data.tmdb.configured
+  if (section === 'outbound_proxy') return store.data.outbound_proxy.configured
   if (section === 'qbittorrent') return store.data.qbittorrent.configured
   return ptConfigured.value
 }
@@ -314,6 +340,7 @@ function displayOrigin(value: string): string {
 function connectionTarget(section: ConfigurationSection): string {
   if (section === 'nextfind') return displayOrigin(form.nextfindBaseUrl)
   if (section === 'tmdb') return 'https://api.themoviedb.org'
+  if (section === 'outbound_proxy') return displayOrigin(form.proxyUrl)
   if (section === 'qbittorrent') return displayOrigin(form.qbUrl)
   return displayOrigin(
     form.ptArchitecture === 'avistaz' ? form.avistazBaseUrl : form.nexusBaseUrl,
@@ -485,6 +512,9 @@ watch([() => form.nextfindBaseUrl, () => form.nextfindUsername, nextfindPassword
 watch(tmdbToken, () => {
   if (initialized && !hydrating) markSectionDirty('tmdb')
 }, { flush: 'sync' })
+watch([() => form.proxyUrl, () => form.proxyUsername, proxyPassword], () => {
+  if (initialized && !hydrating) markSectionDirty('outbound_proxy')
+}, { flush: 'sync' })
 watch(
   [
     () => form.ptArchitecture,
@@ -533,10 +563,10 @@ void store.refresh()
     <PageHeader
       eyebrow="CONNECTION SETTINGS"
       title="连接配置"
-      description="登录后在这里配置影视来源、元数据、PT 站点和下载器。保存不会测试外部连接。"
+      description="登录后在这里配置影视来源、元数据、PT 站点、下载器和可选出站代理。保存不会测试外部连接。"
     >
       <div class="configuration-progress" aria-label="配置完成度">
-        <strong>{{ configuredCount }} / 4</strong><small>已配置连接</small>
+        <strong>{{ configuredCount }} / 4</strong><small>核心连接</small>
       </div>
     </PageHeader>
 
@@ -575,7 +605,7 @@ void store.refresh()
           </span>
         </header>
         <div class="configuration-field-grid single-field">
-          <label><span>Access Token</span><input v-model="tmdbToken" name="tmdb_token" type="password" autocomplete="new-password" :placeholder="secretPlaceholder(store.data.tmdb.configured)" :required="!store.data.tmdb.configured" maxlength="8192" /></label>
+          <label><span>Access Token · <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer">获取 Token</a></span><input v-model="tmdbToken" name="tmdb_token" type="password" autocomplete="new-password" :placeholder="secretPlaceholder(store.data.tmdb.configured)" :required="!store.data.tmdb.configured" maxlength="8192" /></label>
         </div>
         <div v-if="feedback.tmdb" :class="['configuration-message', feedback.tmdb.status]" :role="feedback.tmdb.status === 'error' ? 'alert' : 'status'">
           <strong>{{ feedbackLabel(feedback.tmdb) }}</strong>
@@ -586,6 +616,31 @@ void store.refresh()
           <span>{{ testHint('tmdb') }}</span>
           <button class="button secondary" type="button" :disabled="Boolean(activeAction)" @click="testSection('tmdb', $event)">{{ actionLabel('tmdb', 'test', configured('tmdb') && !dirty.tmdb ? '测试真实连接' : '保存并测试') }}</button>
           <button class="button primary" type="submit" :disabled="Boolean(activeAction)">{{ actionLabel('tmdb', 'save', '保存 TMDB') }}</button>
+        </div>
+      </form>
+
+      <form class="integration-config-section" autocomplete="off" aria-labelledby="proxy-config-title" @submit.prevent="saveSection('outbound_proxy')">
+        <header>
+          <div><span class="eyebrow">NETWORK</span><h2 id="proxy-config-title">出站代理</h2></div>
+          <span :class="['config-state', store.data.outbound_proxy.configured ? 'configured' : 'pending']">
+            {{ store.data.outbound_proxy.configured ? '已启用' : '未启用' }}
+          </span>
+        </header>
+        <div class="configuration-field-grid three-fields">
+          <label><span>代理地址（可选）</span><input v-model="form.proxyUrl" name="proxy_url" type="url" maxlength="2048" placeholder="http://127.0.0.1:7890" /></label>
+          <label><span>用户名（可选）</span><input v-model="form.proxyUsername" name="proxy_username" maxlength="120" /></label>
+          <label><span>密码（可选）</span><input v-model="proxyPassword" name="proxy_password" type="password" autocomplete="new-password" :placeholder="secretPlaceholder(store.data.outbound_proxy.password_configured)" :required="Boolean(form.proxyUrl.trim() && form.proxyUsername.trim()) && (!store.data.outbound_proxy.password_configured || proxyIdentityChanged)" maxlength="8192" /></label>
+        </div>
+        <p class="configuration-field-note">仅用于 NextFind、TMDB 和 PT 站点的外部 HTTP 请求，不影响 qBittorrent。</p>
+        <div v-if="feedback.outbound_proxy" :class="['configuration-message', feedback.outbound_proxy.status]" :role="feedback.outbound_proxy.status === 'error' ? 'alert' : 'status'">
+          <strong>{{ feedbackLabel(feedback.outbound_proxy) }}</strong>
+          <span>{{ feedback.outbound_proxy.message }}</span>
+          <small>目标：{{ feedbackTarget('outbound_proxy') }}<template v-if="feedback.outbound_proxy.errorCode"> · 错误码：{{ feedback.outbound_proxy.errorCode }}</template><template v-if="feedback.outbound_proxy.occurredAt"> · {{ formatShanghai(feedback.outbound_proxy.occurredAt) }}</template></small>
+        </div>
+        <div class="configuration-section-actions">
+          <span>{{ form.proxyUrl.trim() ? testHint('outbound_proxy') : '留空并保存可停用出站代理' }}</span>
+          <button class="button secondary" type="button" :disabled="Boolean(activeAction) || !form.proxyUrl.trim()" @click="testSection('outbound_proxy', $event)">{{ actionLabel('outbound_proxy', 'test', configured('outbound_proxy') && !dirty.outbound_proxy ? '测试真实连接' : '保存并测试') }}</button>
+          <button class="button primary" type="submit" :disabled="Boolean(activeAction)">{{ actionLabel('outbound_proxy', 'save', '保存出站代理') }}</button>
         </div>
       </form>
 
@@ -645,8 +700,8 @@ void store.refresh()
           <label><span>Web 地址</span><input v-model="form.qbUrl" name="qb_url" type="url" maxlength="2048" placeholder="https://qb.example.internal" required /></label>
           <label><span>用户名</span><input v-model="form.qbUsername" name="qb_username" maxlength="120" required /></label>
           <label><span>密码</span><input v-model="qbPassword" name="qb_password" type="password" autocomplete="new-password" :placeholder="secretPlaceholder(store.data.qbittorrent.configured)" :required="!store.data.qbittorrent.configured || qbIdentityChanged" maxlength="8192" /></label>
-          <label><span>保存路径</span><input v-model="form.qbSavePath" name="qb_save_path" maxlength="2048" required /></label>
-          <label><span>分类</span><input v-model="form.qbCategory" name="qb_category" maxlength="180" required /></label>
+          <label><span>保存路径（可选）</span><input v-model="form.qbSavePath" name="qb_save_path" maxlength="2048" placeholder="留空则使用下载器默认路径" /></label>
+          <label><span>分类（可选）</span><input v-model="form.qbCategory" name="qb_category" maxlength="180" placeholder="留空则按 PT 站点自动设置" /></label>
           <label class="configuration-checkbox"><input v-model="form.qbAllowInsecureHttp" name="qb_allow_http" type="checkbox" /><span>允许受信内网使用 HTTP 明文连接</span></label>
         </div>
         <div v-if="feedback.qbittorrent" :class="['configuration-message', feedback.qbittorrent.status]" :role="feedback.qbittorrent.status === 'error' ? 'alert' : 'status'">

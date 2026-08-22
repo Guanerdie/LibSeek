@@ -117,7 +117,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         torrent: bytes,
         *,
         expected_info_hash: str,
-        save_path: str,
+        save_path: str | None,
         category: str,
         tags: tuple[str, ...] = (),
         start_immediately: bool = True,
@@ -158,11 +158,12 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
                 write_guard=category_write_guard or write_guard,
             )
         form = {
-            "savepath": save_path,
             "category": category,
             "tags": ",".join(tags),
             add_state_field: "false" if start_immediately else "true",
         }
+        if save_path:
+            form["savepath"] = save_path
         try:
             response = await self._request(
                 "POST",
@@ -188,7 +189,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
     async def ensure_category(
         self,
         category: str,
-        save_path: str,
+        save_path: str | None,
         *,
         write_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
@@ -206,7 +207,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
     async def _ensure_category(
         self,
         category: str,
-        save_path: str,
+        save_path: str | None,
         *,
         write_guard: Callable[[], Awaitable[None]] | None,
     ) -> None:
@@ -216,10 +217,13 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
 
         create_error: AppError | None = None
         try:
+            form = {"category": category}
+            if save_path:
+                form["savePath"] = save_path
             response = await self._request(
                 "POST",
                 "/api/v2/torrents/createCategory",
-                data={"category": category, "savePath": save_path},
+                data=form,
                 before_send=write_guard,
             )
             if self._looks_like_html(response) or response.text.strip() != "Ok.":
@@ -308,9 +312,11 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         )
 
     @staticmethod
-    def _validate_target(save_path: str, category: str, tags: tuple[str, ...]) -> None:
-        values = (save_path, category, *tags)
-        if not save_path.strip() or not category.strip() or any(
+    def _validate_target(
+        save_path: str | None, category: str, tags: tuple[str, ...]
+    ) -> None:
+        values = (category, *tags, *((save_path,) if save_path else ()))
+        if not category.strip() or any(
             not value.strip() or any(marker in value for marker in ("\x00", "\r", "\n"))
             for value in values
         ):

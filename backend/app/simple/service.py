@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.time import utc_now
 from app.errors import AppError
+from app.models.enums import MediaType
 from app.simple.models import (
     ActivityLog,
     Download,
@@ -24,19 +26,74 @@ async def list_media(
     session: AsyncSession,
     *,
     state: MediaState | None,
+    media_type: MediaType | None,
+    country_code: str | None,
+    year: int | None,
+    query: str | None,
     page: int,
     page_size: int,
 ) -> tuple[list[LibraryMediaItem], int]:
-    filters = [LibraryMediaItem.state == state] if state is not None else []
-    total = await session.scalar(select(func.count()).select_from(LibraryMediaItem).where(*filters))
-    rows = await session.scalars(
+    filters: list[ColumnElement[bool]] = []
+    if state is not None:
+        filters.append(LibraryMediaItem.state == state)
+    if media_type is not None:
+        filters.append(LibraryMediaItem.media_type == media_type)
+    if year is not None:
+        filters.append(LibraryMediaItem.year == year)
+    if query and (term := query.strip()):
+        filters.append(
+            or_(
+                LibraryMediaItem.title.icontains(term, autoescape=True),
+                LibraryMediaItem.original_title.icontains(term, autoescape=True),
+            )
+        )
+
+    statement = (
         select(LibraryMediaItem)
         .where(*filters)
         .order_by(LibraryMediaItem.updated_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
     )
-    return list(rows), int(total or 0)
+    normalized_country = country_code.strip().upper() if country_code else None
+    if normalized_country:
+        all_rows = list(await session.scalars(statement))
+        matching = [item for item in all_rows if normalized_country in item.country_codes]
+        start = (page - 1) * page_size
+        return matching[start : start + page_size], len(matching)
+
+    total = await session.scalar(select(func.count()).select_from(LibraryMediaItem).where(*filters))
+    page_rows = await session.scalars(
+        statement.offset((page - 1) * page_size).limit(page_size)
+    )
+    return list(page_rows), int(total or 0)
+
+
+async def media_filter_options(
+    session: AsyncSession,
+) -> tuple[list[MediaType], list[str], list[MediaState], list[int]]:
+    rows = await session.execute(
+        select(
+            LibraryMediaItem.media_type,
+            LibraryMediaItem.country_codes,
+            LibraryMediaItem.state,
+            LibraryMediaItem.year,
+        )
+    )
+    media_types: set[MediaType] = set()
+    country_codes: set[str] = set()
+    states: set[MediaState] = set()
+    years: set[int] = set()
+    for media_type, item_country_codes, state, year in rows:
+        media_types.add(media_type)
+        country_codes.update(item_country_codes or [])
+        states.add(state)
+        if year is not None:
+            years.add(year)
+    return (
+        sorted(media_types, key=lambda item: item.value),
+        sorted(country_codes),
+        sorted(states, key=lambda item: item.value),
+        sorted(years, reverse=True),
+    )
 
 
 async def get_media(session: AsyncSession, media_id: str) -> tuple[LibraryMediaItem, list[Episode]]:

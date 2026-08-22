@@ -44,3 +44,17 @@ def test_tuple_settings_parse_compose_style_environment(
     assert settings.allowed_external_hosts == ("example.com", "api.example.com")
     assert settings.nextfind_allowed_hosts == ("nextfind.example.com",)
     assert settings.qb_plan_tags == ("unin", "imported")
+
+
+def test_empty_proxy_credentials_do_not_enable_basic_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_settings_environment(monkeypatch)
+    monkeypatch.setenv("OUTBOUND_PROXY_URL", "http://proxy.example.com:7890")
+    monkeypatch.setenv("OUTBOUND_PROXY_USERNAME", "")
+    monkeypatch.setenv("OUTBOUND_PROXY_PASSWORD", "")
+
+    proxy = Settings(_env_file=None).outbound_proxy()
+
+    assert proxy is not None
+    assert proxy.auth is None

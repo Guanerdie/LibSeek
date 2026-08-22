@@ -36,6 +36,7 @@ class MediaSummary(BaseModel):
     tmdb_id: int | None
     title: str
     original_title: str | None
+    country_codes: list[str]
     year: int | None
     poster_path: str | None
     state: MediaState
@@ -48,11 +49,19 @@ class MediaDetail(MediaSummary):
     episodes: list[EpisodeView] = Field(default_factory=list)
 
 
+class MediaFilterOptions(BaseModel):
+    media_types: list[MediaType]
+    country_codes: list[str]
+    states: list[MediaState]
+    years: list[int]
+
+
 class MediaPage(BaseModel):
     items: list[MediaSummary]
     total: int
     page: int
     page_size: int
+    filter_options: MediaFilterOptions
 
 
 class SearchCreate(BaseModel):

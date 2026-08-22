@@ -11,6 +11,7 @@ from app.adapters.metadata import TmdbProvider
 from app.adapters.pt_sites import AvistaZAdapter, NexusPhpConnectionProbe
 from app.api.dependencies import AdminPrincipal, SettingsDep, ViewerPrincipal
 from app.core.config import Settings, apply_runtime_configuration
+from app.core.http import SafeAsyncHttpClient
 from app.core.runtime_config import (
     RuntimeConfigError,
     RuntimeConfigValidationError,
@@ -29,6 +30,7 @@ from app.schemas.configuration import (
     ConfigurationUpdateRequest,
     NextFindConfigurationResponse,
     NexusPhpConfigurationResponse,
+    OutboundProxyConfigurationResponse,
     PtSiteConfigurationResponse,
     PtSiteConfigurationsResponse,
     QbittorrentConfigurationResponse,
@@ -102,10 +104,12 @@ async def test_nextfind_configuration(
     if credentials is None:
         raise AppError("NEXTFIND_NOT_CONFIGURED", "请先保存完整的 NextFind 配置", status_code=409)
     username, password = credentials
+    proxy = effective.outbound_proxy()
     await validate_public_external_target(
         effective.nextfind_base_url,
         effective.nextfind_allowed_hosts,
         resolve_timeout=effective.external_connect_timeout_seconds,
+        resolve_dns=proxy is None,
     )
     adapter = NextFindAdapter(
         base_url=effective.nextfind_base_url,
@@ -116,6 +120,7 @@ async def test_nextfind_configuration(
         max_line_bytes=effective.external_max_ndjson_line_bytes,
         connect_timeout=effective.external_connect_timeout_seconds,
         read_timeout=effective.external_read_timeout_seconds,
+        proxy=proxy,
     )
     try:
         return _test_response("nextfind", await adapter.probe())
@@ -142,6 +147,7 @@ async def test_tmdb_configuration(
         read_timeout=effective.external_read_timeout_seconds,
         max_response_bytes=effective.external_max_response_bytes,
         min_interval_seconds=effective.tmdb_min_interval_seconds,
+        proxy=effective.outbound_proxy(),
     )
     try:
         return _test_response("tmdb", await provider.probe())
@@ -161,6 +167,7 @@ async def test_pt_site_configuration(
         raise AppError("PT_SITE_ARCHITECTURE_INVALID", "PT 站点架构无效", status_code=404)
     effective = _effective_settings(settings)
     runtime = runtime_store(settings).configuration()
+    proxy = effective.outbound_proxy()
     if architecture == "nexusphp":
         site = runtime.nexusphp_site
         if site is None or not site.configured or not site.cookie:
@@ -174,6 +181,7 @@ async def test_pt_site_configuration(
             site.base_url,
             (host,),
             resolve_timeout=effective.external_connect_timeout_seconds,
+            resolve_dns=proxy is None,
         )
         probe = NexusPhpConnectionProbe(
             site.base_url,
@@ -182,6 +190,7 @@ async def test_pt_site_configuration(
             connect_timeout=effective.external_connect_timeout_seconds,
             read_timeout=effective.external_read_timeout_seconds,
             max_response_bytes=min(effective.external_max_response_bytes, 2 * 1024 * 1024),
+            proxy=proxy,
         )
         try:
             return _test_response("pt_site", await probe.probe())
@@ -205,6 +214,7 @@ async def test_pt_site_configuration(
         base_url,
         (host,),
         resolve_timeout=effective.external_connect_timeout_seconds,
+        resolve_dns=proxy is None,
     )
     adapter = AvistaZAdapter(
         username=username,
@@ -217,11 +227,61 @@ async def test_pt_site_configuration(
         max_response_bytes=effective.external_max_response_bytes,
         min_interval_seconds=effective.avistaz_min_interval_seconds,
         enable_torrent_fetch=False,
+        proxy=proxy,
     )
     try:
         return _test_response("pt_site", await adapter.probe())
     finally:
         await adapter.aclose()
+
+
+@router.post("/tests/outbound-proxy", response_model=ConfigurationTestResponse)
+async def test_outbound_proxy_configuration(
+    response: Response,
+    settings: SettingsDep,
+    _principal: AdminPrincipal,
+) -> ConfigurationTestResponse:
+    _no_store(response)
+    effective = _effective_settings(settings)
+    proxy = effective.outbound_proxy()
+    if proxy is None:
+        raise AppError("OUTBOUND_PROXY_NOT_CONFIGURED", "请先保存出站代理配置", status_code=409)
+    client = SafeAsyncHttpClient(
+        base_url="https://api.themoviedb.org",
+        allowed_hosts=("api.themoviedb.org",),
+        connect_timeout=effective.external_connect_timeout_seconds,
+        read_timeout=effective.external_read_timeout_seconds,
+        max_response_bytes=min(effective.external_max_response_bytes, 256 * 1024),
+        proxy=proxy,
+    )
+    try:
+        result = await client.request("GET", "/3/configuration")
+        if result.status_code == 407:
+            return ConfigurationTestResponse(
+                target="outbound_proxy",
+                healthy=False,
+                error_code="OUTBOUND_PROXY_AUTH_FAILED",
+                message="出站代理认证失败",
+            )
+        if result.status_code >= 400 and result.status_code != 401:
+            return ConfigurationTestResponse(
+                target="outbound_proxy",
+                healthy=False,
+                error_code="OUTBOUND_PROXY_UPSTREAM_FAILED",
+                message=f"出站代理连接异常（HTTP {result.status_code}）",
+            )
+        return ConfigurationTestResponse(
+            target="outbound_proxy",
+            healthy=True,
+            message=f"出站代理连接成功（TMDB 返回 HTTP {result.status_code}）",
+        )
+    except AppError as exc:
+        return _test_response(
+            "outbound_proxy",
+            ProbeResult(healthy=False, error_code=exc.error_code, message=exc.message),
+        )
+    finally:
+        await client.aclose()
 
 
 @router.post("/tests/qbittorrent", response_model=ConfigurationTestResponse)
@@ -276,7 +336,7 @@ def _effective_settings(settings: Settings) -> Settings:
 
 
 def _test_response(
-    target: Literal["nextfind", "tmdb", "pt_site", "qbittorrent"],
+    target: Literal["nextfind", "tmdb", "outbound_proxy", "pt_site", "qbittorrent"],
     result: ProbeResult,
 ) -> ConfigurationTestResponse:
     return ConfigurationTestResponse(
@@ -319,6 +379,12 @@ def _response(settings: Settings) -> ConfigurationResponse:
             configured=bool(settings.nextfind_configured and settings.nextfind_base_url),
         ),
         tmdb=TmdbConfigurationResponse(configured=settings.tmdb_configured),
+        outbound_proxy=OutboundProxyConfigurationResponse(
+            url=settings.outbound_proxy_url or "",
+            username=_secret_value(settings.outbound_proxy_username),
+            password_configured=bool(_secret_value(settings.outbound_proxy_password)),
+            configured=bool(settings.outbound_proxy_url),
+        ),
         pt_site=active_pt_site,
         pt_sites=PtSiteConfigurationsResponse(
             avistaz=(

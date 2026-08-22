@@ -22,7 +22,7 @@ function speed(value: number): string {
 onMounted(() => {
   void daily.refreshDownloads()
   refreshTimer = globalThis.setInterval(() => {
-    if (!daily.loading) void daily.refreshDownloads()
+    if (!daily.downloadsSyncing) void daily.refreshDownloads()
   }, 15_000)
 })
 
@@ -34,15 +34,15 @@ onBeforeUnmount(() => {
 <template>
   <section class="page">
     <PageHeader eyebrow="DOWNLOADS" title="下载" description="查看 qBittorrent 任务的当前状态。">
-      <button class="button secondary" :disabled="daily.loading" @click="daily.refreshDownloads">
+      <button class="button secondary" :disabled="daily.downloadsSyncing" @click="daily.refreshDownloads">
         刷新
       </button>
     </PageHeader>
 
     <PageState
-      :loading="daily.loading"
-      :error="daily.error"
-      :empty="!daily.loading && !daily.error && daily.downloads.length === 0"
+      :loading="daily.downloadsLoading || daily.downloadsSyncing"
+      :error="daily.downloadsError"
+      :empty="!daily.downloadsLoading && !daily.downloadsSyncing && !daily.downloadsError && daily.downloads.length === 0"
       empty-text="暂无下载任务"
     />
 

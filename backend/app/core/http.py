@@ -43,6 +43,7 @@ class SafeAsyncHttpClient:
         read_timeout: float,
         max_response_bytes: int,
         transport: httpx.AsyncBaseTransport | None = None,
+        proxy: httpx.Proxy | None = None,
     ) -> None:
         self.base_url = validate_external_url(base_url.rstrip("/"), allowed_hosts)
         self.allowed_hosts = allowed_hosts
@@ -50,6 +51,7 @@ class SafeAsyncHttpClient:
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
+            proxy=proxy,
             follow_redirects=False,
             trust_env=False,
         )
@@ -100,6 +102,18 @@ class SafeAsyncHttpClient:
                     "外部只读请求超时",
                     status_code=504,
                     retryable=True,
+                ) from exc
+            except httpx.ProxyError as exc:
+                proxy_auth_failed = "407" in str(exc)
+                raise AppError(
+                    (
+                        "OUTBOUND_PROXY_AUTH_FAILED"
+                        if proxy_auth_failed
+                        else "OUTBOUND_PROXY_CONNECTION_FAILED"
+                    ),
+                    "出站代理认证失败" if proxy_auth_failed else "出站代理连接失败",
+                    status_code=502,
+                    retryable=not proxy_auth_failed,
                 ) from exc
             except httpx.HTTPError as exc:
                 raise AppError(

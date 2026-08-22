@@ -42,6 +42,7 @@ async def validate_public_external_target(
     *,
     resolver: AddressResolver | None = None,
     resolve_timeout: float = 5.0,
+    resolve_dns: bool = True,
 ) -> str:
     validated = validate_external_url(url, allowed_hosts)
     parsed = urlparse(validated)
@@ -70,6 +71,8 @@ async def validate_public_external_target(
             "连接测试仅允许使用公网 DNS 主机名",
             status_code=400,
         )
+    if not resolve_dns:
+        return validated
     target_resolver = resolver or _resolve_target_addresses
     try:
         addresses = await asyncio.wait_for(

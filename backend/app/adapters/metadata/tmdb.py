@@ -103,6 +103,7 @@ class TmdbProvider(MetadataProvider):
         base_url: str = "https://api.themoviedb.org",
         allowed_hosts: tuple[str, ...] = ("api.themoviedb.org",),
         transport: httpx.AsyncBaseTransport | None = None,
+        proxy: httpx.Proxy | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 30.0,
         max_response_bytes: int = 5 * 1024 * 1024,
@@ -123,6 +124,7 @@ class TmdbProvider(MetadataProvider):
             read_timeout=read_timeout,
             max_response_bytes=max_response_bytes,
             transport=transport,
+            proxy=proxy,
         )
         self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.cache: AsyncTtlCache[Any] = AsyncTtlCache(

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import MediaSourceAdapter, MetadataProvider, PtSiteAdapter
-from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.adapters.downloaders.qbittorrent import QbAddResult, QbittorrentAdapter
 from app.adapters.pt_sites.avistaz import AvistaZMockAdapter
 from app.core.config import Settings
 from app.errors import AppError
@@ -116,6 +116,21 @@ class FailingQb:
         return None
 
 
+class CapturingQb:
+    def __init__(self) -> None:
+        self.add_kwargs: dict[str, object] = {}
+
+    async def authenticate(self) -> None:
+        return None
+
+    async def add_torrent(self, _payload: bytes, **kwargs: object) -> QbAddResult:
+        self.add_kwargs = kwargs
+        return QbAddResult(info_hash=str(kwargs["expected_info_hash"]), outcome="SUBMITTED")
+
+    async def aclose(self) -> None:
+        return None
+
+
 class StatusQb:
     def __init__(self, torrents: list[QbTorrent]) -> None:
         self.torrents = torrents
@@ -157,6 +172,7 @@ class FakeNextFind(MediaSourceAdapter):
                     media_type=MediaType.TV,
                     tmdb_id=300,
                     title="A Missing Show",
+                    country_codes=["JP"],
                     missing_episodes=["S01E02", "S01E03"],
                     identity_confidence=IdentityConfidence.HIGH,
                     metadata_status=MetadataStatus.RESOLVED,
@@ -344,6 +360,7 @@ async def test_existing_adapters_feed_the_simplified_domain(session_factory) -> 
         assert (created, updated) == (1, 0)
         media = await session.scalar(select(LibraryMediaItem))
         assert media is not None
+        assert media.country_codes == ["JP"]
         episodes = list(await session.scalars(select(Episode)))
         assert [(item.season_number, item.episode_number) for item in episodes] == [
             (1, 2),
@@ -452,6 +469,44 @@ async def test_known_qb_submission_failure_marks_media_for_attention(session_fac
         await session.refresh(media)
         assert media.state == MediaState.NEEDS_ATTENTION
         assert media.attention_reason == "qBittorrent 拒绝了提交"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured_category", "expected_category"),
+    ((None, "avistaz"), ("manual-category", "manual-category")),
+)
+async def test_submit_uses_site_category_and_qb_default_path_when_targets_are_blank(
+    session_factory,
+    configured_category: str | None,
+    expected_category: str,
+) -> None:
+    payload, info_hash = torrent_fixture()
+    async with session_factory() as session:
+        _, candidate = await add_candidate(
+            session,
+            source_item_id=f"qb-defaults-{expected_category}",
+            info_hash=info_hash,
+        )
+        pt = cast(PtSiteAdapter, FakeTorrentSource(payload))
+        capturing_qb = CapturingQb()
+        qb = cast(QbittorrentAdapter, capturing_qb)
+
+        await submit_download(
+            session,
+            candidate_id=candidate.id,
+            confirm_warnings=False,
+            pt_factory=lambda _site_id: pt,
+            qb_factory=lambda: qb,
+            settings=Settings(
+                _env_file=None,
+                qb_target_category=configured_category,
+                qb_target_save_path=None,
+            ),
+        )
+
+        assert capturing_qb.add_kwargs["category"] == expected_category
+        assert capturing_qb.add_kwargs["save_path"] is None
 
 
 @pytest.mark.asyncio

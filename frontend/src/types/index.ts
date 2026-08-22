@@ -72,6 +72,12 @@ export interface ConfigurationSnapshot {
     configured: boolean
   }
   tmdb: { configured: boolean }
+  outbound_proxy: {
+    url: string
+    username: string
+    password_configured: boolean
+    configured: boolean
+  }
   pt_site: PtSiteConfigurationSnapshot | null
   pt_sites?: {
     avistaz: AvistaZConfigurationSnapshot | null
@@ -92,6 +98,7 @@ export interface ConfigurationSnapshot {
 export interface ConfigurationUpdateRequest {
   nextfind?: { base_url: string; username: string; password?: string }
   tmdb?: { token?: string }
+  outbound_proxy?: { url: string; username: string; password?: string }
   pt_site?:
     | {
         architecture: 'avistaz'
@@ -118,7 +125,12 @@ export interface ConfigurationUpdateRequest {
   }
 }
 
-export type ConfigurationSection = 'nextfind' | 'tmdb' | 'pt_site' | 'qbittorrent'
+export type ConfigurationSection =
+  | 'nextfind'
+  | 'tmdb'
+  | 'outbound_proxy'
+  | 'pt_site'
+  | 'qbittorrent'
 
 export interface ConfigurationTestResult {
   target: ConfigurationSection
@@ -143,6 +155,25 @@ export type DailyMediaState =
   | 'DOWNLOADING'
   | 'COMPLETE'
   | 'NEEDS_ATTENTION'
+
+export type DailyMediaType = 'movie' | 'tv'
+
+export interface DailyMediaQuery {
+  page?: number
+  pageSize?: number
+  state?: DailyMediaState
+  mediaType?: DailyMediaType
+  countryCode?: string
+  year?: number
+  query?: string
+}
+
+export interface DailyMediaFilterOptions {
+  media_types: DailyMediaType[]
+  country_codes: string[]
+  states: DailyMediaState[]
+  years: number[]
+}
 
 export type DailySearchState = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
 
@@ -169,16 +200,21 @@ export interface DailyMedia {
   id: string
   source: string
   source_item_id: string
-  media_type: 'movie' | 'tv'
+  media_type: DailyMediaType
   tmdb_id: number | null
   title: string
   original_title: string | null
+  country_codes: string[]
   year: number | null
   poster_path: string | null
   state: DailyMediaState
   attention_reason: string | null
   discovered_at: string
   updated_at: string
+}
+
+export interface DailyMediaPage extends Page<DailyMedia> {
+  filter_options: DailyMediaFilterOptions
 }
 
 export interface DailyMediaDetail extends DailyMedia {

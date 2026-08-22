@@ -22,6 +22,13 @@ class TmdbConfigurationResponse(ConfigurationModel):
     configured: bool
 
 
+class OutboundProxyConfigurationResponse(ConfigurationModel):
+    url: str
+    username: str
+    password_configured: bool
+    configured: bool
+
+
 class AvistaZConfigurationResponse(ConfigurationModel):
     architecture: Literal["avistaz"] = "avistaz"
     base_url: str
@@ -85,6 +92,7 @@ class QbittorrentConfigurationResponse(ConfigurationModel):
 class ConfigurationResponse(ConfigurationModel):
     nextfind: NextFindConfigurationResponse
     tmdb: TmdbConfigurationResponse
+    outbound_proxy: OutboundProxyConfigurationResponse
     pt_site: PtSiteConfigurationResponse | None
     pt_sites: PtSiteConfigurationsResponse
     pt_site_architectures: tuple[PtSiteArchitectureOption, ...]
@@ -100,6 +108,12 @@ class NextFindConfigurationUpdate(ConfigurationModel):
 
 class TmdbConfigurationUpdate(ConfigurationModel):
     token: SecretStr | None = Field(default=None, max_length=8192)
+
+
+class OutboundProxyConfigurationUpdate(ConfigurationModel):
+    url: str | None = Field(default=None, max_length=2048)
+    username: str | None = Field(default=None, max_length=120)
+    password: SecretStr | None = Field(default=None, max_length=8192)
 
 
 class AvistaZConfigurationUpdate(ConfigurationModel):
@@ -137,12 +151,19 @@ class QbittorrentConfigurationUpdate(ConfigurationModel):
 class ConfigurationUpdateRequest(ConfigurationModel):
     nextfind: NextFindConfigurationUpdate | None = None
     tmdb: TmdbConfigurationUpdate | None = None
+    outbound_proxy: OutboundProxyConfigurationUpdate | None = None
     pt_site: PtSiteConfigurationUpdate | None = None
     qbittorrent: QbittorrentConfigurationUpdate | None = None
 
     def runtime_updates(self) -> dict[str, dict[str, object]]:
         result: dict[str, dict[str, object]] = {}
-        for group_name in ("nextfind", "tmdb", "pt_site", "qbittorrent"):
+        for group_name in (
+            "nextfind",
+            "tmdb",
+            "outbound_proxy",
+            "pt_site",
+            "qbittorrent",
+        ):
             group = getattr(self, group_name)
             if group is None:
                 continue
@@ -155,7 +176,7 @@ class ConfigurationUpdateRequest(ConfigurationModel):
 
 
 class ConfigurationTestResponse(ProbeResult):
-    target: Literal["nextfind", "tmdb", "pt_site", "qbittorrent"]
+    target: Literal["nextfind", "tmdb", "outbound_proxy", "pt_site", "qbittorrent"]
 
 
 PT_SITE_ARCHITECTURES = (

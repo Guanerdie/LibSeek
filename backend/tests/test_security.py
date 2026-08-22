@@ -1,6 +1,10 @@
 import pytest
 
-from app.core.security import sanitize_details, validate_external_url
+from app.core.security import (
+    sanitize_details,
+    validate_external_url,
+    validate_public_external_target,
+)
 from app.errors import AppError
 
 
@@ -40,3 +44,18 @@ def test_external_url_requires_https_allowlist() -> None:
         validate_external_url("https://evil.invalid", ("nextfind.example",))
     with pytest.raises(AppError):
         validate_external_url("http://nextfind.example", ("nextfind.example",))
+
+
+@pytest.mark.asyncio
+async def test_proxied_public_hostname_validation_does_not_require_local_dns() -> None:
+    async def forbidden_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        raise AssertionError("proxied target must be resolved by the proxy")
+
+    result = await validate_public_external_target(
+        "https://tracker.example.test",
+        ("tracker.example.test",),
+        resolver=forbidden_resolver,
+        resolve_dns=False,
+    )
+
+    assert result == "https://tracker.example.test"

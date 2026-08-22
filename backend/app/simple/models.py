@@ -91,6 +91,7 @@ class LibraryMediaItem(Base):
     tmdb_id: Mapped[int | None] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     original_title: Mapped[str | None] = mapped_column(String(500))
+    country_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     year: Mapped[int | None] = mapped_column(Integer)
     poster_path: Mapped[str | None] = mapped_column(Text)
     state: Mapped[MediaState] = mapped_column(

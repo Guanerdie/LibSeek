@@ -89,6 +89,11 @@ def complete_payload(*, qb_url: str = "https://qb.local:8080") -> dict[str, obje
             "password": "next-secret",
         },
         "tmdb": {"token": "tmdb-secret"},
+        "outbound_proxy": {
+            "url": "http://proxy.internal:7890",
+            "username": "proxy-user",
+            "password": "proxy-secret",
+        },
         "pt_site": avistaz_payload(),
         "qbittorrent": {
             "url": qb_url,
@@ -136,6 +141,12 @@ async def test_configuration_requires_admin_csrf_and_never_returns_secrets(
         "avistaz": body["pt_site"],
         "nexusphp": None,
     }
+    assert body["outbound_proxy"] == {
+        "url": "http://proxy.internal:7890",
+        "username": "proxy-user",
+        "password_configured": True,
+        "configured": True,
+    }
     assert [item["architecture"] for item in body["pt_site_architectures"]] == [
         "avistaz",
         "nexusphp",
@@ -148,6 +159,7 @@ async def test_configuration_requires_admin_csrf_and_never_returns_secrets(
         "avistaz-secret",
         "avistaz-pid-secret",
         "qb-secret",
+        "proxy-secret",
     ):
         assert secret not in serialized
 
@@ -218,6 +230,41 @@ async def test_empty_secrets_preserve_identity_and_changing_identity_clears_them
     assert stored.avistaz_site.password is None
     assert stored.avistaz_site.pid is None
     assert stored.qb_password is None
+
+
+@pytest.mark.asyncio
+async def test_outbound_proxy_can_be_disabled_and_qb_targets_can_be_blank(
+    tmp_path: Path, client_factory: Callable[[Settings], httpx.AsyncClient]
+) -> None:
+    settings = runtime_settings(tmp_path)
+    async with client_factory(settings) as client:
+        csrf = await setup_admin(client)
+        first = await client.put(
+            "/api/configuration", json=complete_payload(), headers={CSRF_HEADER_NAME: csrf}
+        )
+        disabled = await client.put(
+            "/api/configuration",
+            json={
+                "outbound_proxy": {"url": "", "username": ""},
+                "qbittorrent": {"save_path": "", "category": ""},
+            },
+            headers={CSRF_HEADER_NAME: csrf},
+        )
+
+    assert first.status_code == disabled.status_code == 200
+    assert disabled.json()["outbound_proxy"] == {
+        "url": "",
+        "username": "",
+        "password_configured": False,
+        "configured": False,
+    }
+    assert disabled.json()["qbittorrent"]["save_path"] == ""
+    assert disabled.json()["qbittorrent"]["category"] == ""
+    assert disabled.json()["configuration_complete"] is True
+    stored = runtime_store(settings).configuration()
+    assert stored.outbound_proxy_url == ""
+    assert stored.outbound_proxy_username is None
+    assert stored.outbound_proxy_password is None
 
 
 def test_v1_configuration_migrates_without_losing_avistaz_credentials(tmp_path: Path) -> None:
@@ -365,6 +412,14 @@ async def test_nexusphp_can_be_configured_but_remains_unavailable_for_runtime_se
             },
         ),
         (
+            "outbound_proxy",
+            {"url": "socks5://proxy.example.test:1080", "username": "reader"},
+        ),
+        (
+            "outbound_proxy",
+            {"url": "http://reader:secret@proxy.example.test:8080"},
+        ),
+        (
             "pt_site",
             {
                 "architecture": "nexusphp",
@@ -460,11 +515,13 @@ def test_runtime_configuration_derives_custom_hosts_without_enabling_qb_write(
     assert effective.avistaz_allowed_hosts == ("pt.example.test",)
     assert effective.qb_allowed_hosts == ("qb.local",)
     assert effective.enable_qb_write is False
+    assert effective.outbound_proxy() is not None
 
     monkeypatch.setenv("UNIN_RUNTIME_CONFIG_DIR", str(tmp_path))
     reloaded = get_settings()
     assert reloaded.tmdb_token_value() == "tmdb-secret"
     assert reloaded.enable_qb_write is False
+    assert reloaded.outbound_proxy() is not None
 
 
 def test_tampered_persisted_qb_url_is_rejected(tmp_path: Path) -> None:
@@ -487,6 +544,7 @@ def test_tampered_persisted_qb_url_is_rejected(tmp_path: Path) -> None:
     (
         "/api/configuration/tests/nextfind",
         "/api/configuration/tests/tmdb",
+        "/api/configuration/tests/outbound-proxy",
         "/api/configuration/tests/pt-sites/avistaz",
         "/api/configuration/tests/pt-sites/nexusphp",
         "/api/configuration/tests/qbittorrent",
@@ -687,6 +745,10 @@ async def test_connection_tests_use_only_bounded_read_only_adapter_actions_and_d
     assert constructor_values["avistaz"]["pid"] == "avistaz-pid-secret"
     assert constructor_values["avistaz"]["enable_torrent_fetch"] is False
     assert constructor_values["qbittorrent"]["password"] == "qb-secret"
+    assert isinstance(constructor_values["nextfind"]["proxy"], httpx.Proxy)
+    assert isinstance(constructor_values["tmdb"]["proxy"], httpx.Proxy)
+    assert isinstance(constructor_values["avistaz"]["proxy"], httpx.Proxy)
+    assert "proxy" not in constructor_values["qbittorrent"]
     serialized = "".join(response.text for response in responses)
     for secret in (
         "next-secret",
@@ -694,8 +756,77 @@ async def test_connection_tests_use_only_bounded_read_only_adapter_actions_and_d
         "avistaz-secret",
         "avistaz-pid-secret",
         "qb-secret",
+        "proxy-secret",
     ):
         assert secret not in serialized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upstream_status", "healthy", "error_code", "message"),
+    (
+        (401, True, None, "出站代理连接成功（TMDB 返回 HTTP 401）"),
+        (
+            403,
+            False,
+            "OUTBOUND_PROXY_UPSTREAM_FAILED",
+            "出站代理连接异常（HTTP 403）",
+        ),
+        (407, False, "OUTBOUND_PROXY_AUTH_FAILED", "出站代理认证失败"),
+    ),
+)
+async def test_outbound_proxy_connection_test_uses_saved_proxy_without_config_write(
+    tmp_path: Path,
+    client_factory: Callable[[Settings], httpx.AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_status: int,
+    healthy: bool,
+    error_code: str | None,
+    message: str,
+) -> None:
+    settings = runtime_settings(tmp_path)
+    actions: list[str] = []
+    constructor_values: dict[str, object] = {}
+
+    class FakeProxyClient:
+        def __init__(self, **kwargs: object) -> None:
+            constructor_values.update(kwargs)
+
+        async def request(self, method: str, path: str) -> object:
+            actions.append(f"{method} {path}")
+            return type("ProxyResult", (), {"status_code": upstream_status})()
+
+        async def aclose(self) -> None:
+            actions.append("close")
+
+    monkeypatch.setattr(configuration_routes, "SafeAsyncHttpClient", FakeProxyClient)
+    async with client_factory(settings) as client:
+        csrf = await setup_admin(client)
+        saved = await client.put(
+            "/api/configuration",
+            json={"outbound_proxy": complete_payload()["outbound_proxy"]},
+            headers={CSRF_HEADER_NAME: csrf},
+        )
+        assert saved.status_code == 200
+        integration_path = runtime_store(settings).integrations_path
+        before = integration_path.read_bytes()
+        response = await client.post(
+            "/api/configuration/tests/outbound-proxy",
+            headers={CSRF_HEADER_NAME: csrf},
+        )
+        after = integration_path.read_bytes()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "target": "outbound_proxy",
+        "healthy": healthy,
+        "error_code": error_code,
+        "message": message,
+    }
+    assert before == after
+    assert actions == ["GET /3/configuration", "close"]
+    assert isinstance(constructor_values["proxy"], httpx.Proxy)
+    assert "proxy-secret" not in response.text
 
 
 @pytest.mark.asyncio
@@ -790,6 +921,7 @@ async def test_public_connection_tests_reject_private_dns_before_adapter_constru
     monkeypatch.setattr(configuration_routes, "NextFindAdapter", forbidden_adapter)
     monkeypatch.setattr(configuration_routes, "AvistaZAdapter", forbidden_adapter)
     payload = complete_payload()
+    payload["outbound_proxy"] = {"url": "", "username": ""}
     nextfind = payload["nextfind"]
     assert isinstance(nextfind, dict)
     nextfind["base_url"] = "https://next.private.example"

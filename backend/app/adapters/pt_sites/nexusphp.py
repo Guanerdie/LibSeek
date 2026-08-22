@@ -61,6 +61,7 @@ class SameOriginNexusSession:
         *,
         allowed_hosts: tuple[str, ...],
         transport: httpx.AsyncBaseTransport | None = None,
+        proxy: httpx.Proxy | None = None,
         address_resolver: AddressResolver | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 30.0,
@@ -88,9 +89,11 @@ class SameOriginNexusSession:
         self.allowed_hosts = normalized_allowed_hosts
         self.max_response_bytes = max_response_bytes
         self.address_resolver = address_resolver or _resolve_target_addresses
+        self.resolve_target_locally = proxy is None
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
             transport=transport,
+            proxy=proxy,
             follow_redirects=False,
             trust_env=False,
         )
@@ -164,7 +167,8 @@ class SameOriginNexusSession:
         current_method = method
         current_params = params
         for _ in range(4):
-            await self._validate_resolved_target(current_url)
+            if self.resolve_target_locally:
+                await self._validate_resolved_target(current_url)
             request = self.client.build_request(
                 current_method,
                 current_url,
@@ -261,6 +265,7 @@ class NexusPhpConnectionProbe:
         allowed_hosts: tuple[str, ...],
         cookie_header: str,
         transport: httpx.AsyncBaseTransport | None = None,
+        proxy: httpx.Proxy | None = None,
         address_resolver: AddressResolver | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 30.0,
@@ -273,6 +278,7 @@ class NexusPhpConnectionProbe:
             base_url,
             allowed_hosts=allowed_hosts,
             transport=transport,
+            proxy=proxy,
             address_resolver=address_resolver,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
@@ -700,6 +706,7 @@ class NexusPhpAdapter(PtSiteAdapter):
         enable_live_search: bool = False,
         enable_torrent_fetch: bool = False,
         transport: httpx.AsyncBaseTransport | None = None,
+        proxy: httpx.Proxy | None = None,
         address_resolver: AddressResolver | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 30.0,
@@ -728,6 +735,7 @@ class NexusPhpAdapter(PtSiteAdapter):
             profile.base_url,
             allowed_hosts=allowed_hosts,
             transport=transport,
+            proxy=proxy,
             address_resolver=address_resolver,
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,

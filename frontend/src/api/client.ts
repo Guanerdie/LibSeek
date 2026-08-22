@@ -8,7 +8,8 @@ import type {
   DailyDownloadState,
   DailyMedia,
   DailyMediaDetail,
-  DailyMediaState,
+  DailyMediaPage,
+  DailyMediaQuery,
   DailySearch,
   LoginResponse,
   Page,
@@ -131,6 +132,10 @@ export const configurationApi = {
     request<ConfigurationTestResult>('/api/configuration/tests/nextfind', { method: 'POST' }),
   testTmdb: () =>
     request<ConfigurationTestResult>('/api/configuration/tests/tmdb', { method: 'POST' }),
+  testOutboundProxy: () =>
+    request<ConfigurationTestResult>('/api/configuration/tests/outbound-proxy', {
+      method: 'POST',
+    }),
   testPtSite: (architecture: string) =>
     request<ConfigurationTestResult>(
       `/api/configuration/tests/pt-sites/${encodeURIComponent(architecture)}`,
@@ -145,12 +150,16 @@ export const configurationApi = {
 export const dailyApi = {
   syncMedia: () =>
     request<{ created: number; updated: number }>('/api/library/sync', { method: 'POST' }),
-  media: (params: { page?: number; pageSize?: number; state?: DailyMediaState } = {}) =>
-    request<Page<DailyMedia>>(
+  media: (params: DailyMediaQuery = {}) =>
+    request<DailyMediaPage>(
       `/api/library?${queryString({
         page: params.page ?? 1,
         page_size: params.pageSize ?? 30,
         state: params.state,
+        media_type: params.mediaType,
+        country_code: params.countryCode,
+        year: params.year,
+        query: params.query,
       })}`,
     ),
   mediaDetail: (mediaId: string) =>

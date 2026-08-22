@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
+import httpx
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -45,6 +47,9 @@ class Settings(BaseSettings):
     external_read_timeout_seconds: float = 30.0
     external_max_response_bytes: int = 10 * 1024 * 1024
     external_max_ndjson_line_bytes: int = 1024 * 1024
+    outbound_proxy_url: str | None = None
+    outbound_proxy_username: SecretStr | None = None
+    outbound_proxy_password: SecretStr | None = None
     nextfind_base_url: str = "https://nextfind.example"
     nextfind_allowed_hosts: tuple[str, ...] = ("nextfind.example",)
     nextfind_username: SecretStr | None = None
@@ -146,6 +151,36 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("outbound_proxy_url", mode="before")
+    @classmethod
+    def parse_optional_proxy_url(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("outbound_proxy_url")
+    @classmethod
+    def validate_outbound_proxy_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("invalid outbound proxy URL") from exc
+        if (
+            parsed.scheme.casefold() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("invalid outbound proxy URL")
+        return value.rstrip("/")
+
     @staticmethod
     def _read_secret(secret: SecretStr | None, path: Path | None) -> str | None:
         if path is not None:
@@ -197,6 +232,22 @@ class Settings(BaseSettings):
 
     def qb_base_url_value(self) -> str | None:
         return self._read_secret(self.qb_base_url, self.qb_base_url_file)
+
+    def outbound_proxy(self) -> httpx.Proxy | None:
+        if not self.outbound_proxy_url:
+            return None
+        username = (
+            self.outbound_proxy_username.get_secret_value()
+            if self.outbound_proxy_username is not None
+            else None
+        )
+        password = (
+            self.outbound_proxy_password.get_secret_value()
+            if self.outbound_proxy_password is not None
+            else None
+        )
+        auth = (username, password) if username and password else None
+        return httpx.Proxy(self.outbound_proxy_url, auth=auth)
 
     @property
     def nextfind_configured(self) -> bool:

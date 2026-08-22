@@ -66,14 +66,14 @@ onMounted(async () => {
     >
       <button
         class="button primary"
-        :disabled="daily.loading || !daily.selectedMedia?.tmdb_id"
+        :disabled="daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id"
         @click="startSearch"
       >
         搜索 PT 资源
       </button>
     </PageHeader>
 
-    <PageState :loading="daily.loading" :error="daily.error" />
+    <PageState :loading="daily.mediaDetailLoading" :error="daily.resourceError" />
 
     <div v-if="daily.selectedMedia && !daily.selectedMedia.tmdb_id" class="panel identity-prompt">
       <div>

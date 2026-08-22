@@ -59,6 +59,7 @@ def build_nextfind(settings: Settings | None = None) -> NextFindAdapter:
         max_line_bytes=settings.external_max_ndjson_line_bytes,
         connect_timeout=settings.external_connect_timeout_seconds,
         read_timeout=settings.external_read_timeout_seconds,
+        proxy=settings.outbound_proxy(),
     )
 
 
@@ -78,6 +79,7 @@ def build_tmdb(settings: Settings | None = None) -> TmdbProvider:
         cache_ttl_seconds=settings.tmdb_cache_ttl_seconds,
         cache_max_entries=settings.tmdb_cache_max_entries,
         allow_future_episodes=settings.tmdb_allow_future_episodes,
+        proxy=settings.outbound_proxy(),
     )
 
 
@@ -109,6 +111,7 @@ def build_pt_site(
         max_response_bytes=settings.external_max_response_bytes,
         min_interval_seconds=settings.avistaz_min_interval_seconds,
         enable_torrent_fetch=allow_torrent_fetch,
+        proxy=settings.outbound_proxy(),
     )
 
 
@@ -219,6 +222,7 @@ def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None
     target.tmdb_id = item.tmdb_id
     target.title = item.title
     target.original_title = item.original_title
+    target.country_codes = item.country_codes or []
     target.year = item.year
     target.poster_path = item.poster_path
     target.state = MediaState.READY if item.tmdb_id is not None else MediaState.NEEDS_ATTENTION
@@ -426,12 +430,8 @@ async def submit_download(
             status_code=409,
             details={"warnings": candidate.warnings},
         )
-    if not settings.qb_target_save_path or not settings.qb_target_category:
-        raise AppError(
-            "QB_TARGET_NOT_CONFIGURED",
-            "请先配置 qBittorrent 保存路径和分类",
-            status_code=409,
-        )
+    category = settings.qb_target_category or candidate.site_id
+    save_path = settings.qb_target_save_path or None
     qb = qb_factory()
     try:
         download = await queue_download(
@@ -470,8 +470,8 @@ async def submit_download(
             result = await qb.add_torrent(
                 payload,
                 expected_info_hash=info_hash,
-                save_path=settings.qb_target_save_path,
-                category=settings.qb_target_category,
+                save_path=save_path,
+                category=category,
                 tags=settings.qb_plan_tags,
                 start_immediately=True,
             )

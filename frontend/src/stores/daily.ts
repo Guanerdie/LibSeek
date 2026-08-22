@@ -1,122 +1,169 @@
 import { defineStore } from 'pinia'
 
 import { dailyApi, ApiError } from '../api/client'
-import type { DailyDownload, DailyMedia, DailyMediaDetail, DailySearch } from '../types'
+import type {
+  DailyDownload,
+  DailyMedia,
+  DailyMediaDetail,
+  DailyMediaFilterOptions,
+  DailyMediaQuery,
+  DailySearch,
+} from '../types'
 
 interface DailyState {
   media: DailyMedia[]
+  mediaTotal: number
+  mediaFilterOptions: DailyMediaFilterOptions
+  mediaQuery: DailyMediaQuery
   selectedMedia: DailyMediaDetail | null
   search: DailySearch | null
   downloads: DailyDownload[]
-  loading: boolean
-  error: string | null
+  mediaListLoading: boolean
+  mediaSyncing: boolean
+  mediaDetailLoading: boolean
+  downloadsLoading: boolean
+  downloadsSyncing: boolean
+  mediaError: string | null
+  resourceError: string | null
+  downloadsError: string | null
+  mediaRequestSequence: number
+  mediaListRequests: number
 }
 
 export const useDailyStore = defineStore('daily', {
   state: (): DailyState => ({
     media: [],
+    mediaTotal: 0,
+    mediaFilterOptions: { media_types: [], country_codes: [], states: [], years: [] },
+    mediaQuery: {},
     selectedMedia: null,
     search: null,
     downloads: [],
-    loading: false,
-    error: null,
+    mediaListLoading: false,
+    mediaSyncing: false,
+    mediaDetailLoading: false,
+    downloadsLoading: false,
+    downloadsSyncing: false,
+    mediaError: null,
+    resourceError: null,
+    downloadsError: null,
+    mediaRequestSequence: 0,
+    mediaListRequests: 0,
   }),
   actions: {
     async syncMedia(): Promise<void> {
-      this.loading = true
-      this.error = null
+      if (this.mediaSyncing) return
+
+      this.mediaSyncing = true
+      this.mediaError = null
       try {
         await dailyApi.syncMedia()
-        this.media = (await dailyApi.media()).items
+        const requestSequence = ++this.mediaRequestSequence
+        const response = await dailyApi.media(this.mediaQuery)
+        if (requestSequence === this.mediaRequestSequence) {
+          this.media = response.items
+          this.mediaTotal = response.total
+          this.mediaFilterOptions = response.filter_options
+        }
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法同步缺失影视'
+        this.mediaError = error instanceof ApiError ? error.message : '无法同步缺失影视'
       } finally {
-        this.loading = false
+        this.mediaSyncing = false
       }
     },
-    async loadMedia(): Promise<void> {
-      this.loading = true
-      this.error = null
+    async loadMedia(query?: DailyMediaQuery): Promise<void> {
+      if (query) this.mediaQuery = { ...query }
+      const requestSequence = ++this.mediaRequestSequence
+      this.mediaListRequests += 1
+      this.mediaListLoading = true
+      this.mediaError = null
       try {
-        this.media = (await dailyApi.media()).items
+        const response = await dailyApi.media(this.mediaQuery)
+        if (requestSequence !== this.mediaRequestSequence) return
+        this.media = response.items
+        this.mediaTotal = response.total
+        this.mediaFilterOptions = response.filter_options
       } catch (error) {
+        if (requestSequence !== this.mediaRequestSequence) return
         this.media = []
-        this.error = error instanceof ApiError ? error.message : '无法读取缺失影视'
+        this.mediaTotal = 0
+        this.mediaError = error instanceof ApiError ? error.message : '无法读取缺失影视'
       } finally {
-        this.loading = false
+        this.mediaListRequests -= 1
+        this.mediaListLoading = this.mediaListRequests > 0
       }
     },
     async loadMediaDetail(mediaId: string): Promise<void> {
-      this.loading = true
-      this.error = null
+      this.mediaDetailLoading = true
+      this.resourceError = null
       this.selectedMedia = null
       try {
         this.selectedMedia = await dailyApi.mediaDetail(mediaId)
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法读取影视详情'
+        this.resourceError = error instanceof ApiError ? error.message : '无法读取影视详情'
       } finally {
-        this.loading = false
+        this.mediaDetailLoading = false
       }
     },
     async identify(mediaId: string, tmdbId?: number): Promise<boolean> {
-      this.error = null
+      this.resourceError = null
       try {
         await dailyApi.identify(mediaId, tmdbId)
         this.selectedMedia = await dailyApi.mediaDetail(mediaId)
         return true
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法确认 TMDB 影视信息'
+        this.resourceError = error instanceof ApiError ? error.message : '无法确认 TMDB 影视信息'
         return false
       }
     },
     async startSearch(mediaId: string, siteIds: string[]): Promise<void> {
-      this.error = null
+      this.resourceError = null
       try {
         this.search = await dailyApi.createSearch(mediaId, siteIds)
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法开始搜索'
+        this.resourceError = error instanceof ApiError ? error.message : '无法开始搜索'
       }
     },
     async loadSearch(searchId: string): Promise<void> {
-      this.error = null
+      this.resourceError = null
       try {
         this.search = await dailyApi.search(searchId)
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法读取搜索结果'
+        this.resourceError = error instanceof ApiError ? error.message : '无法读取搜索结果'
       }
     },
     async download(candidateId: string, confirmWarnings = false): Promise<boolean> {
-      this.error = null
+      this.resourceError = null
       try {
         await dailyApi.downloadCandidate(candidateId, confirmWarnings)
         return true
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法创建下载'
+        this.resourceError = error instanceof ApiError ? error.message : '无法创建下载'
         return false
       }
     },
     async loadDownloads(): Promise<void> {
-      this.loading = true
-      this.error = null
+      this.downloadsLoading = true
+      this.downloadsError = null
       try {
         this.downloads = (await dailyApi.downloads()).items
       } catch (error) {
         this.downloads = []
-        this.error = error instanceof ApiError ? error.message : '无法读取下载任务'
+        this.downloadsError = error instanceof ApiError ? error.message : '无法读取下载任务'
       } finally {
-        this.loading = false
+        this.downloadsLoading = false
       }
     },
     async refreshDownloads(): Promise<void> {
-      this.loading = true
-      this.error = null
+      this.downloadsSyncing = true
+      this.downloadsError = null
       try {
         await dailyApi.syncDownloads()
         this.downloads = (await dailyApi.downloads()).items
       } catch (error) {
-        this.error = error instanceof ApiError ? error.message : '无法同步下载状态'
+        this.downloadsError = error instanceof ApiError ? error.message : '无法同步下载状态'
       } finally {
-        this.loading = false
+        this.downloadsSyncing = false
       }
     },
   },

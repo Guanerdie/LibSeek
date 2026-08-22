@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import OperatorPrincipal, ViewerPrincipal
 from app.db.session import get_session
+from app.models.enums import MediaType
 from app.simple import service
 from app.simple.integrations import (
     build_nextfind,
@@ -29,6 +30,7 @@ from app.simple.schemas import (
     DownloadView,
     IdentityRequest,
     MediaDetail,
+    MediaFilterOptions,
     MediaPage,
     MediaSummary,
     SearchCreate,
@@ -46,16 +48,36 @@ async def library(
     session: Session,
     principal: ViewerPrincipal,
     state: MediaState | None = None,
+    media_type: MediaType | None = None,
+    country_code: str | None = Query(default=None, min_length=2, max_length=2),
+    year: int | None = Query(default=None, ge=1870, le=2200),
+    query: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=100),
 ) -> MediaPage:
     del principal
-    items, total = await service.list_media(session, state=state, page=page, page_size=page_size)
+    items, total = await service.list_media(
+        session,
+        state=state,
+        media_type=media_type,
+        country_code=country_code,
+        year=year,
+        query=query,
+        page=page,
+        page_size=page_size,
+    )
+    media_types, country_codes, states, years = await service.media_filter_options(session)
     return MediaPage(
         items=[MediaSummary.model_validate(item) for item in items],
         total=total,
         page=page,
         page_size=page_size,
+        filter_options=MediaFilterOptions(
+            media_types=media_types,
+            country_codes=country_codes,
+            states=states,
+            years=years,
+        ),
     )
 
 

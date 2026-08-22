@@ -118,6 +118,17 @@ describe('auth store', () => {
     expect(sessionStorage.length).toBe(0)
   })
 
+  it('keeps the specific setup validation message returned by the backend', async () => {
+    mocks.setup.mockRejectedValueOnce(
+      new ApiError('API_VALIDATION_ERROR', '管理员密码至少需要 6 位', 422),
+    )
+    const store = useAuthStore()
+
+    await expect(store.setupAdmin('first-admin', '123456')).resolves.toBe(false)
+
+    expect(store.error).toBe('管理员密码至少需要 6 位')
+  })
+
   it('keeps the local session visible when logout fails for a non-401 error', async () => {
     mocks.logout.mockRejectedValueOnce(new Error('网络不可用'))
     const store = useAuthStore()
@@ -227,6 +238,23 @@ describe('LoginView', () => {
     expect(router.currentRoute.value.path).toBe('/login')
   })
 
+  it('explains the six-character minimum before creating the first administrator', async () => {
+    const router = testRouter()
+    await router.push('/login')
+    const auth = useAuthStore()
+    auth.adminInitialized = false
+    const wrapper = mount(LoginView, { global: { plugins: [pinia, router] } })
+
+    await wrapper.get('input[name="username"]').setValue('first-admin')
+    await wrapper.get('input[name="password"]').setValue('12345')
+    await wrapper.get('input[name="password_confirmation"]').setValue('12345')
+    await wrapper.get('form').trigger('submit')
+
+    expect(wrapper.text()).toContain('管理员密码至少需要 6 位')
+    expect(mocks.setup).not.toHaveBeenCalled()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+  })
+
   it('creates the first administrator, clears both passwords, and opens configuration', async () => {
     mocks.setup.mockResolvedValueOnce({
       username: 'first-admin',
@@ -241,12 +269,12 @@ describe('LoginView', () => {
 
     expect(wrapper.text()).toContain('创建管理员')
     await wrapper.get('input[name="username"]').setValue('first-admin')
-    await wrapper.get('input[name="password"]').setValue('strong-local-password')
-    await wrapper.get('input[name="password_confirmation"]').setValue('strong-local-password')
+    await wrapper.get('input[name="password"]').setValue('123456')
+    await wrapper.get('input[name="password_confirmation"]').setValue('123456')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
-    expect(mocks.setup).toHaveBeenCalledWith('first-admin', 'strong-local-password')
+    expect(mocks.setup).toHaveBeenCalledWith('first-admin', '123456')
     expect(auth.principal).toEqual({ username: 'first-admin', role: 'admin' })
     expect(auth.csrfToken).toBe('new-session-secret')
     expect(router.currentRoute.value.path).toBe('/configuration')

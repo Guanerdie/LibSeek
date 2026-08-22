@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   testNextFind: vi.fn(),
   testTmdb: vi.fn(),
+  testOutboundProxy: vi.fn(),
   testPtSite: vi.fn(),
   testQbittorrent: vi.fn(),
 }))
@@ -30,6 +31,12 @@ const snapshot: ConfigurationSnapshot = {
     configured: true,
   },
   tmdb: { configured: true },
+  outbound_proxy: {
+    url: 'http://proxy.internal:7890',
+    username: 'proxy-user',
+    password_configured: true,
+    configured: true,
+  },
   pt_site: {
     architecture: 'avistaz',
     base_url: 'https://avistaz.to',
@@ -84,19 +91,21 @@ beforeEach(() => {
 })
 
 describe('connection settings', () => {
-  it('shows only the four daily connections without retired runtime gates', async () => {
+  it('shows the four daily connections and optional outbound proxy without retired gates', async () => {
     const wrapper = mount(ConfigurationView)
     await flushPromises()
 
-    expect(wrapper.findAll('.integration-config-section')).toHaveLength(4)
+    expect(wrapper.findAll('.integration-config-section')).toHaveLength(5)
     expect(wrapper.text()).toContain('NextFind')
     expect(wrapper.text()).toContain('TMDB')
     expect(wrapper.text()).toContain('PT 站点')
     expect(wrapper.text()).toContain('qBittorrent')
+    expect(wrapper.text()).toContain('出站代理')
     expect(wrapper.text()).not.toContain('下载执行门禁')
     expect(wrapper.text()).not.toContain('PostgreSQL')
-    expect(wrapper.get('input[name="qb_save_path"]').attributes('required')).toBeDefined()
-    expect(wrapper.get('input[name="qb_category"]').attributes('required')).toBeDefined()
+    expect(wrapper.get('input[name="qb_save_path"]').attributes('required')).toBeUndefined()
+    expect(wrapper.get('input[name="qb_category"]').attributes('required')).toBeUndefined()
+    expect(wrapper.get('a[href="https://www.themoviedb.org/settings/api"]').attributes('target')).toBe('_blank')
   })
 
   it('saves one connection without resubmitting unrelated secrets', async () => {
@@ -111,6 +120,22 @@ describe('connection settings', () => {
         base_url: 'https://nextfind.example',
         username: 'nextfind-user',
         password: 'new-password',
+      },
+    })
+  })
+
+  it('persists outbound proxy secrets without including unrelated configuration', async () => {
+    const wrapper = mount(ConfigurationView)
+    await flushPromises()
+    await wrapper.get('input[name="proxy_password"]').setValue('new-proxy-password')
+    await wrapper.get('form[aria-labelledby="proxy-config-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.update).toHaveBeenCalledWith({
+      outbound_proxy: {
+        url: 'http://proxy.internal:7890',
+        username: 'proxy-user',
+        password: 'new-proxy-password',
       },
     })
   })

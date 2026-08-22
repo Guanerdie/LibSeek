@@ -16,7 +16,7 @@ class SetupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     username: str = Field(min_length=1, max_length=120)
-    password: SecretStr = Field(min_length=8, max_length=1024)
+    password: SecretStr = Field(min_length=6, max_length=1024)
 
 
 class SetupStatusResponse(BaseModel):

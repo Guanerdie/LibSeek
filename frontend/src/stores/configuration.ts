@@ -44,6 +44,7 @@ export const useConfigurationStore = defineStore('configuration', () => {
   ): Promise<ConfigurationTestResult> {
     if (section === 'nextfind') return configurationApi.testNextFind()
     if (section === 'tmdb') return configurationApi.testTmdb()
+    if (section === 'outbound_proxy') return configurationApi.testOutboundProxy()
     if (section === 'pt_site') {
       if (!architecture) throw new Error('缺少 PT 站点架构')
       return configurationApi.testPtSite(architecture)
