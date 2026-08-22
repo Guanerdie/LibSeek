@@ -97,8 +97,11 @@ export const useDailyStore = defineStore('daily', {
       this.mediaDetailLoading = true
       this.resourceError = null
       this.selectedMedia = null
+      this.search = null
       try {
-        this.selectedMedia = await dailyApi.mediaDetail(mediaId)
+        const selectedMedia = await dailyApi.mediaDetail(mediaId)
+        this.selectedMedia = selectedMedia
+        this.search = selectedMedia.latest_search
       } catch (error) {
         this.resourceError = error instanceof ApiError ? error.message : '无法读取影视详情'
       } finally {

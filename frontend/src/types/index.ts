@@ -219,6 +219,7 @@ export interface DailyMediaPage extends Page<DailyMedia> {
 
 export interface DailyMediaDetail extends DailyMedia {
   episodes: DailyEpisode[]
+  latest_search: DailySearch | null
 }
 
 export interface DailyCandidate {

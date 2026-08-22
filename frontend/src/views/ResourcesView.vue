@@ -52,7 +52,9 @@ async function download(candidate: DailyCandidate): Promise<void> {
 
 onMounted(async () => {
   await daily.loadMediaDetail(mediaId.value)
-  const searchId = typeof route.query.search === 'string' ? route.query.search : null
+  const querySearchId = typeof route.query.search === 'string' ? route.query.search : null
+  const searchId =
+    querySearchId ?? (daily.search?.state === 'SUCCEEDED' ? daily.search.id : null)
   if (searchId) await daily.loadSearch(searchId)
 })
 </script>
@@ -108,6 +110,10 @@ onMounted(async () => {
       v-if="daily.search?.state === 'SUCCEEDED'"
       :empty="candidates.length === 0"
       empty-text="没有找到符合条件的资源"
+    />
+    <PageState
+      v-else-if="daily.search?.state === 'FAILED'"
+      :error="daily.search.error_message || '搜索失败'"
     />
 
     <div v-if="candidates.length" class="candidate-stack">

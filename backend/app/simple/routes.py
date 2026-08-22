@@ -95,9 +95,15 @@ async def sync_library(session: Session, principal: OperatorPrincipal) -> SyncRe
 @router.get("/library/{media_id}", response_model=MediaDetail)
 async def media_detail(media_id: str, session: Session, principal: ViewerPrincipal) -> MediaDetail:
     del principal
-    media, episodes = await service.get_media(session, media_id)
+    media, episodes, latest_search = await service.get_media(session, media_id)
     return MediaDetail.model_validate(
-        {**MediaSummary.model_validate(media).model_dump(), "episodes": episodes}
+        {
+            **MediaSummary.model_validate(media).model_dump(),
+            "episodes": episodes,
+            "latest_search": (
+                SearchView.model_validate(latest_search) if latest_search is not None else None
+            ),
+        }
     )
 
 

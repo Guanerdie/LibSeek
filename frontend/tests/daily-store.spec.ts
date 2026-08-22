@@ -1,10 +1,12 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useDailyStore } from '../src/stores/daily'
-import type { DailyDownload, DailyMedia } from '../src/types'
+import type { DailyDownload, DailyMedia, DailyMediaDetail, DailySearch } from '../src/types'
 import LibraryView from '../src/views/LibraryView.vue'
+import ResourcesView from '../src/views/ResourcesView.vue'
 
 const mocks = vi.hoisted(() => ({
   syncMedia: vi.fn(),
@@ -71,6 +73,33 @@ const download: DailyDownload = {
   error_message: null,
   created_at: '2026-08-22T00:00:00Z',
   updated_at: '2026-08-22T00:01:00Z',
+}
+
+const failedSearch: DailySearch = {
+  id: 'search-failed',
+  media_id: media.id,
+  site_ids: ['avistaz'],
+  state: 'FAILED',
+  error_message: 'PT 站点连接超时',
+  created_at: '2026-08-22T00:00:00Z',
+  finished_at: '2026-08-22T00:01:00Z',
+  candidates: [],
+}
+
+const successfulSearch: DailySearch = {
+  ...failedSearch,
+  id: 'search-succeeded',
+  state: 'SUCCEEDED',
+  error_message: null,
+}
+
+function mediaDetail(overrides: Partial<DailyMediaDetail> = {}): DailyMediaDetail {
+  return {
+    ...media,
+    episodes: [],
+    latest_search: null,
+    ...overrides,
+  }
 }
 
 function deferred<T>() {
@@ -280,6 +309,66 @@ describe('simplified daily store', () => {
     mediaSync.resolve({ created: 1, updated: 0 })
     await flushPromises()
     expect(reenteredView.get('button.primary').text()).toBe('同步缺失影视')
+  })
+
+  it('restores and displays a persisted failed search when re-entering resources', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ latest_search: failedSearch }))
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/library/:id/resources', component: ResourcesView },
+        { path: '/downloads', component: { template: '<div />' } },
+      ],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(mocks.mediaDetail).toHaveBeenCalledWith(media.id)
+    expect(mocks.search).not.toHaveBeenCalled()
+    expect(wrapper.get('.section-heading').text()).toContain('失败')
+    expect(wrapper.get('.error-state').text()).toBe('PT 站点连接超时')
+  })
+
+  it('loads the full latest successful search before showing its candidate result', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ latest_search: successfulSearch }))
+    mocks.search.mockResolvedValueOnce(successfulSearch)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/library/:id/resources', component: ResourcesView },
+        { path: '/downloads', component: { template: '<div />' } },
+      ],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(mocks.search).toHaveBeenCalledWith(successfulSearch.id)
+    expect(wrapper.get('.empty-state').text()).toBe('没有找到符合条件的资源')
+  })
+
+  it('clears the previous media search while loading a different media item', async () => {
+    const nextDetail = deferred<DailyMediaDetail>()
+    mocks.mediaDetail.mockReturnValueOnce(nextDetail.promise)
+    const store = useDailyStore()
+    store.search = failedSearch
+
+    const loadPromise = store.loadMediaDetail('media-2')
+
+    expect(store.search).toBeNull()
+    nextDetail.resolve(
+      mediaDetail({
+        id: 'media-2',
+        source_item_id: 'source-2',
+        title: '另一部影视',
+        latest_search: null,
+      }),
+    )
+    await loadPromise
+
+    expect(store.selectedMedia?.id).toBe('media-2')
+    expect(store.search).toBeNull()
   })
 
   it('passes the single warning confirmation directly to download submission', async () => {

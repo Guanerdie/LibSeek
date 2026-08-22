@@ -45,10 +45,6 @@ class MediaSummary(BaseModel):
     updated_at: datetime
 
 
-class MediaDetail(MediaSummary):
-    episodes: list[EpisodeView] = Field(default_factory=list)
-
-
 class MediaFilterOptions(BaseModel):
     media_types: list[MediaType]
     country_codes: list[str]
@@ -110,6 +106,11 @@ class CandidateView(BaseModel):
 
 class SearchDetail(SearchView):
     candidates: list[CandidateView] = Field(default_factory=list)
+
+
+class MediaDetail(MediaSummary):
+    episodes: list[EpisodeView] = Field(default_factory=list)
+    latest_search: SearchView | None = None
 
 
 class DownloadCreate(BaseModel):

@@ -96,7 +96,9 @@ async def media_filter_options(
     )
 
 
-async def get_media(session: AsyncSession, media_id: str) -> tuple[LibraryMediaItem, list[Episode]]:
+async def get_media(
+    session: AsyncSession, media_id: str
+) -> tuple[LibraryMediaItem, list[Episode], ReleaseSearch | None]:
     media = await session.get(LibraryMediaItem, media_id)
     if media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
@@ -105,7 +107,13 @@ async def get_media(session: AsyncSession, media_id: str) -> tuple[LibraryMediaI
         .where(Episode.media_id == media_id)
         .order_by(Episode.season_number, Episode.episode_number)
     )
-    return media, list(episodes)
+    latest_search = await session.scalar(
+        select(ReleaseSearch)
+        .where(ReleaseSearch.media_id == media_id)
+        .order_by(ReleaseSearch.created_at.desc(), ReleaseSearch.id.desc())
+        .limit(1)
+    )
+    return media, list(episodes), latest_search
 
 
 async def create_search(
