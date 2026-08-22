@@ -80,7 +80,7 @@ async def test_library_api_reads_the_simplified_database(
         "page_size": 30,
         "filter_options": {
             "media_types": [],
-            "country_codes": [],
+            "regions": ["欧美", "大陆", "港台", "韩国", "日本", "亚太"],
             "states": [],
             "years": [],
         },
@@ -88,7 +88,7 @@ async def test_library_api_reads_the_simplified_database(
 
 
 @pytest.mark.asyncio
-async def test_library_api_filters_by_nextfind_country_and_common_fields(
+async def test_library_api_filters_by_nextfind_region_and_common_fields(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session:
@@ -100,6 +100,7 @@ async def test_library_api_filters_by_nextfind_country_and_common_fields(
                     tmdb_id=100,
                     title="A Missing Show",
                     country_codes=["JP", "US"],
+                    original_language="ja",
                     year=2026,
                     state=MediaState.READY,
                 ),
@@ -109,6 +110,7 @@ async def test_library_api_filters_by_nextfind_country_and_common_fields(
                     tmdb_id=200,
                     title="Another Movie",
                     country_codes=["KR"],
+                    original_language="ko",
                     year=2025,
                     state=MediaState.NEEDS_ATTENTION,
                 ),
@@ -139,7 +141,7 @@ async def test_library_api_filters_by_nextfind_country_and_common_fields(
                 "/api/library",
                 params={
                     "media_type": "tv",
-                    "country_code": "jp",
+                    "region": "日本",
                     "year": 2026,
                     "query": "missing",
                 },
@@ -152,9 +154,11 @@ async def test_library_api_filters_by_nextfind_country_and_common_fields(
     assert payload["total"] == 1
     assert [item["source_item_id"] for item in payload["items"]] == ["filter-tv"]
     assert payload["items"][0]["country_codes"] == ["JP", "US"]
+    assert payload["items"][0]["original_language"] == "ja"
+    assert payload["items"][0]["regions"] == ["欧美", "日本"]
     assert payload["filter_options"] == {
         "media_types": ["movie", "tv"],
-        "country_codes": ["JP", "KR", "US"],
+        "regions": ["欧美", "大陆", "港台", "韩国", "日本", "亚太"],
         "states": ["NEEDS_ATTENTION", "READY"],
         "years": [2026, 2025],
     }

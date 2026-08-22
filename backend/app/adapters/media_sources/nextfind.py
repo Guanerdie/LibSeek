@@ -34,6 +34,7 @@ from app.schemas.adapters import (
     MediaItemData,
     ProbeResult,
     normalize_country_codes,
+    normalize_language_code,
 )
 
 _DISCOVER_DATA_KEYS = frozenset({"data", "items", "list"})
@@ -99,6 +100,7 @@ class NextFindRawItem(BaseModel):
     title: str
     original_title: str | None = None
     country_codes: list[str] | None = None
+    original_language: str | None = None
     year: str | int | None = None
     poster: str | None = None
     local_episodes: int | None = Field(default=None, ge=0)
@@ -120,6 +122,11 @@ class NextFindRawItem(BaseModel):
     @classmethod
     def normalize_local_episode_matrix(cls, value: object) -> EpisodeMatrix | None:
         return normalize_episode_matrix(value)
+
+    @field_validator("original_language", mode="before")
+    @classmethod
+    def normalize_original_language(cls, value: object) -> str | None:
+        return normalize_language_code(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -656,12 +663,14 @@ class NextFindAdapter(MediaSourceAdapter):
         )
         key = (item.source, item.media_type.value, identity)
         previous = merged.get(key)
-        if (
-            previous is not None
-            and previous.country_codes is not None
-            and item.country_codes is None
-        ):
-            item = item.model_copy(update={"country_codes": previous.country_codes})
+        if previous is not None:
+            updates: dict[str, object] = {}
+            if previous.country_codes is not None and item.country_codes is None:
+                updates["country_codes"] = previous.country_codes
+            if previous.original_language is not None and item.original_language is None:
+                updates["original_language"] = previous.original_language
+            if updates:
+                item = item.model_copy(update=updates)
         merged[key] = item
 
     async def _read_discover_page(
@@ -999,6 +1008,7 @@ class NextFindAdapter(MediaSourceAdapter):
             title=raw.title.strip(),
             original_title=raw.original_title,
             country_codes=raw.country_codes,
+            original_language=raw.original_language,
             year=year,
             poster_path=raw.poster,
             raw_type=raw.type,

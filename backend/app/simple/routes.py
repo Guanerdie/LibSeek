@@ -23,6 +23,7 @@ from app.simple.integrations import (
     sync_nextfind,
 )
 from app.simple.models import DownloadState, MediaState
+from app.simple.regions import NextFindRegion
 from app.simple.schemas import (
     CandidateView,
     DownloadCreate,
@@ -49,7 +50,7 @@ async def library(
     principal: ViewerPrincipal,
     state: MediaState | None = None,
     media_type: MediaType | None = None,
-    country_code: str | None = Query(default=None, min_length=2, max_length=2),
+    region: NextFindRegion | None = None,
     year: int | None = Query(default=None, ge=1870, le=2200),
     query: str | None = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
@@ -60,13 +61,13 @@ async def library(
         session,
         state=state,
         media_type=media_type,
-        country_code=country_code,
+        region=region,
         year=year,
         query=query,
         page=page,
         page_size=page_size,
     )
-    media_types, country_codes, states, years = await service.media_filter_options(session)
+    media_types, regions, states, years = await service.media_filter_options(session)
     return MediaPage(
         items=[MediaSummary.model_validate(item) for item in items],
         total=total,
@@ -74,7 +75,7 @@ async def library(
         page_size=page_size,
         filter_options=MediaFilterOptions(
             media_types=media_types,
-            country_codes=country_codes,
+            regions=regions,
             states=states,
             years=years,
         ),

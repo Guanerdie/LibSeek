@@ -173,6 +173,7 @@ class FakeNextFind(MediaSourceAdapter):
                     tmdb_id=300,
                     title="A Missing Show",
                     country_codes=["JP"],
+                    original_language="ja",
                     missing_episodes=["S01E02", "S01E03"],
                     identity_confidence=IdentityConfidence.HIGH,
                     metadata_status=MetadataStatus.RESOLVED,
@@ -361,6 +362,7 @@ async def test_existing_adapters_feed_the_simplified_domain(session_factory) -> 
         media = await session.scalar(select(LibraryMediaItem))
         assert media is not None
         assert media.country_codes == ["JP"]
+        assert media.original_language == "ja"
         episodes = list(await session.scalars(select(Episode)))
         assert [(item.season_number, item.episode_number) for item in episodes] == [
             (1, 2),

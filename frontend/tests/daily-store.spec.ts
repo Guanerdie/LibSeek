@@ -34,6 +34,8 @@ const media: DailyMedia = {
   title: '测试剧集',
   original_title: 'Test Show',
   country_codes: ['JP'],
+  original_language: 'ja',
+  regions: ['日本'],
   year: 2026,
   poster_path: null,
   state: 'READY',
@@ -44,7 +46,7 @@ const media: DailyMedia = {
 
 const filterOptions = {
   media_types: ['tv'] as const,
-  country_codes: ['JP'],
+  regions: ['欧美', '大陆', '港台', '韩国', '日本', '亚太'] as const,
   states: ['READY'] as const,
   years: [2026],
 }
@@ -129,7 +131,7 @@ describe('simplified daily store', () => {
     expect(store.media).toEqual([media])
   })
 
-  it('applies the common library filters using NextFind country codes', async () => {
+  it('applies the common library filters using NextFind region groups', async () => {
     mocks.media.mockResolvedValue(mediaPage())
     const wrapper = mount(LibraryView, { global: { stubs: { RouterLink: true } } })
     await flushPromises()
@@ -137,7 +139,7 @@ describe('simplified daily store', () => {
     await wrapper.get('input[type="search"]').setValue('测试')
     const selects = wrapper.findAll('.filter-grid select')
     await selects[0]!.setValue('tv')
-    await selects[1]!.setValue('JP')
+    await selects[1]!.setValue('日本')
     await selects[2]!.setValue('READY')
     await selects[3]!.setValue('2026')
     await wrapper.get('form.library-filters').trigger('submit')
@@ -146,7 +148,7 @@ describe('simplified daily store', () => {
     expect(mocks.media).toHaveBeenLastCalledWith({
       query: '测试',
       mediaType: 'tv',
-      countryCode: 'JP',
+      region: '日本',
       state: 'READY',
       year: 2026,
     })

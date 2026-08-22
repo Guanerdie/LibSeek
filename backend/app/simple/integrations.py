@@ -223,6 +223,7 @@ def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None
     target.title = item.title
     target.original_title = item.original_title
     target.country_codes = item.country_codes or []
+    target.original_language = item.original_language
     target.year = item.year
     target.poster_path = item.poster_path
     target.state = MediaState.READY if item.tmdb_id is not None else MediaState.NEEDS_ATTENTION
@@ -295,6 +296,8 @@ async def identify_media(
     media.tmdb_id = record.tmdb_id
     media.title = record.chinese_title or record.title
     media.original_title = record.original_title
+    media.country_codes = record.country_codes or media.country_codes
+    media.original_language = record.original_language or media.original_language
     media.year = record.year
     media.poster_path = record.poster_path
     media.state = MediaState.READY

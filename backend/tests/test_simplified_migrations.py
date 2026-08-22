@@ -48,9 +48,9 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         (("candidate_id",), "release_candidates", "RESTRICT"),
         (("media_id",), "library_media", "RESTRICT"),
     }
-    assert "country_codes" in {
-        column["name"] for column in inspector.get_columns("library_media")
-    }
+    library_columns = {column["name"] for column in inspector.get_columns("library_media")}
+    assert "country_codes" in library_columns
+    assert "original_language" in library_columns
     engine.dispose()
 
     command.downgrade(config, "base")

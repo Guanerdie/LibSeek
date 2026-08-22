@@ -20,6 +20,7 @@ from app.simple.models import (
     ReleaseSearch,
     SearchState,
 )
+from app.simple.regions import NEXTFIND_REGION_ORDER, NextFindRegion, nextfind_regions
 
 
 async def list_media(
@@ -27,7 +28,7 @@ async def list_media(
     *,
     state: MediaState | None,
     media_type: MediaType | None,
-    country_code: str | None,
+    region: NextFindRegion | None,
     year: int | None,
     query: str | None,
     page: int,
@@ -53,10 +54,13 @@ async def list_media(
         .where(*filters)
         .order_by(LibraryMediaItem.updated_at.desc())
     )
-    normalized_country = country_code.strip().upper() if country_code else None
-    if normalized_country:
+    if region is not None:
         all_rows = list(await session.scalars(statement))
-        matching = [item for item in all_rows if normalized_country in item.country_codes]
+        matching = [
+            item
+            for item in all_rows
+            if region in nextfind_regions(item.country_codes, item.original_language)
+        ]
         start = (page - 1) * page_size
         return matching[start : start + page_size], len(matching)
 
@@ -69,28 +73,25 @@ async def list_media(
 
 async def media_filter_options(
     session: AsyncSession,
-) -> tuple[list[MediaType], list[str], list[MediaState], list[int]]:
+) -> tuple[list[MediaType], list[NextFindRegion], list[MediaState], list[int]]:
     rows = await session.execute(
         select(
             LibraryMediaItem.media_type,
-            LibraryMediaItem.country_codes,
             LibraryMediaItem.state,
             LibraryMediaItem.year,
         )
     )
     media_types: set[MediaType] = set()
-    country_codes: set[str] = set()
     states: set[MediaState] = set()
     years: set[int] = set()
-    for media_type, item_country_codes, state, year in rows:
+    for media_type, state, year in rows:
         media_types.add(media_type)
-        country_codes.update(item_country_codes or [])
         states.add(state)
         if year is not None:
             years.add(year)
     return (
         sorted(media_types, key=lambda item: item.value),
-        sorted(country_codes),
+        list(NEXTFIND_REGION_ORDER),
         sorted(states, key=lambda item: item.value),
         sorted(years, reverse=True),
     )

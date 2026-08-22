@@ -157,7 +157,7 @@ export const dailyApi = {
         page_size: params.pageSize ?? 30,
         state: params.state,
         media_type: params.mediaType,
-        country_code: params.countryCode,
+        region: params.region,
         year: params.year,
         query: params.query,
       })}`,

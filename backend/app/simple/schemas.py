@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import MediaType
 from app.simple.models import DownloadState, EpisodeState, MediaState, SearchState
+from app.simple.regions import NextFindRegion
 
 
 class Page(BaseModel):
@@ -37,6 +38,8 @@ class MediaSummary(BaseModel):
     title: str
     original_title: str | None
     country_codes: list[str]
+    original_language: str | None
+    regions: list[NextFindRegion]
     year: int | None
     poster_path: str | None
     state: MediaState
@@ -47,7 +50,7 @@ class MediaSummary(BaseModel):
 
 class MediaFilterOptions(BaseModel):
     media_types: list[MediaType]
-    country_codes: list[str]
+    regions: list[NextFindRegion]
     states: list[MediaState]
     years: list[int]
 

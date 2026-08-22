@@ -157,20 +157,21 @@ export type DailyMediaState =
   | 'NEEDS_ATTENTION'
 
 export type DailyMediaType = 'movie' | 'tv'
+export type DailyMediaRegion = '欧美' | '大陆' | '港台' | '韩国' | '日本' | '亚太'
 
 export interface DailyMediaQuery {
   page?: number
   pageSize?: number
   state?: DailyMediaState
   mediaType?: DailyMediaType
-  countryCode?: string
+  region?: DailyMediaRegion
   year?: number
   query?: string
 }
 
 export interface DailyMediaFilterOptions {
   media_types: DailyMediaType[]
-  country_codes: string[]
+  regions: DailyMediaRegion[]
   states: DailyMediaState[]
   years: number[]
 }
@@ -205,6 +206,8 @@ export interface DailyMedia {
   title: string
   original_title: string | null
   country_codes: string[]
+  original_language: string | null
+  regions: DailyMediaRegion[]
   year: number | null
   poster_path: string | null
   state: DailyMediaState

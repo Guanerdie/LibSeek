@@ -22,6 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.time import utc_now
 from app.db.base import Base
 from app.models.enums import MediaType
+from app.simple.regions import NextFindRegion, nextfind_regions
 
 
 def new_id() -> str:
@@ -92,6 +93,7 @@ class LibraryMediaItem(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     original_title: Mapped[str | None] = mapped_column(String(500))
     country_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    original_language: Mapped[str | None] = mapped_column(String(16))
     year: Mapped[int | None] = mapped_column(Integer)
     poster_path: Mapped[str | None] = mapped_column(Text)
     state: Mapped[MediaState] = mapped_column(
@@ -104,6 +106,10 @@ class LibraryMediaItem(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
+
+    @property
+    def regions(self) -> list[NextFindRegion]:
+        return list(nextfind_regions(self.country_codes, self.original_language))
 
 
 class Episode(Base):

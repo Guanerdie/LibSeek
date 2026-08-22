@@ -34,7 +34,7 @@ export const useDailyStore = defineStore('daily', {
   state: (): DailyState => ({
     media: [],
     mediaTotal: 0,
-    mediaFilterOptions: { media_types: [], country_codes: [], states: [], years: [] },
+    mediaFilterOptions: { media_types: [], regions: [], states: [], years: [] },
     mediaQuery: {},
     selectedMedia: null,
     search: null,

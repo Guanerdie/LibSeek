@@ -6,20 +6,20 @@ import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
-import type { DailyMediaState, DailyMediaType } from '../types'
+import type { DailyMediaRegion, DailyMediaState, DailyMediaType } from '../types'
 import { statusLabel } from '../utils/format'
 
 const daily = useDailyStore()
 const filters = reactive<{
   query: string
   mediaType: DailyMediaType | ''
-  countryCode: string
+  region: DailyMediaRegion | ''
   state: DailyMediaState | ''
   year: string
 }>({
   query: daily.mediaQuery.query ?? '',
   mediaType: daily.mediaQuery.mediaType ?? '',
-  countryCode: daily.mediaQuery.countryCode ?? '',
+  region: daily.mediaQuery.region ?? '',
   state: daily.mediaQuery.state ?? '',
   year: daily.mediaQuery.year ? String(daily.mediaQuery.year) : '',
 })
@@ -28,7 +28,7 @@ function applyFilters(): void {
   void daily.loadMedia({
     query: filters.query.trim() || undefined,
     mediaType: filters.mediaType || undefined,
-    countryCode: filters.countryCode || undefined,
+    region: filters.region || undefined,
     state: filters.state || undefined,
     year: filters.year ? Number(filters.year) : undefined,
   })
@@ -37,7 +37,7 @@ function applyFilters(): void {
 function resetFilters(): void {
   filters.query = ''
   filters.mediaType = ''
-  filters.countryCode = ''
+  filters.region = ''
   filters.state = ''
   filters.year = ''
   void daily.loadMedia({})
@@ -82,10 +82,10 @@ onMounted(() => daily.loadMedia())
         </label>
         <label>
           地区
-          <select v-model="filters.countryCode">
+          <select v-model="filters.region">
             <option value="">全部地区</option>
-            <option v-for="code in daily.mediaFilterOptions.country_codes" :key="code" :value="code">
-              {{ code }}
+            <option v-for="region in daily.mediaFilterOptions.regions" :key="region" :value="region">
+              {{ region }}
             </option>
           </select>
         </label>
@@ -133,7 +133,7 @@ onMounted(() => daily.loadMedia())
             <h2>{{ item.title }}</h2>
             <p>
               {{ item.year ?? '年份未知' }} ·
-              {{ item.country_codes.length ? item.country_codes.join(' / ') : '地区未知' }} ·
+              {{ item.regions.length ? item.regions.join(' / ') : '地区未知' }} ·
               TMDB {{ item.tmdb_id ?? '待识别' }}
             </p>
           </div>

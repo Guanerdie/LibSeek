@@ -421,6 +421,7 @@ async def test_nextfind_normalizes_country_code_aliases(adapter: NextFindAdapter
                         "id": 1,
                         "type": "movie",
                         "title": "First",
+                        "original_language": " JA ",
                         "country": " jp ",
                         "countries": ["US", "jp", "Japan"],
                         "production_countries": [
@@ -453,6 +454,7 @@ async def test_nextfind_normalizes_country_code_aliases(adapter: NextFindAdapter
         ["TH"],
         None,
     ]
+    assert [item.original_language for item in result.items] == ["ja", None, None]
     assert not result.warnings
     await adapter.aclose()
 
@@ -507,6 +509,7 @@ async def test_nextfind_keeps_country_codes_when_a_duplicate_summary_follows(
                         "type": "movie",
                         "title": "Detailed",
                         "origin_country": '["JP","US"]',
+                        "original_language": "ja",
                     },
                     {"id": 1, "type": "movie", "title": "Summary"},
                 ]
@@ -518,6 +521,7 @@ async def test_nextfind_keeps_country_codes_when_a_duplicate_summary_follows(
 
     assert len(result.items) == 1
     assert result.items[0].country_codes == ["JP", "US"]
+    assert result.items[0].original_language == "ja"
     await adapter.aclose()
 
 

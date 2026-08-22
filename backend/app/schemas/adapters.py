@@ -47,6 +47,15 @@ def normalize_country_codes(value: object) -> list[str] | None:
     return result or None
 
 
+def normalize_language_code(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    code = value.strip().lower()
+    if len(code) != 2 or not code.isascii() or not code.isalpha():
+        return None
+    return code
+
+
 class PtSearchMode(StrEnum):
     TMDB_ID = "TMDB_ID"
     IMDB_ID = "IMDB_ID"
@@ -111,6 +120,7 @@ class MediaItemData(BaseModel):
     title: str
     original_title: str | None = None
     country_codes: list[str] | None = None
+    original_language: str | None = None
     year: int | None = Field(default=None, ge=1870, le=2200)
     poster_path: str | None = None
     raw_type: str | None = None
@@ -138,6 +148,11 @@ class MediaItemData(BaseModel):
     @classmethod
     def validate_country_codes(cls, value: object) -> list[str] | None:
         return normalize_country_codes(value)
+
+    @field_validator("original_language", mode="before")
+    @classmethod
+    def validate_original_language(cls, value: object) -> str | None:
+        return normalize_language_code(value)
 
 
 class MediaDiscoveryResult(BaseModel):
