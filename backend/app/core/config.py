@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_prefix: str = "/api"
     database_url: str = "sqlite+aiosqlite:///./unin.db"
+    automation_scheduler_enabled: bool = False
+    automation_scheduler_poll_seconds: int = Field(default=60, ge=5, le=3600)
     runtime_config_dir: Path = Field(
         default=Path("/var/lib/unin"),
         validation_alias=AliasChoices("UNIN_RUNTIME_CONFIG_DIR", "runtime_config_dir"),

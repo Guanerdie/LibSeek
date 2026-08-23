@@ -85,3 +85,44 @@ export function statusLabel(status: string): string {
     }[status] ?? status
   )
 }
+
+const candidateReasonLabels: Record<string, string> = {
+  TMDB_ID_EXACT: 'TMDB 编号精确匹配',
+  IMDB_ID_EXACT: 'IMDb 编号精确匹配',
+  TITLE_EXACT: '标题精确匹配',
+  MEDIA_TYPE_MATCH: '影视类型匹配',
+  SEASON_EXACT: '季数匹配',
+  SEASON_PACK_COVERS_TARGET_SEASON: '整季资源覆盖缺失内容',
+  EPISODE_COVERAGE_EXACT: '缺集范围精确匹配',
+  EPISODE_COVERAGE_COMPLETE: '完整覆盖缺失集数',
+  YEAR_MATCH: '年份匹配',
+  PREFERRED_RESOLUTION: '符合偏好分辨率',
+  PREFERRED_SOURCE: '符合偏好来源',
+  PREFERRED_AUDIO: '符合偏好音轨',
+  PREFERRED_SUBTITLE: '包含偏好字幕',
+  ACTIVE_SEEDERS: '当前有做种',
+  PROMOTION_ACTIVE: '免费或促销中',
+  SIZE_WITHIN_LIMIT: '体积在限制内',
+}
+
+const candidateWarningLabels: Record<string, string> = {
+  ID_MISMATCH: '影视身份不匹配',
+  ID_UNVERIFIED: '无法验证站点提供的影视编号',
+  MEDIA_TYPE_CONFLICT: '影视类型冲突',
+  YEAR_CONFLICT: '年份不匹配',
+  YEAR_MISMATCH: '年份不匹配',
+  PARTIAL_PACK: '未完整覆盖缺失内容',
+  EPISODE_OVERLAP: '包含已存在的集数',
+  NO_SEEDERS: '当前无做种',
+  OVERSIZED: '资源体积超出限制',
+  HNR_UNKNOWN: '无法确认站点考核规则',
+  POSSIBLE_DUPLICATE: '可能重复下载',
+}
+
+export function candidateReasonLabel(code: string): string {
+  return candidateReasonLabels[code] ?? `未识别匹配项（${code}）`
+}
+
+export function candidateWarningLabel(code: string): string {
+  return candidateWarningLabels[code] ?? `未识别风险提示（${code}）`
+}

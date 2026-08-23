@@ -45,6 +45,7 @@ describe('authenticated navigation', () => {
     ).toEqual([
       { href: '/library', text: '▦缺失' },
       { href: '/downloads', text: '↓下载' },
+      { href: '/automation', text: '⟳自动化' },
       { href: '/configuration', text: '⚙设置' },
     ])
     expect(wrapper.find('.nav-disclosure').exists()).toBe(false)
@@ -53,7 +54,6 @@ describe('authenticated navigation', () => {
     expect(wrapper.find('a[href="/adapters"]').exists()).toBe(false)
     expect(wrapper.find('a[href="/approvals"]').exists()).toBe(false)
     expect(wrapper.find('a[href="/media-imports"]').exists()).toBe(false)
-    expect(wrapper.find('a[href="/automation"]').exists()).toBe(false)
     expect(wrapper.find('a[href="/qbittorrent"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('admin-user')
     expect(wrapper.text()).toContain('管理员')

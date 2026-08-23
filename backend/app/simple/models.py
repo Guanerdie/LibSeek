@@ -64,6 +64,14 @@ class DownloadState(StrEnum):
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
 
 
+class AutomationJobState(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    RETRY_WAIT = "RETRY_WAIT"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 def enum_column(enum_type: type[StrEnum], length: int) -> Enum:
     return Enum(
         enum_type,
@@ -90,8 +98,10 @@ class LibraryMediaItem(Base):
     source_item_id: Mapped[str] = mapped_column(String(180), nullable=False)
     media_type: Mapped[MediaType] = mapped_column(enum_column(MediaType, 10), nullable=False)
     tmdb_id: Mapped[int | None] = mapped_column(Integer)
+    imdb_id: Mapped[str | None] = mapped_column(String(20))
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     original_title: Mapped[str | None] = mapped_column(String(500))
+    search_titles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     country_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     original_language: Mapped[str | None] = mapped_column(String(16))
     year: Mapped[int | None] = mapped_column(Integer)
@@ -190,6 +200,7 @@ class ReleaseCandidate(Base):
     resolution: Mapped[str | None] = mapped_column(String(40))
     source: Mapped[str | None] = mapped_column(String(80))
     codec: Mapped[str | None] = mapped_column(String(80))
+    download_factor: Mapped[float | None] = mapped_column(Float)
     season_coverage: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     episode_coverage: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
@@ -210,6 +221,10 @@ class Download(Base):
         CheckConstraint("download_speed >= 0", name="ck_download_speed_nonnegative"),
         CheckConstraint("upload_speed >= 0", name="ck_upload_speed_nonnegative"),
         CheckConstraint("ratio >= 0", name="ck_download_ratio_nonnegative"),
+        CheckConstraint(
+            "content_size_bytes IS NULL OR content_size_bytes > 0",
+            name="ck_download_content_size_positive",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -221,6 +236,8 @@ class Download(Base):
     )
     info_hash: Mapped[str | None] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(1000), nullable=False)
+    content_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[DownloadState] = mapped_column(
         enum_column(DownloadState, 24), default=DownloadState.SUBMITTING, nullable=False, index=True
     )
@@ -235,6 +252,84 @@ class Download(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
+
+
+class AutomationPolicy(Base):
+    __tablename__ = "automation_policy"
+    __table_args__ = (
+        CheckConstraint("minimum_score >= 0 AND minimum_score <= 1", name="ck_automation_score"),
+        CheckConstraint("minimum_seeders >= 0", name="ck_automation_seeders"),
+        CheckConstraint(
+            "max_size_bytes IS NULL OR max_size_bytes > 0", name="ck_automation_max_size"
+        ),
+        CheckConstraint("interval_minutes >= 5", name="ck_automation_interval"),
+        CheckConstraint("retry_delay_minutes >= 1", name="ck_automation_retry_delay"),
+        CheckConstraint("max_attempts >= 1", name="ck_automation_attempts"),
+        CheckConstraint("daily_download_limit >= 1", name="ck_automation_daily_limit"),
+        CheckConstraint(
+            "daily_download_bytes IS NULL OR daily_download_bytes > 0",
+            name="ck_automation_daily_bytes",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    dry_run: Mapped[bool] = mapped_column(default=True, nullable=False)
+    auto_identify: Mapped[bool] = mapped_column(default=True, nullable=False)
+    site_ids: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["avistaz"], nullable=False)
+    media_types: Mapped[list[str]] = mapped_column(
+        JSON, default=lambda: [MediaType.MOVIE.value, MediaType.TV.value], nullable=False
+    )
+    minimum_score: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
+    minimum_seeders: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    max_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    allow_warnings: Mapped[bool] = mapped_column(default=False, nullable=False)
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    retry_delay_minutes: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    daily_download_limit: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    daily_download_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class AutomationJob(Base):
+    __tablename__ = "automation_jobs"
+    __table_args__ = (
+        Index("uq_automation_job_run_media", "run_id", "media_id", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    media_id: Mapped[str] = mapped_column(
+        ForeignKey("library_media.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    state: Mapped[AutomationJobState] = mapped_column(
+        enum_column(AutomationJobState, 16),
+        default=AutomationJobState.PENDING,
+        nullable=False,
+        index=True,
+    )
+    search_id: Mapped[str | None] = mapped_column(
+        ForeignKey("searches.id", ondelete="SET NULL"), index=True
+    )
+    selected_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("release_candidates.id", ondelete="SET NULL")
+    )
+    download_id: Mapped[str | None] = mapped_column(
+        ForeignKey("downloads.id", ondelete="SET NULL"), index=True
+    )
+    trigger: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    decision: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ActivityLog(Base):

@@ -7,7 +7,7 @@ import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
 import type { DailyCandidate } from '../types'
-import { statusLabel } from '../utils/format'
+import { candidateReasonLabel, candidateWarningLabel, statusLabel } from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,6 +15,8 @@ const daily = useDailyStore()
 const mediaId = computed(() => String(route.params.id))
 const candidates = computed(() => daily.search?.candidates ?? [])
 const tmdbId = ref('')
+const submittingCandidateId = ref<string | null>(null)
+const failedCandidateId = ref<string | null>(null)
 
 function formatBytes(value: number | null): string {
   if (value === null) return '大小未知'
@@ -26,6 +28,18 @@ function formatBytes(value: number | null): string {
     unit += 1
   }
   return `${size.toFixed(unit >= 3 ? 1 : 0)} ${units[unit]}`
+}
+
+function freeStatusLabel(downloadFactor: number | null): string {
+  if (downloadFactor === null) return '免费状态未知'
+  if (downloadFactor === 0) return '免费'
+  if (downloadFactor < 1) return `非免费 · ${Math.round(downloadFactor * 100)}% 计费`
+  return '非免费'
+}
+
+function freeStatusClass(downloadFactor: number | null): string {
+  if (downloadFactor === null) return 'is-unknown'
+  return downloadFactor === 0 ? 'is-free' : 'is-paid'
 }
 
 async function startSearch(): Promise<void> {
@@ -41,12 +55,23 @@ async function identify(): Promise<void> {
 }
 
 async function download(candidate: DailyCandidate): Promise<void> {
+  if (submittingCandidateId.value) return
   const confirmed =
     candidate.warnings.length === 0 ||
-    globalThis.confirm(`这个资源有以下提示：\n\n${candidate.warnings.join('\n')}\n\n仍然下载吗？`)
+    globalThis.confirm(
+      `这个资源有以下提示：\n\n${candidate.warnings.map(candidateWarningLabel).join('\n')}\n\n仍然下载吗？`,
+    )
   if (!confirmed) return
-  if (await daily.download(candidate.id, candidate.warnings.length > 0)) {
-    await router.push('/downloads')
+  failedCandidateId.value = null
+  submittingCandidateId.value = candidate.id
+  try {
+    if (await daily.download(candidate.id, candidate.warnings.length > 0)) {
+      await router.push('/downloads')
+    } else {
+      failedCandidateId.value = candidate.id
+    }
+  } finally {
+    submittingCandidateId.value = null
   }
 }
 
@@ -120,8 +145,27 @@ onMounted(async () => {
       <article v-for="candidate in candidates" :key="candidate.id" class="panel candidate-card">
         <div class="candidate-main">
           <div>
-            <span class="eyebrow">{{ candidate.site_id }}</span>
-            <h3>{{ candidate.title }}</h3>
+            <div class="candidate-site-row">
+              <span class="eyebrow">{{ candidate.site_id }}</span>
+              <span
+                class="candidate-free-status"
+                :class="freeStatusClass(candidate.download_factor)"
+              >
+                {{ freeStatusLabel(candidate.download_factor) }}
+              </span>
+            </div>
+            <h3>
+              <a
+                v-if="candidate.details_url"
+                class="candidate-title-link"
+                :href="candidate.details_url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {{ candidate.title }}
+              </a>
+              <template v-else>{{ candidate.title }}</template>
+            </h3>
             <p>
               {{ formatBytes(candidate.size_bytes) }} · 做种 {{ candidate.seeders ?? '未知' }} ·
               {{ candidate.resolution ?? '规格未知' }} {{ candidate.source ?? '' }}
@@ -130,13 +174,34 @@ onMounted(async () => {
           <strong class="candidate-score">{{ Math.round(candidate.score * 100) }}</strong>
         </div>
         <ul v-if="candidate.reasons.length" class="reason-list">
-          <li v-for="reason in candidate.reasons" :key="reason">{{ reason }}</li>
+          <li v-for="reason in candidate.reasons" :key="reason">
+            {{ candidateReasonLabel(reason) }}
+          </li>
         </ul>
         <div v-if="candidate.warnings.length" class="inline-warning">
-          {{ candidate.warnings.join('；') }}
+          {{ candidate.warnings.map(candidateWarningLabel).join('；') }}
         </div>
-        <button class="button primary" @click="download(candidate)">
-          {{ candidate.warnings.length ? '确认并下载' : '下载' }}
+        <p
+          v-if="failedCandidateId === candidate.id && daily.resourceError"
+          class="inline-error"
+          role="alert"
+        >
+          {{ daily.resourceError }}
+        </p>
+        <button
+          class="button primary"
+          :disabled="submittingCandidateId !== null"
+          @click="download(candidate)"
+        >
+          {{
+            submittingCandidateId === candidate.id
+              ? '提交中…'
+              : failedCandidateId === candidate.id
+                ? '重试下载'
+                : candidate.warnings.length
+                  ? '确认并下载'
+                  : '下载'
+          }}
         </button>
       </article>
     </div>

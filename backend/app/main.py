@@ -1,22 +1,48 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routes import auth, configuration, health
+from app.core.automation_runner import automation_scheduler_loop, recover_interrupted_jobs
 from app.core.config import get_settings
 from app.core.security import sanitize_details
+from app.db.session import SessionFactory
 from app.errors import AppError
 from app.schemas.common import ErrorResponse
 from app.simple import routes as daily
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async with SessionFactory() as session:
+        await recover_interrupted_jobs(session)
+
+    stop = asyncio.Event()
+    task: asyncio.Task[None] | None = None
+    if settings.automation_scheduler_enabled:
+        task = asyncio.create_task(automation_scheduler_loop(stop))
+    try:
+        yield
+    finally:
+        if task is not None:
+            stop.set()
+            await task
+
+
 app = FastAPI(
     title=settings.app_name,
     version="0.9.0",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
+    lifespan=lifespan,
 )
 
 

@@ -11,6 +11,7 @@ const auth = useAuthStore()
 const primaryNavItems = [
   { to: '/library', label: '缺失', icon: '▦' },
   { to: '/downloads', label: '下载', icon: '↓' },
+  { to: '/automation', label: '自动化', icon: '⟳' },
   { to: '/configuration', label: '设置', icon: '⚙' },
 ]
 

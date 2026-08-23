@@ -231,11 +231,13 @@ export interface DailyCandidate {
   site_id: string
   torrent_id: string
   title: string
+  details_url: string | null
   size_bytes: number | null
   seeders: number | null
   resolution: string | null
   source: string | null
   codec: string | null
+  download_factor: number | null
   season_coverage: number[]
   episode_coverage: string[]
   score: number
@@ -268,4 +270,58 @@ export interface DailyDownload {
   error_message: string | null
   created_at: string
   updated_at: string
+}
+
+export interface AutomationPolicy {
+  enabled: boolean
+  dry_run: boolean
+  auto_identify: boolean
+  site_ids: string[]
+  media_types: DailyMediaType[]
+  minimum_score: number
+  minimum_seeders: number
+  max_size_bytes: number | null
+  allow_warnings: boolean
+  interval_minutes: number
+  retry_delay_minutes: number
+  max_attempts: number
+  daily_download_limit: number
+  daily_download_bytes: number | null
+  updated_at: string
+  last_run_at: string | null
+}
+
+export type AutomationJobState = 'PENDING' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCEEDED' | 'FAILED'
+
+export interface AutomationJob {
+  id: string
+  run_id: string
+  media_id: string
+  media_title: string
+  state: AutomationJobState
+  search_id: string | null
+  selected_candidate_id: string | null
+  download_id: string | null
+  trigger: string
+  attempt_count: number
+  next_attempt_at: string | null
+  decision: {
+    mode?: string
+    candidate_count?: number
+    selected_title?: string | null
+    selected_score?: number | null
+    rejected?: Array<{ candidate_id: string; title: string; reasons: string[] }>
+    download_skipped?: string
+    download_state?: DailyDownloadState
+  }
+  error_message: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+export interface AutomationRunResult {
+  run_id: string
+  created: number
+  succeeded: number
+  failed: number
 }

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
-from collections.abc import Callable
-from urllib.parse import urlparse
+from collections.abc import Awaitable, Callable
+from urllib.parse import quote, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,8 @@ from app.services.matching import MatchPreferences, score_torrent_candidate
 from app.services.torrent_validation import validate_torrent
 from app.simple.models import (
     ActivityLog,
+    AutomationJob,
+    AutomationJobState,
     Download,
     DownloadState,
     Episode,
@@ -40,6 +43,7 @@ from app.simple.models import (
 from app.simple.service import complete_search, queue_download
 
 _EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,3})$")
+_download_submission_lock = asyncio.Lock()
 
 
 def build_nextfind(settings: Settings | None = None) -> NextFindAdapter:
@@ -113,6 +117,21 @@ def build_pt_site(
         enable_torrent_fetch=allow_torrent_fetch,
         proxy=settings.outbound_proxy(),
     )
+
+
+def candidate_details_url(
+    site_id: str,
+    torrent_id: str,
+    settings: Settings | None = None,
+) -> str | None:
+    settings = settings or get_settings()
+    if site_id != "avistaz":
+        return None
+    base_url = validate_external_url(
+        settings.avistaz_base_url,
+        settings.avistaz_allowed_hosts,
+    )
+    return f"{base_url.rstrip('/')}/torrents/{quote(torrent_id, safe='')}"
 
 
 def build_qb(settings: Settings | None = None) -> QbittorrentAdapter:
@@ -218,16 +237,30 @@ async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> t
 
 
 def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None:
+    identity_changed = target.tmdb_id != item.tmdb_id
+    active_state = target.state in {
+        MediaState.SEARCHING,
+        MediaState.CANDIDATES,
+        MediaState.DOWNLOADING,
+    }
     target.media_type = item.media_type
     target.tmdb_id = item.tmdb_id
     target.title = item.title
-    target.original_title = item.original_title
+    target.original_title = (
+        item.original_title
+        if identity_changed or item.original_title is not None
+        else target.original_title
+    )
+    if identity_changed:
+        target.search_titles = []
+        target.imdb_id = None
     target.country_codes = item.country_codes or []
     target.original_language = item.original_language
     target.year = item.year
     target.poster_path = item.poster_path
-    target.state = MediaState.READY if item.tmdb_id is not None else MediaState.NEEDS_ATTENTION
-    target.attention_reason = None if item.tmdb_id is not None else "需要确认 TMDB 影视信息"
+    if not active_state:
+        target.state = MediaState.READY if item.tmdb_id is not None else MediaState.NEEDS_ATTENTION
+        target.attention_reason = None if item.tmdb_id is not None else "需要确认 TMDB 影视信息"
     target.discovered_at = item.discovered_at
     target.updated_at = item.updated_at
 
@@ -294,8 +327,14 @@ async def identify_media(
         requested_id = matches[0].tmdb_id
     record = await provider.get_by_tmdb_id(media.media_type, requested_id)
     media.tmdb_id = record.tmdb_id
+    media.imdb_id = record.imdb_id
     media.title = record.chinese_title or record.title
     media.original_title = record.original_title
+    media.search_titles = _unique_search_titles(
+        record.english_title,
+        record.original_title,
+        *record.aliases,
+    )
     media.country_codes = record.country_codes or media.country_codes
     media.original_language = record.original_language or media.original_language
     media.year = record.year
@@ -310,11 +349,119 @@ async def identify_media(
     return media
 
 
+def _unique_search_titles(*values: str | None) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        title = " ".join(value.split())[:200]
+        key = title.casefold()
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        titles.append(title)
+    return titles
+
+
+async def _enrich_media_search_titles(
+    session: AsyncSession,
+    media: LibraryMediaItem,
+    metadata_factory: Callable[[], MetadataProvider] | None,
+) -> None:
+    if (
+        (media.search_titles and media.imdb_id is not None)
+        or media.tmdb_id is None
+        or metadata_factory is None
+    ):
+        return
+
+    provider: MetadataProvider | None = None
+    try:
+        provider = metadata_factory()
+        record = await provider.get_by_tmdb_id(media.media_type, media.tmdb_id)
+    except AppError:
+        return
+    finally:
+        if provider is not None:
+            await close_adapter(provider)
+
+    media.search_titles = _unique_search_titles(
+        record.english_title,
+        record.original_title,
+        *record.aliases,
+    )
+    media.imdb_id = record.imdb_id
+    if media.original_title is None:
+        media.original_title = record.original_title
+    if media.original_language is None:
+        media.original_language = record.original_language
+    if not media.country_codes and record.country_codes:
+        media.country_codes = record.country_codes
+    if media.year is None:
+        media.year = record.year
+    if media.poster_path is None:
+        media.poster_path = record.poster_path
+    await session.commit()
+
+
+async def _search_site_candidates(
+    adapter: PtSiteAdapter,
+    media: LibraryMediaItem,
+    target_torrent_id: str | None = None,
+) -> list[TorrentCandidate]:
+    merged: dict[str, TorrentCandidate] = {}
+    external_id_requests = [
+        TorrentSearchRequest(
+            tmdb=media.tmdb_id,
+            type=media.media_type,
+            limit=100,
+        )
+    ]
+    if media.imdb_id:
+        external_id_requests.append(
+            TorrentSearchRequest(
+                imdb=media.imdb_id,
+                type=media.media_type,
+                limit=100,
+            )
+        )
+    for request in external_id_requests:
+        by_external_id = await adapter.search(request)
+        for candidate in by_external_id:
+            merged.setdefault(candidate.torrent_id, candidate)
+        if target_torrent_id is not None and target_torrent_id in merged:
+            return list(merged.values())
+
+    text_titles = _unique_search_titles(
+        *media.search_titles,
+        media.original_title,
+        media.title,
+    )
+    for title in text_titles[:3]:
+        by_title = await adapter.search(
+            TorrentSearchRequest(
+                search=title,
+                type=media.media_type,
+                limit=100,
+            )
+        )
+        for candidate in by_title:
+            merged.setdefault(candidate.torrent_id, candidate)
+        if target_torrent_id is not None:
+            if target_torrent_id in merged:
+                break
+        elif by_title or merged:
+            break
+    return list(merged.values())
+
+
 async def run_release_search(
     session: AsyncSession,
     search_id: str,
     adapter_factory: Callable[[str], PtSiteAdapter],
     settings: Settings | None = None,
+    metadata_factory: Callable[[], MetadataProvider] | None = None,
 ) -> ReleaseSearch:
     settings = settings or get_settings()
     search = await session.get(ReleaseSearch, search_id)
@@ -323,6 +470,7 @@ async def run_release_search(
     media = await session.get(LibraryMediaItem, search.media_id)
     if media is None or media.tmdb_id is None:
         raise AppError("MEDIA_IDENTITY_REQUIRED", "请先确认 TMDB 影视信息", status_code=409)
+    await _enrich_media_search_titles(session, media, metadata_factory)
     search.state = SearchState.RUNNING
     await session.commit()
     episodes = list(await session.scalars(select(Episode).where(Episode.media_id == media.id)))
@@ -333,9 +481,11 @@ async def run_release_search(
     ]
     metadata = MetadataRecord(
         tmdb_id=media.tmdb_id,
+        imdb_id=media.imdb_id,
         media_type=media.media_type,
         title=media.title,
         original_title=media.original_title,
+        aliases=media.search_titles,
         year=media.year,
     )
     stored: list[ReleaseCandidate] = []
@@ -343,21 +493,7 @@ async def run_release_search(
         for site_id in search.site_ids:
             adapter = adapter_factory(site_id)
             try:
-                results = await adapter.search(
-                    TorrentSearchRequest(
-                        tmdb=media.tmdb_id,
-                        type=media.media_type,
-                        limit=100,
-                    )
-                )
-                if not results:
-                    results = await adapter.search(
-                        TorrentSearchRequest(
-                            search=media.original_title or media.title,
-                            type=media.media_type,
-                            limit=100,
-                        )
-                    )
+                results = await _search_site_candidates(adapter, media)
             finally:
                 await close_adapter(adapter)
             for raw in results:
@@ -404,6 +540,7 @@ def _candidate_from_adapter(
         resolution=candidate.resolution,
         source=candidate.source,
         codec=candidate.codec,
+        download_factor=candidate.download_factor,
         season_coverage=season_coverage,
         episode_coverage=episode_coverage,
         score=candidate.match_score or 0,
@@ -413,13 +550,52 @@ def _candidate_from_adapter(
     )
 
 
-async def submit_download(
+async def _fetch_torrent_with_reference_refresh(
+    pt: PtSiteAdapter,
+    candidate: ReleaseCandidate,
+    media: LibraryMediaItem,
+) -> bytes:
+    try:
+        return await pt.fetch_torrent(candidate.torrent_id)
+    except AppError as exc:
+        if exc.error_code != "TORRENT_REFERENCE_NOT_IN_SESSION":
+            raise
+
+    refreshed = await _search_site_candidates(
+        pt,
+        media,
+        target_torrent_id=candidate.torrent_id,
+    )
+    if any(item.torrent_id == candidate.torrent_id for item in refreshed):
+        return await pt.fetch_torrent(candidate.torrent_id)
+
+    raise AppError(
+        "TORRENT_NO_LONGER_AVAILABLE",
+        "站点中已找不到该候选资源，请重新搜索后选择其他资源",
+        status_code=409,
+    )
+
+
+def _qb_download_tags(configured: tuple[str, ...], media_title: str) -> tuple[str, ...]:
+    title_tag = " ".join(media_title.replace(",", "，").split())[:100]
+    tags = list(configured)
+    if not title_tag or any(tag.casefold() == title_tag.casefold() for tag in tags):
+        return tuple(tags)
+    if len(tags) >= 20:
+        tags = tags[:19]
+    tags.append(title_tag)
+    return tuple(tags)
+
+
+async def _submit_download_unlocked(
     session: AsyncSession,
     *,
     candidate_id: str,
     confirm_warnings: bool,
     pt_factory: Callable[[str], PtSiteAdapter],
     qb_factory: Callable[[], QbittorrentAdapter],
+    on_download: Callable[[Download], Awaitable[None]] | None = None,
+    write_guard: Callable[[Download], Awaitable[None]] | None = None,
     settings: Settings | None = None,
 ) -> Download:
     settings = settings or get_settings()
@@ -433,18 +609,84 @@ async def submit_download(
             status_code=409,
             details={"warnings": candidate.warnings},
         )
+    candidate_search = await session.get(ReleaseSearch, candidate.search_id)
+    if candidate_search is None:
+        raise AppError("SEARCH_NOT_FOUND", "搜索记录不存在", status_code=404)
+    target_media = await session.get(LibraryMediaItem, candidate_search.media_id)
+    if target_media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+
+    async def reuse_download(existing: Download) -> Download:
+        if existing.media_id != candidate_search.media_id:
+            message = "相同种子已关联其他影视条目，当前数据模型不能跨影视复用下载"
+            if target_media is not None:
+                target_media.state = MediaState.NEEDS_ATTENTION
+                target_media.attention_reason = message
+            await session.commit()
+            raise AppError(
+                "DUPLICATE_DOWNLOAD_OTHER_MEDIA",
+                message,
+                status_code=409,
+                details={"existing_download_id": existing.id},
+            )
+        if target_media is not None:
+            if existing.state in {DownloadState.COMPLETED, DownloadState.SEEDING}:
+                target_media.state = MediaState.COMPLETE
+                target_media.attention_reason = None
+            elif existing.state in {DownloadState.ERROR, DownloadState.SUBMITTING}:
+                target_media.state = MediaState.NEEDS_ATTENTION
+            else:
+                target_media.state = MediaState.DOWNLOADING
+                target_media.attention_reason = None
+        if on_download is not None:
+            await on_download(existing)
+        else:
+            await session.commit()
+        if existing.state == DownloadState.ERROR:
+            if target_media is not None:
+                target_media.attention_reason = "相同种子的已有下载记录处于错误状态"
+                await session.commit()
+            raise AppError(
+                "DUPLICATE_DOWNLOAD_FAILED",
+                "相同种子的已有下载记录处于错误状态，请先处理原任务",
+                status_code=409,
+            )
+        if existing.state == DownloadState.SUBMITTING:
+            if target_media is not None:
+                target_media.attention_reason = "相同种子的已有提交尚未完成"
+                await session.commit()
+            raise AppError(
+                "DUPLICATE_DOWNLOAD_SUBMITTING",
+                "相同种子的已有提交尚未完成，请先同步或处理原任务",
+                status_code=409,
+            )
+        return existing
+
+    if candidate.info_hash is not None:
+        duplicate = await session.scalar(
+            select(Download).where(
+                Download.info_hash == candidate.info_hash,
+                Download.candidate_id != candidate.id,
+            )
+        )
+        if duplicate is not None:
+            return await reuse_download(duplicate)
+
     category = settings.qb_target_category or candidate.site_id
     save_path = settings.qb_target_save_path or None
-    qb = qb_factory()
+    pt = pt_factory(candidate.site_id)
     try:
-        download = await queue_download(
-            session, candidate_id=candidate_id, confirm_warnings=confirm_warnings
-        )
-        if download.state != DownloadState.SUBMITTING:
-            return download
-        pt = pt_factory(candidate.site_id)
+        qb = qb_factory()
+        download: Download | None = None
         try:
-            payload = await pt.fetch_torrent(candidate.torrent_id)
+            download = await queue_download(
+                session, candidate_id=candidate_id, confirm_warnings=confirm_warnings
+            )
+            if download.state != DownloadState.SUBMITTING:
+                if on_download is not None:
+                    await on_download(download)
+                return download
+            payload = await _fetch_torrent_with_reference_refresh(pt, candidate, target_media)
             validated = validate_torrent(
                 payload,
                 expected_info_hash=candidate.info_hash,
@@ -464,19 +706,35 @@ async def submit_download(
             if duplicate is not None:
                 await session.delete(download)
                 await session.commit()
-                return duplicate
+                download = None
+                return await reuse_download(duplicate)
             download.info_hash = info_hash
             download.name = validated.name
+            download.content_size_bytes = validated.total_size_bytes
             await session.commit()
 
             await qb.authenticate()
+            if on_download is not None:
+                await on_download(download)
+
+            async def guard_category_write() -> None:
+                if write_guard is not None:
+                    await write_guard(download)
+
+            async def guard_torrent_add() -> None:
+                await guard_category_write()
+                download.submitted_at = utc_now()
+                await session.commit()
+
             result = await qb.add_torrent(
                 payload,
                 expected_info_hash=info_hash,
                 save_path=save_path,
                 category=category,
-                tags=settings.qb_plan_tags,
+                tags=_qb_download_tags(settings.qb_plan_tags, target_media.title),
                 start_immediately=True,
+                category_write_guard=guard_category_write,
+                write_guard=guard_torrent_add,
             )
             download.state = DownloadState.QUEUED
             download.info_hash = result.info_hash
@@ -484,6 +742,8 @@ async def submit_download(
             await session.refresh(download)
             return download
         except AppError as exc:
+            if download is None:
+                raise
             download.state = (
                 DownloadState.OUTCOME_UNKNOWN
                 if exc.error_code == "QB_ADD_OUTCOME_UNKNOWN"
@@ -498,9 +758,63 @@ async def submit_download(
             await session.commit()
             raise
         finally:
-            await close_adapter(pt)
+            await close_adapter(qb)
     finally:
-        await close_adapter(qb)
+        await close_adapter(pt)
+
+
+async def submit_download(
+    session: AsyncSession,
+    *,
+    candidate_id: str,
+    confirm_warnings: bool,
+    pt_factory: Callable[[str], PtSiteAdapter],
+    qb_factory: Callable[[], QbittorrentAdapter],
+    on_download: Callable[[Download], Awaitable[None]] | None = None,
+    write_guard: Callable[[Download], Awaitable[None]] | None = None,
+    settings: Settings | None = None,
+) -> Download:
+    async with _download_submission_lock:
+        return await _submit_download_unlocked(
+            session,
+            candidate_id=candidate_id,
+            confirm_warnings=confirm_warnings,
+            pt_factory=pt_factory,
+            qb_factory=qb_factory,
+            on_download=on_download,
+            write_guard=write_guard,
+            settings=settings,
+        )
+
+
+async def retry_download(
+    session: AsyncSession,
+    *,
+    download_id: str,
+    pt_factory: Callable[[str], PtSiteAdapter],
+    qb_factory: Callable[[], QbittorrentAdapter],
+    settings: Settings | None = None,
+) -> Download:
+    async with _download_submission_lock:
+        existing = await session.get(Download, download_id)
+        if existing is None:
+            raise AppError("DOWNLOAD_NOT_FOUND", "下载记录不存在", status_code=404)
+        if existing.state in {DownloadState.SUBMITTING, DownloadState.OUTCOME_UNKNOWN}:
+            raise AppError(
+                "DOWNLOAD_RETRY_UNSAFE",
+                "提交结果尚未确认，请先同步下载状态后再处理",
+                status_code=409,
+            )
+        if existing.state != DownloadState.ERROR:
+            return existing
+        return await _submit_download_unlocked(
+            session,
+            candidate_id=existing.candidate_id,
+            confirm_warnings=True,
+            pt_factory=pt_factory,
+            qb_factory=qb_factory,
+            settings=settings,
+        )
 
 
 async def sync_download_statuses(
@@ -527,6 +841,7 @@ async def sync_download_statuses(
         torrent = by_hash.get(download.info_hash.casefold())
         if torrent is None:
             continue
+        outcome_was_unknown = download.state == DownloadState.OUTCOME_UNKNOWN
         download.progress = torrent.progress
         download.download_speed = torrent.dlspeed
         download.upload_speed = torrent.upspeed
@@ -544,6 +859,17 @@ async def sync_download_statuses(
             else:
                 media.state = MediaState.DOWNLOADING
                 media.attention_reason = None
+        if outcome_was_unknown:
+            jobs = list(
+                await session.scalars(
+                    select(AutomationJob).where(AutomationJob.download_id == download.id)
+                )
+            )
+            for job in jobs:
+                job.state = AutomationJobState.SUCCEEDED
+                job.error_message = None
+                job.next_attempt_at = None
+                job.finished_at = utc_now()
         updated += 1
     await session.commit()
     return updated

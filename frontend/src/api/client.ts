@@ -1,5 +1,8 @@
 import type {
   AuthSetupStatus,
+  AutomationJob,
+  AutomationPolicy,
+  AutomationRunResult,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
@@ -184,6 +187,10 @@ export const dailyApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ confirm_warnings: confirmWarnings }),
     }),
+  retryDownload: (downloadId: string) =>
+    request<DailyDownload>(`/api/downloads/${encodeURIComponent(downloadId)}/retry`, {
+      method: 'POST',
+    }),
   downloads: (
     params: { page?: number; pageSize?: number; state?: DailyDownloadState } = {},
   ) =>
@@ -196,4 +203,20 @@ export const dailyApi = {
     ),
   syncDownloads: () =>
     request<{ created: number; updated: number }>('/api/downloads/sync', { method: 'POST' }),
+}
+
+export const automationApi = {
+  policy: () => request<AutomationPolicy>('/api/automation/policy'),
+  updatePolicy: (payload: Omit<AutomationPolicy, 'updated_at' | 'last_run_at'>) =>
+    request<AutomationPolicy>('/api/automation/policy', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  jobs: () => request<Page<AutomationJob>>('/api/automation/jobs?page=1&page_size=30'),
+  run: () => request<AutomationRunResult>('/api/automation/runs', { method: 'POST' }),
+  retry: (jobId: string) =>
+    request<AutomationJob>(`/api/automation/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: 'POST',
+    }),
 }

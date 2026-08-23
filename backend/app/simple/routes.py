@@ -7,24 +7,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import OperatorPrincipal, ViewerPrincipal
 from app.db.session import get_session
+from app.errors import AppError
 from app.models.enums import MediaType
-from app.simple import service
+from app.simple import automation, service
 from app.simple.integrations import (
     build_nextfind,
     build_pt_site,
     build_qb,
     build_qb_readonly,
     build_tmdb,
+    candidate_details_url,
     close_adapter,
     identify_media,
+    retry_download,
     run_release_search,
     submit_download,
     sync_download_statuses,
     sync_nextfind,
 )
-from app.simple.models import DownloadState, MediaState
+from app.simple.models import DownloadState, LibraryMediaItem, MediaState, ReleaseCandidate
 from app.simple.regions import NextFindRegion
 from app.simple.schemas import (
+    AutomationJobPage,
+    AutomationJobView,
+    AutomationPolicyUpdate,
+    AutomationPolicyView,
+    AutomationRunResult,
     CandidateView,
     DownloadCreate,
     DownloadPage,
@@ -42,6 +50,14 @@ from app.simple.schemas import (
 
 router = APIRouter(tags=["daily"])
 Session = Annotated[AsyncSession, Depends(get_session)]
+
+
+def _candidate_view(candidate: ReleaseCandidate) -> CandidateView:
+    return CandidateView.model_validate(candidate).model_copy(
+        update={
+            "details_url": candidate_details_url(candidate.site_id, candidate.torrent_id),
+        }
+    )
 
 
 @router.get("/library", response_model=MediaPage)
@@ -137,12 +153,13 @@ async def search_media(
         session,
         search.id,
         lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
+        metadata_factory=build_tmdb,
     )
     completed, candidates = await service.get_search(session, search.id)
     return SearchDetail.model_validate(
         {
             **SearchView.model_validate(completed).model_dump(),
-            "candidates": [CandidateView.model_validate(item) for item in candidates],
+            "candidates": [_candidate_view(item) for item in candidates],
         }
     )
 
@@ -156,7 +173,7 @@ async def search_detail(
     return SearchDetail.model_validate(
         {
             **SearchView.model_validate(search).model_dump(),
-            "candidates": [CandidateView.model_validate(item) for item in candidates],
+            "candidates": [_candidate_view(item) for item in candidates],
         }
     )
 
@@ -199,6 +216,22 @@ async def downloads(
     )
 
 
+@router.post("/downloads/{download_id}/retry", response_model=DownloadView)
+async def retry_failed_download(
+    download_id: str,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> DownloadView:
+    del principal
+    download = await retry_download(
+        session,
+        download_id=download_id,
+        pt_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=True),
+        qb_factory=build_qb,
+    )
+    return DownloadView.model_validate(download)
+
+
 @router.post("/downloads/sync", response_model=SyncResult)
 async def sync_downloads(session: Session, principal: OperatorPrincipal) -> SyncResult:
     del principal
@@ -208,3 +241,75 @@ async def sync_downloads(session: Session, principal: OperatorPrincipal) -> Sync
     finally:
         await close_adapter(qb)
     return SyncResult(updated=updated)
+
+
+@router.get("/automation/policy", response_model=AutomationPolicyView)
+async def automation_policy(
+    session: Session, principal: ViewerPrincipal
+) -> AutomationPolicyView:
+    del principal
+    policy = await automation.get_policy(session)
+    return AutomationPolicyView.model_validate(policy)
+
+
+@router.put("/automation/policy", response_model=AutomationPolicyView)
+async def save_automation_policy(
+    payload: AutomationPolicyUpdate,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> AutomationPolicyView:
+    del principal
+    policy = await automation.update_policy(session, payload)
+    return AutomationPolicyView.model_validate(policy)
+
+
+@router.get("/automation/jobs", response_model=AutomationJobPage)
+async def automation_jobs(
+    session: Session,
+    principal: ViewerPrincipal,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+) -> AutomationJobPage:
+    del principal
+    rows, total = await automation.list_jobs(session, page=page, page_size=page_size)
+    return AutomationJobPage(
+        items=[
+            AutomationJobView.model_validate({**job.__dict__, "media_title": title})
+            for job, title in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/automation/runs", response_model=AutomationRunResult)
+async def run_automation(
+    session: Session, principal: OperatorPrincipal
+) -> AutomationRunResult:
+    del principal
+    run_id, created, succeeded, failed = await automation.run_automation(
+        session,
+        adapter_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
+        pt_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=True),
+        qb_factory=build_qb,
+        metadata_factory=build_tmdb,
+    )
+    return AutomationRunResult(
+        run_id=run_id,
+        created=created,
+        succeeded=succeeded,
+        failed=failed,
+    )
+
+
+@router.post("/automation/jobs/{job_id}/retry", response_model=AutomationJobView)
+async def retry_automation_job(
+    job_id: str, session: Session, principal: OperatorPrincipal
+) -> AutomationJobView:
+    del principal
+    job = await automation.retry_job(session, job_id)
+    media = await session.get(LibraryMediaItem, job.media_id)
+    if media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    return AutomationJobView.model_validate({**job.__dict__, "media_title": media.title})

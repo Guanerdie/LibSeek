@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
+import type { DailyDownload } from '../types'
 import { statusLabel } from '../utils/format'
 
 const daily = useDailyStore()
 let refreshTimer: ReturnType<typeof globalThis.setInterval> | undefined
+const retryingDownloadId = ref<string | null>(null)
+const failedRetryId = ref<string | null>(null)
 
 function percent(value: number): string {
   return `${Math.round(value * 100)}%`
@@ -19,10 +22,21 @@ function speed(value: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB/s`
 }
 
+async function retry(download: DailyDownload): Promise<void> {
+  if (retryingDownloadId.value) return
+  failedRetryId.value = null
+  retryingDownloadId.value = download.id
+  try {
+    if (!(await daily.retryDownload(download))) failedRetryId.value = download.id
+  } finally {
+    retryingDownloadId.value = null
+  }
+}
+
 onMounted(() => {
   void daily.refreshDownloads()
   refreshTimer = globalThis.setInterval(() => {
-    if (!daily.downloadsSyncing) void daily.refreshDownloads()
+    if (!daily.downloadsSyncing && !retryingDownloadId.value) void daily.refreshDownloads()
   }, 15_000)
 })
 
@@ -59,6 +73,21 @@ onBeforeUnmount(() => {
           <span :style="{ width: percent(download.progress) }"></span>
         </div>
         <p v-if="download.error_message" class="inline-warning">{{ download.error_message }}</p>
+        <p
+          v-if="failedRetryId === download.id && daily.downloadsError"
+          class="inline-error"
+          role="alert"
+        >
+          {{ daily.downloadsError }}
+        </p>
+        <button
+          v-if="download.state === 'ERROR'"
+          class="button primary"
+          :disabled="retryingDownloadId !== null"
+          @click="retry(download)"
+        >
+          {{ retryingDownloadId === download.id ? '重试中…' : '重试' }}
+        </button>
       </article>
     </div>
   </section>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -93,8 +95,11 @@ class AvistaZMockAdapter(PtSiteAdapter):
         if request.type is not None:
             results = [item for item in results if item.media_type == request.type]
         if request.search:
-            needle = request.search.casefold()
-            results = [item for item in results if needle in item.title.casefold()]
+            results = [
+                item
+                for item in results
+                if _contains_search_terms(item.title, request.search)
+            ]
         start = (request.page - 1) * request.limit
         return results[start : start + request.limit]
 
@@ -112,6 +117,23 @@ class AvistaZMockAdapter(PtSiteAdapter):
             "当前阶段禁止请求或下载 .torrent 文件",
             status_code=403,
         )
+
+
+def _contains_search_terms(release_title: str, query: str) -> bool:
+    title_tokens = _search_tokens(release_title)
+    query_tokens = _search_tokens(query)
+    if not query_tokens or len(query_tokens) > len(title_tokens):
+        return False
+    width = len(query_tokens)
+    return any(
+        title_tokens[index : index + width] == query_tokens
+        for index in range(len(title_tokens) - width + 1)
+    )
+
+
+def _search_tokens(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.findall(r"[^\W_]+", normalized, re.UNICODE)
 
 
 def example_candidate() -> TorrentCandidate:

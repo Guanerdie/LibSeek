@@ -4,7 +4,7 @@ UNIN 是一个面向日常使用的影视缺失资源助手：从 NextFind 同�
 确认身份、从 PT 站点搜索候选资源，由用户选择后提交到 qBittorrent，并持续显示下载
 状态。
 
-当前版本为 0.9.0，主流程只有三个页面：
+当前版本为 0.9.0，日常主流程为：
 
 ```text
 缺失 -> 资源 -> 下载
@@ -17,6 +17,13 @@ UNIN 是一个面向日常使用的影视缺失资源助手：从 NextFind 同�
 外部 HTTP 请求配置服务端出站代理。旧版独立审批、计划、执行、批次、自动化策略和
 媒体入库控制面不再注册到运行时。
 
+“自动化”页面提供缺失影视的周期搜索与受控下载：可设置执行间隔、重试、最低评分、
+最低做种数、单资源体积和每日下载预算，并保存候选选择或拒绝原因。策略默认关闭且默认
+为 dry-run；关闭 dry-run 后，只有同时设置 `ENABLE_QB_WRITE=true` 才会向 qBittorrent
+提交满足条件的候选。live 候选必须带有精确匹配的 TMDB 或 IMDb 身份；qB POST 前会按
+最新策略复验，并以种子内容的实际体积检查单资源和每日预算。缺少 TMDB ID 时只在 TMDB
+返回唯一结果后继续；配置、身份或覆盖风险不会自动重试，临时网络错误使用指数退避。
+
 ## 技术结构
 
 - FastAPI + SQLAlchemy 2 + Alembic
@@ -24,8 +31,9 @@ UNIN 是一个面向日常使用的影视缺失资源助手：从 NextFind 同�
 - 默认 SQLite；PostgreSQL 可通过 Compose override 使用
 - 模块化单体，不依赖 Redis、Celery 或独立 Worker
 
-核心数据只有 `library_media`、`episodes`、`searches`、`release_candidates`、`downloads`
-和辅助的 `activity_log`。数据完整性使用普通外键、唯一约束、检查约束和测试，不使用
+核心业务数据包括 `library_media`、`episodes`、`searches`、`release_candidates`、
+`downloads`、自动化策略与运行任务，以及辅助的 `activity_log`。数据完整性使用普通
+外键、唯一约束、检查约束和测试，不使用
 快照 hash、哈希链、冻结 contract、baseline 或发布 gate。
 
 Torrent info hash 是 BitTorrent 资源身份，不属于额外门禁。qB 写请求超时后会进入
@@ -50,6 +58,10 @@ docker compose up --build -d
 ```dotenv
 ENABLE_QB_WRITE=true
 ```
+
+Compose 默认启动一个应用内轻量调度器。调度器只支持单 Uvicorn 进程部署，不需要
+Redis、Celery 或独立 Worker；本地使用 `uvicorn --reload` 时应设置
+`AUTOMATION_SCHEDULER_ENABLED=false`。即使调度器运行，自动化策略仍需在页面中单独启用。
 
 qB 保存路径和分类都是可选项：路径留空时使用下载器默认路径，分类留空时使用候选资源
 的 PT 站点标识。认证会话与 CSRF 校验始终保留；Token、密码和代理认证信息仅保存在

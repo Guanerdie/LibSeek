@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useDailyStore } from '../src/stores/daily'
 import type { DailyDownload, DailyMedia, DailyMediaDetail, DailySearch } from '../src/types'
+import DownloadsView from '../src/views/DownloadsView.vue'
 import LibraryView from '../src/views/LibraryView.vue'
 import ResourcesView from '../src/views/ResourcesView.vue'
 
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   createSearch: vi.fn(),
   search: vi.fn(),
   downloadCandidate: vi.fn(),
+  retryDownload: vi.fn(),
   downloads: vi.fn(),
   syncDownloads: vi.fn(),
 }))
@@ -350,6 +352,55 @@ describe('simplified daily store', () => {
     expect(wrapper.get('.empty-state').text()).toBe('没有找到符合条件的资源')
   })
 
+  it('links a candidate title to its public PT details page', async () => {
+    const searchWithCandidate: DailySearch = {
+      ...successfulSearch,
+      candidates: [
+        {
+          id: 'candidate-linked',
+          search_id: successfulSearch.id,
+          site_id: 'avistaz',
+          torrent_id: '114307',
+          title: 'Linked.Show.1080p.WEB-DL',
+          details_url: 'https://avistaz.to/torrents/114307',
+          size_bytes: 10_000,
+          seeders: 6,
+          resolution: '1080p',
+          source: 'WEB-DL',
+          codec: 'H.264',
+          download_factor: 0,
+          season_coverage: [1],
+          episode_coverage: [],
+          score: 0.9,
+          reasons: [],
+          warnings: [],
+        },
+      ],
+    }
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ latest_search: successfulSearch }))
+    mocks.search.mockResolvedValueOnce(searchWithCandidate)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/library/:id/resources', component: ResourcesView },
+        { path: '/downloads', component: { template: '<div />' } },
+      ],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const link = wrapper.get('a.candidate-title-link')
+    expect(link.text()).toBe('Linked.Show.1080p.WEB-DL')
+    expect(link.attributes()).toMatchObject({
+      href: 'https://avistaz.to/torrents/114307',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+    })
+    expect(wrapper.get('.candidate-free-status').text()).toBe('免费')
+    expect(wrapper.get('.candidate-free-status').classes()).toContain('is-free')
+  })
+
   it('clears the previous media search while loading a different media item', async () => {
     const nextDetail = deferred<DailyMediaDetail>()
     mocks.mediaDetail.mockReturnValueOnce(nextDetail.promise)
@@ -379,6 +430,90 @@ describe('simplified daily store', () => {
 
     expect(await store.download('candidate-1', true)).toBe(true)
     expect(mocks.downloadCandidate).toHaveBeenCalledWith('candidate-1', true)
+  })
+
+  it('shows candidate submission progress and a nearby error when download creation fails', async () => {
+    const searchWithCandidate: DailySearch = {
+      ...successfulSearch,
+      candidates: [
+        {
+          id: 'candidate-1',
+          search_id: successfulSearch.id,
+          site_id: 'avistaz',
+          torrent_id: '114307',
+          title: 'Test.Show.S01.1080p.WEB-DL',
+          details_url: 'https://avistaz.to/torrents/114307',
+          size_bytes: 10_000,
+          seeders: 6,
+          resolution: '1080p',
+          source: 'WEB-DL',
+          codec: 'H.264',
+          download_factor: null,
+          season_coverage: [1],
+          episode_coverage: [],
+          score: 0.9,
+          reasons: [],
+          warnings: [],
+        },
+      ],
+    }
+    const submission = deferred<DailyDownload>()
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ latest_search: successfulSearch }))
+    mocks.search.mockResolvedValueOnce(searchWithCandidate)
+    mocks.downloadCandidate.mockReturnValueOnce(submission.promise)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/library/:id/resources', component: ResourcesView },
+        { path: '/downloads', component: { template: '<div />' } },
+      ],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const button = wrapper.get('.candidate-card .button.primary')
+    await button.trigger('click')
+    expect(button.text()).toBe('提交中…')
+    expect(button.attributes('disabled')).toBeDefined()
+
+    submission.reject(new Error('qBittorrent unavailable'))
+    await flushPromises()
+
+    expect(wrapper.get('.candidate-card .inline-error').text()).toBe('无法创建下载')
+    expect(button.text()).toBe('重试下载')
+  })
+
+  it('retries an errored download through its download record', async () => {
+    const failedDownload: DailyDownload = {
+      ...download,
+      state: 'ERROR',
+      error_message: '站点下载链接已失效',
+    }
+    const retry = deferred<DailyDownload>()
+    mocks.syncDownloads.mockResolvedValueOnce({ created: 0, updated: 0 })
+    mocks.downloads.mockResolvedValueOnce({
+      items: [failedDownload],
+      page: 1,
+      page_size: 30,
+      total: 1,
+    })
+    mocks.retryDownload.mockReturnValueOnce(retry.promise)
+    const wrapper = mount(DownloadsView)
+    await flushPromises()
+
+    const button = wrapper.get('.download-card .button.primary')
+    await button.trigger('click')
+    expect(button.text()).toBe('重试中…')
+    expect(button.attributes('disabled')).toBeDefined()
+
+    retry.resolve({ ...failedDownload, state: 'QUEUED', error_message: null })
+    await flushPromises()
+
+    expect(mocks.retryDownload).toHaveBeenCalledWith(failedDownload.id)
+    expect(useDailyStore().downloads[0]?.state).toBe('QUEUED')
+    expect(wrapper.find('.download-card .button.primary').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('refreshes qBittorrent state before displaying downloads', async () => {

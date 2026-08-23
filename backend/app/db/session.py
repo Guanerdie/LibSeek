@@ -19,6 +19,7 @@ if engine.url.get_backend_name() == "sqlite":
     def enable_sqlite_foreign_keys(dbapi_connection: Any, _connection_record: object) -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
 

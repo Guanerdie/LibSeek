@@ -9,6 +9,27 @@ from app.core.pt_site_rules import effective_hnr_rule
 from app.models.enums import MediaType
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
 
+_RELEASE_BOUNDARY_TOKENS = {
+    "complete",
+    "season",
+    "remux",
+    "bluray",
+    "bdrip",
+    "web",
+    "webdl",
+    "webrip",
+    "hdtv",
+    "uhd",
+    "dvd",
+    "xvid",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "av1",
+}
+
 
 class MediaForScoring(Protocol):
     media_type: MediaType
@@ -77,18 +98,31 @@ def score_torrent_candidate(
     reasons: list[str] = []
     warnings: list[str] = []
 
+    exact_external_identity = False
     if candidate.tmdb_id is not None:
         if candidate.tmdb_id == metadata.tmdb_id:
-            score += 0.32
             reasons.append("TMDB_ID_EXACT")
+            exact_external_identity = True
         else:
             warnings.append("ID_MISMATCH")
-    elif candidate.imdb_id and metadata.imdb_id:
-        if candidate.imdb_id.casefold() == metadata.imdb_id.casefold():
-            score += 0.28
+    if candidate.imdb_id:
+        if metadata.imdb_id is None:
+            warnings.append("ID_UNVERIFIED")
+        elif candidate.imdb_id.casefold() == metadata.imdb_id.casefold():
             reasons.append("IMDB_ID_EXACT")
+            exact_external_identity = True
         else:
             warnings.append("ID_MISMATCH")
+
+    if "TMDB_ID_EXACT" in reasons:
+        score += 0.32
+    elif "IMDB_ID_EXACT" in reasons:
+        score += 0.28
+
+    if _release_title_matches(metadata, candidate.release_title):
+        reasons.append("TITLE_EXACT")
+        if not exact_external_identity:
+            score += 0.32
 
     if candidate.media_type == metadata.media_type:
         score += 0.14
@@ -99,7 +133,9 @@ def score_torrent_candidate(
     required = _required_episode_map(missing_episodes)
     if metadata.media_type == MediaType.TV and required:
         target_seasons = set(required)
-        if candidate.season in target_seasons:
+        if len(target_seasons) > 1:
+            warnings.append("PARTIAL_PACK")
+        elif candidate.season in target_seasons:
             score += 0.07
             reasons.append("SEASON_EXACT")
             required_episodes = required[candidate.season]
@@ -167,6 +203,52 @@ def score_torrent_candidate(
             "match_reasons": list(dict.fromkeys(reasons)),
             "warnings": list(dict.fromkeys(warnings)),
         }
+    )
+
+
+def _release_title_matches(metadata: MetadataRecord, release_title: str) -> bool:
+    release_tokens = _title_tokens(
+        re.sub(r"^(?:\s*\[[^\]]+\]\s*)+", "", release_title)
+    )
+    if not release_tokens:
+        return False
+
+    titles = [
+        metadata.title,
+        metadata.chinese_title,
+        metadata.english_title,
+        metadata.original_title,
+        *metadata.aliases,
+    ]
+    seen: set[tuple[str, ...]] = set()
+    for title in titles:
+        title_tokens = tuple(_title_tokens(title))
+        if not title_tokens or title_tokens in seen:
+            continue
+        seen.add(title_tokens)
+        if release_tokens[: len(title_tokens)] != list(title_tokens):
+            continue
+        if len(release_tokens) == len(title_tokens):
+            return True
+        if _is_release_boundary(release_tokens[len(title_tokens)]):
+            return True
+    return False
+
+
+def _title_tokens(value: str | None) -> list[str]:
+    if not value:
+        return []
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.findall(r"[^\W_]+", normalized, re.UNICODE)
+
+
+def _is_release_boundary(token: str) -> bool:
+    return bool(
+        token in _RELEASE_BOUNDARY_TOKENS
+        or re.fullmatch(r"(?:19|20)\d{2}", token)
+        or re.fullmatch(r"s\d{1,2}(?:e\d{1,3})?", token)
+        or re.fullmatch(r"e\d{1,3}", token)
+        or re.fullmatch(r"\d{3,4}[pi]", token)
     )
 
 

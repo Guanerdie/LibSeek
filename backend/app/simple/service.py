@@ -223,6 +223,7 @@ async def queue_download(
             existing.state = DownloadState.SUBMITTING
             existing.error_message = None
             media.state = MediaState.DOWNLOADING
+            media.attention_reason = None
             session.add(
                 ActivityLog(
                     media_id=media.id,
@@ -242,6 +243,7 @@ async def queue_download(
         name=candidate.title,
     )
     media.state = MediaState.DOWNLOADING
+    media.attention_reason = None
     session.add_all(
         [
             download,

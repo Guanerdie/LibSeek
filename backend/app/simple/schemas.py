@@ -5,7 +5,13 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import MediaType
-from app.simple.models import DownloadState, EpisodeState, MediaState, SearchState
+from app.simple.models import (
+    AutomationJobState,
+    DownloadState,
+    EpisodeState,
+    MediaState,
+    SearchState,
+)
 from app.simple.regions import NextFindRegion
 
 
@@ -95,11 +101,13 @@ class CandidateView(BaseModel):
     site_id: str
     torrent_id: str
     title: str
+    details_url: str | None = None
     size_bytes: int | None
     seeders: int | None
     resolution: str | None
     source: str | None
     codec: str | None
+    download_factor: float | None
     season_coverage: list[int]
     episode_coverage: list[str]
     score: float
@@ -152,3 +160,71 @@ class SyncResult(BaseModel):
 
 class IdentityRequest(BaseModel):
     tmdb_id: int | None = Field(default=None, gt=0)
+
+
+class AutomationPolicyUpdate(BaseModel):
+    enabled: bool = False
+    dry_run: bool = True
+    auto_identify: bool = True
+    site_ids: list[str] = Field(default_factory=lambda: ["avistaz"], min_length=1, max_length=10)
+    media_types: list[MediaType] = Field(
+        default_factory=lambda: [MediaType.MOVIE, MediaType.TV], min_length=1
+    )
+    minimum_score: float = Field(default=0.7, ge=0, le=1)
+    minimum_seeders: int = Field(default=1, ge=0)
+    max_size_bytes: int | None = Field(default=None, gt=0)
+    allow_warnings: bool = False
+    interval_minutes: int = Field(default=60, ge=5, le=24 * 60)
+    retry_delay_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    daily_download_limit: int = Field(default=3, ge=1, le=100)
+    daily_download_bytes: int | None = Field(default=None, gt=0)
+
+    @field_validator("site_ids")
+    @classmethod
+    def normalize_policy_sites(cls, values: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
+        if not normalized:
+            raise ValueError("at least one site is required")
+        return normalized
+
+
+class AutomationPolicyView(AutomationPolicyUpdate):
+    model_config = ConfigDict(from_attributes=True)
+
+    updated_at: datetime
+    last_run_at: datetime | None
+
+
+class AutomationJobView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    media_id: str
+    media_title: str
+    state: AutomationJobState
+    search_id: str | None
+    selected_candidate_id: str | None
+    download_id: str | None
+    trigger: str
+    attempt_count: int
+    next_attempt_at: datetime | None
+    decision: dict[str, object]
+    error_message: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class AutomationJobPage(BaseModel):
+    items: list[AutomationJobView]
+    total: int
+    page: int
+    page_size: int
+
+
+class AutomationRunResult(BaseModel):
+    run_id: str
+    created: int
+    succeeded: int
+    failed: int

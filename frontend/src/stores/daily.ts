@@ -145,6 +145,18 @@ export const useDailyStore = defineStore('daily', {
         return false
       }
     },
+    async retryDownload(download: DailyDownload): Promise<boolean> {
+      this.downloadsError = null
+      try {
+        const retried = await dailyApi.retryDownload(download.id)
+        const index = this.downloads.findIndex((item) => item.id === download.id)
+        if (index >= 0) this.downloads[index] = retried
+        return true
+      } catch (error) {
+        this.downloadsError = error instanceof ApiError ? error.message : '无法重试下载'
+        return false
+      }
+    },
     async loadDownloads(): Promise<void> {
       this.downloadsLoading = true
       this.downloadsError = null

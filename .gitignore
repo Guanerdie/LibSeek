@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 backend/.pytest-*/
+backend/.test-migration-*.db
 .mypy_cache/
 .ruff_cache/
 htmlcov/
