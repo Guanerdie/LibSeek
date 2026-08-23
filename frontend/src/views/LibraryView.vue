@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive } from 'vue'
+import { computed, onMounted, reactive } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -10,6 +10,15 @@ import type { DailyMediaRegion, DailyMediaState, DailyMediaType } from '../types
 import { statusLabel } from '../utils/format'
 
 const daily = useDailyStore()
+const summary = computed(() => {
+  const items = daily.media
+  return [
+    { label: '缺失条目', value: daily.mediaTotal, icon: '▤', tone: 'violet' },
+    { label: '待识别', value: items.filter((item) => !item.tmdb_id).length, icon: '○', tone: 'cyan' },
+    { label: '可用资源', value: items.filter((item) => item.state === 'CANDIDATES').length, icon: '◇', tone: 'blue' },
+    { label: '需要关注', value: items.filter((item) => Boolean(item.attention_reason)).length, icon: '!', tone: 'pink' },
+  ]
+})
 const filters = reactive<{
   query: string
   mediaType: DailyMediaType | ''
@@ -57,6 +66,13 @@ onMounted(() => daily.loadMedia())
         {{ daily.mediaSyncing ? '同步中…' : '同步缺失影视' }}
       </button>
     </PageHeader>
+
+    <div class="summary-grid" aria-label="影视概览">
+      <div v-for="item in summary" :key="item.label" class="summary-card">
+        <span :class="['summary-icon', `tone-${item.tone}`]">{{ item.icon }}</span>
+        <span><small>{{ item.label }}</small><strong>{{ item.value }}</strong></span>
+      </div>
+    </div>
 
     <form class="panel library-filters" @submit.prevent="applyFilters">
       <div class="filter-heading">

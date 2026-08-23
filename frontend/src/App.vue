@@ -47,7 +47,7 @@ async function logout(): Promise<void> {
       </nav>
       <div class="phase-note">
         <span class="status-dot"></span>
-        <div><strong>日常模式</strong><small>发现 · 选择 · 下载</small></div>
+        <div><strong>{{ auth.principal?.username ?? '日常模式' }}</strong><small>发现 · 选择 · 下载</small></div>
       </div>
     </aside>
     <main class="main-content">
