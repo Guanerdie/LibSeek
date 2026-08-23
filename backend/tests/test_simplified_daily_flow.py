@@ -518,6 +518,46 @@ async def test_candidate_warning_requires_one_explicit_confirmation(session_fact
 
 
 @pytest.mark.asyncio
+async def test_second_active_download_for_same_media_is_rejected(session_factory) -> None:
+    async with session_factory() as session:
+        _media, first_candidate = await add_candidate(
+            session,
+            source_item_id="one-active-download-per-media",
+            info_hash="a" * 40,
+        )
+        second_candidate = ReleaseCandidate(
+            search_id=first_candidate.search_id,
+            site_id="avistaz",
+            torrent_id="second-active-download",
+            title="Example.Movie.2160p.BluRay",
+            score=0.88,
+            reasons=[],
+            warnings=[],
+            info_hash="b" * 40,
+        )
+        session.add(second_candidate)
+        await session.commit()
+        await session.refresh(second_candidate)
+
+        first_download = await queue_download(
+            session,
+            candidate_id=first_candidate.id,
+            confirm_warnings=False,
+        )
+        with pytest.raises(AppError) as caught:
+            await queue_download(
+                session,
+                candidate_id=second_candidate.id,
+                confirm_warnings=False,
+            )
+
+        assert caught.value.error_code == "MEDIA_DOWNLOAD_ACTIVE"
+        assert caught.value.details == {"existing_download_id": first_download.id}
+        downloads = list(await session.scalars(select(Download)))
+        assert [item.id for item in downloads] == [first_download.id]
+
+
+@pytest.mark.asyncio
 async def test_search_requires_confirmed_tmdb_identity(session_factory) -> None:
     async with session_factory() as session:
         media = LibraryMediaItem(

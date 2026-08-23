@@ -56,3 +56,14 @@ qBittorrent SID 只保存在对应适配器进程内存中，不需要也不得�
 Windows 首选使用上面的可视化向导；向导不可用时，才使用项目 README 中标为“手工备用”的 `Read-Host -AsSecureString` 片段创建文件并收紧 ACL。Linux 上建议由部署系统提供 Docker Secret；若使用本地文件，至少执行 `chmod 600 secrets/*.txt` 并限制目录访问。
 
 只做 Compose 配置解析时不需要创建这些文件；Compose 配置解析成功不代表 Secret 已就绪。启动前只检查本次命令所叠加层的文件，不得用占位凭据启动服务或真实连接。停止使用外部连接后应安全移除对应外部服务 Secret，并把 `ENABLE_TMDB_LIVE`、`ENABLE_AVISTAZ_LIVE_SEARCH`、`ENABLE_QB_READ_ONLY`、`ENABLE_AUTOMATION_ENGINE`、`ENABLE_DOWNLOAD_EXECUTOR`、`ENABLE_AVISTAZ_TORRENT_FETCH`、`ENABLE_QB_WRITE` 和 `ENABLE_DOWNLOAD_MONITOR` 恢复为 `false`。认证三个 Secret 缺失时，受保护 API 会 fail closed，而不是退回匿名访问。
+
+## Android 本地分发签名
+
+Android APK 的本地分发签名使用以下两个文件，它们不会提供给后端容器，也不会进入 Git：
+
+```text
+unin-android-release.jks
+unin-android-release.properties
+```
+
+属性文件含签名口令并按明文 Secret 处理；两个文件当前都限制为本机 Windows 用户访问。后续向已安装应用提供升级包时必须继续使用同一密钥，因此应把二者一起备份到受控的密码库或加密介质。不要截图、同步到普通网盘、提交到 Git 或打包进 APK。正式应用商店发布应由发布方另行托管正式签名身份。

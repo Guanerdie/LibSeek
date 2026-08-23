@@ -16,5 +16,8 @@ frontend/dist/
 *.log
 .DS_Store
 secrets/*.txt
+secrets/*.jks
+secrets/*.properties
 secrets/.setup-staging/
 !secrets/.gitkeep
+output/android/

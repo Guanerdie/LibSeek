@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="unin_background">#F2F5FC</color>
+    <color name="unin_background_night">#11182B</color>
+    <color name="unin_primary">#6677F4</color>
+    <color name="unin_cyan">#31D4DC</color>
+    <color name="unin_purple">#A174F6</color>
+</resources>

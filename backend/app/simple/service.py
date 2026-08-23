@@ -236,6 +236,31 @@ async def queue_download(
             await session.refresh(existing)
         return existing
 
+    active_for_media = await session.scalar(
+        select(Download)
+        .where(
+            Download.media_id == media.id,
+            Download.state.in_(
+                (
+                    DownloadState.SUBMITTING,
+                    DownloadState.QUEUED,
+                    DownloadState.DOWNLOADING,
+                    DownloadState.PAUSED,
+                    DownloadState.SEEDING,
+                    DownloadState.OUTCOME_UNKNOWN,
+                )
+            ),
+        )
+        .order_by(Download.created_at.desc())
+    )
+    if active_for_media is not None:
+        raise AppError(
+            "MEDIA_DOWNLOAD_ACTIVE",
+            "该影视已有进行中的下载，请先同步或处理现有任务",
+            status_code=409,
+            details={"existing_download_id": active_for_media.id},
+        )
+
     download = Download(
         media_id=media.id,
         candidate_id=candidate.id,
