@@ -5,10 +5,11 @@ import de.tlovex.unin.data.model.AutomationJobPageDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
 import de.tlovex.unin.data.model.AutomationRunResultDto
+import de.tlovex.unin.data.model.ConfigurationStatusDto
+import de.tlovex.unin.data.model.ConfigurationUpdateRequestDto
+import de.tlovex.unin.data.model.ConnectionTestResultDto
 import de.tlovex.unin.data.model.CredentialsDto
 import de.tlovex.unin.data.model.CsrfDto
-import de.tlovex.unin.data.model.ConfigurationStatusDto
-import de.tlovex.unin.data.model.ConnectionTestResultDto
 import de.tlovex.unin.data.model.DownloadDto
 import de.tlovex.unin.data.model.DownloadPageDto
 import de.tlovex.unin.data.model.DownloadRequestDto
@@ -56,11 +57,19 @@ interface UninApi {
     @GET("api/configuration")
     suspend fun configuration(): ConfigurationStatusDto
 
+    @PUT("api/configuration")
+    suspend fun updateConfiguration(
+        @Body request: ConfigurationUpdateRequestDto,
+    ): ConfigurationStatusDto
+
     @POST("api/configuration/tests/nextfind")
     suspend fun testNextFindConnection(): ConnectionTestResultDto
 
     @POST("api/configuration/tests/tmdb")
     suspend fun testTmdbConnection(): ConnectionTestResultDto
+
+    @POST("api/configuration/tests/outbound-proxy")
+    suspend fun testOutboundProxyConnection(): ConnectionTestResultDto
 
     @POST("api/configuration/tests/qbittorrent")
     suspend fun testQbittorrentConnection(): ConnectionTestResultDto

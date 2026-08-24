@@ -5,9 +5,11 @@ import de.tlovex.unin.data.model.AutomationJobPageDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
 import de.tlovex.unin.data.model.AutomationRunResultDto
-import de.tlovex.unin.data.model.CredentialsDto
+import de.tlovex.unin.data.model.AvistaZConfigurationUpdateDto
 import de.tlovex.unin.data.model.ConfigurationStatusDto
+import de.tlovex.unin.data.model.ConfigurationUpdateRequestDto
 import de.tlovex.unin.data.model.ConnectionTestResultDto
+import de.tlovex.unin.data.model.CredentialsDto
 import de.tlovex.unin.data.model.DownloadDto
 import de.tlovex.unin.data.model.DownloadPageDto
 import de.tlovex.unin.data.model.DownloadRequestDto
@@ -19,12 +21,17 @@ import de.tlovex.unin.data.model.MediaPageDto
 import de.tlovex.unin.data.model.MediaState
 import de.tlovex.unin.data.model.MediaSummaryDto
 import de.tlovex.unin.data.model.MediaType
+import de.tlovex.unin.data.model.NextFindConfigurationUpdateDto
+import de.tlovex.unin.data.model.NexusPhpConfigurationUpdateDto
+import de.tlovex.unin.data.model.OutboundProxyConfigurationUpdateDto
 import de.tlovex.unin.data.model.PrincipalDto
 import de.tlovex.unin.data.model.PtSiteArchitecture
+import de.tlovex.unin.data.model.QbittorrentConfigurationUpdateDto
 import de.tlovex.unin.data.model.SearchDetailDto
 import de.tlovex.unin.data.model.SearchRequestDto
 import de.tlovex.unin.data.model.SetupStatusDto
 import de.tlovex.unin.data.model.SyncResultDto
+import de.tlovex.unin.data.model.TmdbConfigurationUpdateDto
 import de.tlovex.unin.data.remote.UninApi
 import de.tlovex.unin.data.security.SecureCookieJar
 import retrofit2.HttpException
@@ -76,10 +83,96 @@ class UninRepository(
 
     suspend fun configurationStatus(): ConfigurationStatusDto = api.configuration()
 
+    suspend fun updateConfiguration(
+        request: ConfigurationUpdateRequestDto,
+    ): ConfigurationStatusDto = api.updateConfiguration(request)
+
+    suspend fun updateNextFindConfiguration(
+        baseUrl: String,
+        username: String,
+        password: String? = null,
+    ): ConfigurationStatusDto = updateConfiguration(
+        ConfigurationUpdateRequestDto(
+            nextfind = NextFindConfigurationUpdateDto(baseUrl, username, password),
+        ),
+    )
+
+    suspend fun updateTmdbConfiguration(token: String?): ConfigurationStatusDto =
+        updateConfiguration(
+            ConfigurationUpdateRequestDto(tmdb = TmdbConfigurationUpdateDto(token)),
+        )
+
+    suspend fun updateOutboundProxyConfiguration(
+        url: String,
+        username: String,
+        password: String? = null,
+    ): ConfigurationStatusDto = updateConfiguration(
+        ConfigurationUpdateRequestDto(
+            outboundProxy = OutboundProxyConfigurationUpdateDto(url, username, password),
+        ),
+    )
+
+    suspend fun updateQbittorrentConfiguration(
+        url: String,
+        username: String,
+        savePath: String,
+        category: String,
+        allowInsecureHttp: Boolean,
+        password: String? = null,
+    ): ConfigurationStatusDto = updateConfiguration(
+        ConfigurationUpdateRequestDto(
+            qbittorrent = QbittorrentConfigurationUpdateDto(
+                url = url,
+                username = username,
+                password = password,
+                savePath = savePath,
+                category = category,
+                allowInsecureHttp = allowInsecureHttp,
+            ),
+        ),
+    )
+
+    suspend fun updateAvistaZConfiguration(
+        baseUrl: String,
+        username: String,
+        password: String? = null,
+        pid: String? = null,
+    ): ConfigurationStatusDto = updateConfiguration(
+        ConfigurationUpdateRequestDto(
+            ptSite = AvistaZConfigurationUpdateDto(
+                baseUrl = baseUrl,
+                username = username,
+                password = password,
+                pid = pid,
+            ),
+        ),
+    )
+
+    suspend fun updateNexusPhpConfiguration(
+        siteId: String,
+        displayName: String,
+        baseUrl: String,
+        cookie: String? = null,
+        passkey: String? = null,
+    ): ConfigurationStatusDto = updateConfiguration(
+        ConfigurationUpdateRequestDto(
+            ptSite = NexusPhpConfigurationUpdateDto(
+                siteId = siteId,
+                displayName = displayName,
+                baseUrl = baseUrl,
+                cookie = cookie,
+                passkey = passkey,
+            ),
+        ),
+    )
+
     suspend fun testNextFindConnection(): ConnectionTestResultDto =
         api.testNextFindConnection()
 
     suspend fun testTmdbConnection(): ConnectionTestResultDto = api.testTmdbConnection()
+
+    suspend fun testOutboundProxyConnection(): ConnectionTestResultDto =
+        api.testOutboundProxyConnection()
 
     suspend fun testQbittorrentConnection(): ConnectionTestResultDto =
         api.testQbittorrentConnection()

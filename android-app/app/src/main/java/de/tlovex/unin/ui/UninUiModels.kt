@@ -1,6 +1,8 @@
 package de.tlovex.unin.ui
 
 import androidx.compose.runtime.Immutable
+import de.tlovex.unin.ui.screens.SettingsConfigurationCallbacks
+import de.tlovex.unin.ui.screens.SettingsConfigurationUiState
 
 enum class UninDestination {
     Missing,
@@ -116,6 +118,7 @@ data class UninUiState(
     val isAutomationRunInProgress: Boolean = false,
     val automationRunOutcomeUnknown: Boolean = false,
     val connections: List<ConnectionUi> = emptyList(),
+    val settingsConfiguration: SettingsConfigurationUiState = SettingsConfigurationUiState(),
     val lastSyncedText: String = "尚未同步",
     val snackbarMessage: String? = null,
 )
@@ -146,5 +149,6 @@ data class UninCallbacks(
     val onRefreshAutomation: () -> Unit = {},
     val onRetryAutomation: (AutomationRunUi) -> Unit = {},
     val onTestConnection: (ConnectionUi) -> Unit = {},
+    val settingsConfiguration: SettingsConfigurationCallbacks = SettingsConfigurationCallbacks(),
     val onDismissMessage: () -> Unit = {},
 )

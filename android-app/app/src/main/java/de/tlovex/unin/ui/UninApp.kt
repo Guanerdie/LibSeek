@@ -127,7 +127,14 @@ private fun ScreenContent(
         UninDestination.Resources -> ResourceCandidatesScreen(state, callbacks, contentPadding, modifier)
         UninDestination.Downloads -> DownloadsScreen(state, callbacks, contentPadding, modifier)
         UninDestination.Automation -> AutomationScreen(state, callbacks, contentPadding, modifier)
-        UninDestination.Settings -> SettingsScreen(state, callbacks, contentPadding, modifier)
+        UninDestination.Settings -> SettingsScreen(
+            state = state,
+            callbacks = callbacks,
+            contentPadding = contentPadding,
+            modifier = modifier,
+            configurationState = state.settingsConfiguration,
+            configurationCallbacks = callbacks.settingsConfiguration,
+        )
     }
 }
 

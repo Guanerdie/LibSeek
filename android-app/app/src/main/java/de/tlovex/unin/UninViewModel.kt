@@ -37,6 +37,15 @@ import de.tlovex.unin.ui.ResourceCandidateUi
 import de.tlovex.unin.ui.UninCallbacks
 import de.tlovex.unin.ui.UninDestination
 import de.tlovex.unin.ui.UninUiState
+import de.tlovex.unin.ui.screens.AvistaZConfigurationUi
+import de.tlovex.unin.ui.screens.NextFindConfigurationUi
+import de.tlovex.unin.ui.screens.NexusPhpConfigurationUi
+import de.tlovex.unin.ui.screens.OutboundProxyConfigurationUi
+import de.tlovex.unin.ui.screens.PtArchitectureUi
+import de.tlovex.unin.ui.screens.QbittorrentConfigurationUi
+import de.tlovex.unin.ui.screens.SettingsConfigurationCallbacks
+import de.tlovex.unin.ui.screens.SettingsConfigurationUiState
+import de.tlovex.unin.ui.screens.TmdbConfigurationUi
 import java.io.IOException
 import java.net.ConnectException
 import java.net.URI
@@ -160,6 +169,14 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         onRefreshAutomation = ::refreshAutomationStatus,
         onRetryAutomation = ::retryAutomation,
         onTestConnection = ::testConnection,
+        settingsConfiguration = SettingsConfigurationCallbacks(
+            onSaveNextFind = ::saveNextFindConfiguration,
+            onSaveTmdb = ::saveTmdbConfiguration,
+            onSaveOutboundProxy = ::saveOutboundProxyConfiguration,
+            onSaveQbittorrent = ::saveQbittorrentConfiguration,
+            onSaveAvistaZ = ::saveAvistaZConfiguration,
+            onSaveNexusPhp = ::saveNexusPhpConfiguration,
+        ),
         onDismissMessage = { mutableUiState.update { it.copy(snackbarMessage = null) } },
     )
 
@@ -295,6 +312,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                     ?: state.automationRuns,
                 connections = configurationResult?.getOrNull()?.toConnections()
                     ?: authenticatedConnections(),
+                settingsConfiguration = configurationResult?.getOrNull()?.toSettingsConfiguration()
+                    ?: state.settingsConfiguration,
                 snackbarMessage = failures.firstOrNull()?.let {
                     errorMessage(it, "部分数据暂时无法读取")
                 },
@@ -308,9 +327,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             UninDestination.Missing -> loadLibrary()
             UninDestination.Downloads -> syncDownloads()
             UninDestination.Automation -> loadAutomation()
-            UninDestination.Resources,
-            UninDestination.Settings,
-            -> Unit
+            UninDestination.Resources -> Unit
+            UninDestination.Settings -> refreshConfiguration()
         }
     }
 
@@ -812,6 +830,123 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun refreshConfiguration() {
+        if (currentRole != AuthRole.ADMIN || uiState.value.settingsConfiguration.isSaving) return
+        launchAction("无法读取服务配置") {
+            val configuration = repository.configurationStatus()
+            mutableUiState.update {
+                it.copy(
+                    connections = configuration.toConnections(),
+                    settingsConfiguration = configuration.toSettingsConfiguration(),
+                )
+            }
+        }
+    }
+
+    private fun saveNextFindConfiguration(
+        baseUrl: String,
+        username: String,
+        replacementPassword: String?,
+    ) = saveConfiguration("NextFind") {
+        repository.updateNextFindConfiguration(baseUrl, username, replacementPassword)
+    }
+
+    private fun saveTmdbConfiguration(replacementToken: String) {
+        if (replacementToken.isBlank()) {
+            mutableUiState.update { it.copy(snackbarMessage = "TMDB Access Token 不能为空") }
+            return
+        }
+        saveConfiguration("TMDB") {
+            repository.updateTmdbConfiguration(replacementToken)
+        }
+    }
+
+    private fun saveOutboundProxyConfiguration(
+        url: String,
+        username: String,
+        replacementPassword: String?,
+    ) = saveConfiguration(if (url.isBlank()) "出站代理停用设置" else "出站代理") {
+        repository.updateOutboundProxyConfiguration(url, username, replacementPassword)
+    }
+
+    private fun saveQbittorrentConfiguration(
+        baseUrl: String,
+        username: String,
+        replacementPassword: String?,
+        savePath: String,
+        category: String,
+        allowInsecureHttp: Boolean,
+    ) = saveConfiguration("qBittorrent") {
+        repository.updateQbittorrentConfiguration(
+            url = baseUrl,
+            username = username,
+            savePath = savePath,
+            category = category,
+            allowInsecureHttp = allowInsecureHttp,
+            password = replacementPassword,
+        )
+    }
+
+    private fun saveAvistaZConfiguration(
+        baseUrl: String,
+        username: String,
+        replacementPassword: String?,
+        replacementPid: String?,
+    ) = saveConfiguration("AvistaZ") {
+        repository.updateAvistaZConfiguration(
+            baseUrl = baseUrl,
+            username = username,
+            password = replacementPassword,
+            pid = replacementPid,
+        )
+    }
+
+    private fun saveNexusPhpConfiguration(
+        siteId: String,
+        displayName: String,
+        baseUrl: String,
+        replacementCookie: String?,
+        replacementPasskey: String?,
+    ) = saveConfiguration("NexusPHP") {
+        repository.updateNexusPhpConfiguration(
+            siteId = siteId,
+            displayName = displayName,
+            baseUrl = baseUrl,
+            cookie = replacementCookie,
+            passkey = replacementPasskey,
+        )
+    }
+
+    private fun saveConfiguration(
+        serviceName: String,
+        update: suspend () -> ConfigurationStatusDto,
+    ) {
+        if (currentRole != AuthRole.ADMIN) {
+            mutableUiState.update { it.copy(snackbarMessage = "只有管理员可以修改服务配置") }
+            return
+        }
+        if (uiState.value.settingsConfiguration.isSaving) return
+        mutableUiState.update {
+            it.copy(settingsConfiguration = it.settingsConfiguration.copy(isSaving = true))
+        }
+        launchAction("无法保存 $serviceName 配置") {
+            try {
+                val configuration = update()
+                mutableUiState.update {
+                    it.copy(
+                        connections = configuration.toConnections(),
+                        settingsConfiguration = configuration.toSettingsConfiguration(isSaving = false),
+                        snackbarMessage = "$serviceName 配置已保存；可执行连接测试确认服务状态",
+                    )
+                }
+            } finally {
+                mutableUiState.update {
+                    it.copy(settingsConfiguration = it.settingsConfiguration.copy(isSaving = false))
+                }
+            }
+        }
+    }
+
     private fun testConnection(connection: ConnectionUi) {
         if (connection.key != CONNECTION_SERVER && currentRole != AuthRole.ADMIN) {
             mutableUiState.update {
@@ -850,7 +985,13 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 val result = when (connection.key) {
                     CONNECTION_NEXTFIND -> repository.testNextFindConnection()
                     CONNECTION_TMDB -> repository.testTmdbConnection()
-                    CONNECTION_PT -> repository.testPtSiteConnection(PtSiteArchitecture.AVISTAZ)
+                    CONNECTION_PROXY -> repository.testOutboundProxyConnection()
+                    CONNECTION_PT -> repository.testPtSiteConnection(
+                        when (uiState.value.settingsConfiguration.activePtArchitecture) {
+                            PtArchitectureUi.AvistaZ -> PtSiteArchitecture.AVISTAZ
+                            PtArchitectureUi.NexusPhp -> PtSiteArchitecture.NEXUSPHP
+                        },
+                    )
                     CONNECTION_QB -> repository.testQbittorrentConnection()
                     else -> throw UserFacingException("不支持测试该连接")
                 }
@@ -936,6 +1077,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 accountDisplayName = principal.displayName(),
                 serverLabel = serverLabel,
                 connections = authenticatedConnections(),
+                settingsConfiguration = SettingsConfigurationUiState(
+                    canEdit = principal.role == AuthRole.ADMIN,
+                ),
                 downloadSubmissionUnknownMediaIds = unknownDownloadSubmissionMediaIds,
                 automationRunOutcomeUnknown = hasUnknownAutomationRun,
             )
@@ -1218,8 +1362,14 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             state = ConnectionState.NotConfigured,
         ),
         ConnectionUi(
+            key = CONNECTION_PROXY,
+            name = "出站代理",
+            description = "可选；用于 NextFind、TMDB 与 PT 的外部请求",
+            state = ConnectionState.NotConfigured,
+        ),
+        ConnectionUi(
             key = CONNECTION_PT,
-            name = "AvistaZ",
+            name = "PT 站点",
             description = "PT 凭据由服务端管理；搜索后显示最近状态",
             state = ConnectionState.NotConfigured,
         ),
@@ -1232,8 +1382,10 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     private fun ConfigurationStatusDto.toConnections(): List<ConnectionUi> {
-        val avistaz = ptSites.avistaz ?: ptSite?.takeIf {
-            it.architecture == PtSiteArchitecture.AVISTAZ
+        val activePt = ptSite
+        val activePtName = when (activePt?.architecture) {
+            PtSiteArchitecture.NEXUSPHP -> "NexusPHP"
+            else -> "AvistaZ"
         }
         return listOf(
             ConnectionUi(
@@ -1259,17 +1411,31 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                     state = if (tmdb.configured) ConnectionState.Configured else ConnectionState.NotConfigured,
             ),
             ConnectionUi(
+                key = CONNECTION_PROXY,
+                name = "出站代理",
+                description = if (outboundProxy.configured) {
+                    "服务端已启用，点击测试验证代理出口"
+                } else {
+                    "可选；当前未启用"
+                },
+                state = if (outboundProxy.configured) {
+                    ConnectionState.Configured
+                } else {
+                    ConnectionState.NotConfigured
+                },
+            ),
+            ConnectionUi(
                 key = CONNECTION_PT,
-                name = "AvistaZ",
+                name = "PT 站点 · $activePtName",
                 description = when {
-                    avistaz == null || !avistaz.configured -> "服务端尚未配置"
-                    !avistaz.runtimeSupported -> "当前服务端运行环境不支持该站点"
-                    !avistaz.searchReady -> "已配置，但尚未满足资源搜索条件"
+                    activePt == null || !activePt.configured -> "服务端尚未配置"
+                    !activePt.runtimeSupported -> "配置可测试，但当前服务端尚不能用它搜索资源"
+                    !activePt.searchReady -> "已配置，但尚未满足资源搜索条件"
                     else -> "服务端已配置且可搜索，点击测试验证连接"
                 },
                 state = when {
-                    avistaz == null || !avistaz.configured -> ConnectionState.NotConfigured
-                    avistaz.runtimeSupported && avistaz.searchReady -> ConnectionState.Configured
+                    activePt == null || !activePt.configured -> ConnectionState.NotConfigured
+                    activePt.runtimeSupported && activePt.searchReady -> ConnectionState.Configured
                     else -> ConnectionState.Disconnected
                 },
             ),
@@ -1279,6 +1445,64 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 description = if (qbittorrent.configured) "服务端已配置，点击测试验证连接" else "服务端尚未配置",
                     state = if (qbittorrent.configured) ConnectionState.Configured else ConnectionState.NotConfigured,
             ),
+        )
+    }
+
+    private fun ConfigurationStatusDto.toSettingsConfiguration(
+        isSaving: Boolean = false,
+    ): SettingsConfigurationUiState {
+        val avistaZ = ptSites.avistaz ?: ptSite?.takeIf {
+            it.architecture == PtSiteArchitecture.AVISTAZ
+        }
+        val nexusPhp = ptSites.nexusphp ?: ptSite?.takeIf {
+            it.architecture == PtSiteArchitecture.NEXUSPHP
+        }
+        return SettingsConfigurationUiState(
+            canEdit = currentRole == AuthRole.ADMIN,
+            isSaving = isSaving,
+            nextFind = NextFindConfigurationUi(
+                baseUrl = nextfind.baseUrl,
+                username = nextfind.username,
+                passwordConfigured = nextfind.passwordConfigured,
+                configured = nextfind.configured,
+            ),
+            tmdb = TmdbConfigurationUi(tokenConfigured = tmdb.configured),
+            outboundProxy = OutboundProxyConfigurationUi(
+                url = outboundProxy.url,
+                username = outboundProxy.username,
+                passwordConfigured = outboundProxy.passwordConfigured,
+                configured = outboundProxy.configured,
+            ),
+            qbittorrent = QbittorrentConfigurationUi(
+                baseUrl = qbittorrent.url,
+                username = qbittorrent.username,
+                passwordConfigured = qbittorrent.configured,
+                savePath = qbittorrent.savePath,
+                category = qbittorrent.category,
+                allowInsecureHttp = qbittorrent.allowInsecureHttp,
+                configured = qbittorrent.configured,
+            ),
+            avistaZ = AvistaZConfigurationUi(
+                baseUrl = avistaZ?.baseUrl.orEmpty(),
+                username = avistaZ?.username.orEmpty(),
+                passwordConfigured = avistaZ?.passwordConfigured == true,
+                pidConfigured = avistaZ?.pidConfigured == true,
+                configured = avistaZ?.configured == true,
+                runtimeSupported = avistaZ?.runtimeSupported ?: true,
+            ),
+            nexusPhp = NexusPhpConfigurationUi(
+                siteId = nexusPhp?.siteId.orEmpty(),
+                displayName = nexusPhp?.displayName.orEmpty(),
+                baseUrl = nexusPhp?.baseUrl.orEmpty(),
+                cookieConfigured = nexusPhp?.cookieConfigured == true,
+                passkeyConfigured = nexusPhp?.passkeyConfigured == true,
+                configured = nexusPhp?.configured == true,
+                runtimeSupported = nexusPhp?.runtimeSupported ?: false,
+            ),
+            activePtArchitecture = when (ptSite?.architecture) {
+                PtSiteArchitecture.NEXUSPHP -> PtArchitectureUi.NexusPhp
+                else -> PtArchitectureUi.AvistaZ
+            },
         )
     }
 
@@ -1437,7 +1661,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         const val CONNECTION_SERVER = "unin"
         const val CONNECTION_NEXTFIND = "nextfind"
         const val CONNECTION_TMDB = "tmdb"
-        const val CONNECTION_PT = "avistaz"
+        const val CONNECTION_PROXY = "outbound_proxy"
+        const val CONNECTION_PT = "pt_site"
         const val CONNECTION_QB = "qbittorrent"
         const val SAFETY_PREFERENCES_NAME = "unin_operation_safety"
         const val UNKNOWN_AUTOMATION_RUN_KEY = "unknown_automation_run"
