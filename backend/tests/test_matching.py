@@ -122,3 +122,33 @@ def test_a_single_season_pack_does_not_cover_missing_episodes_across_seasons() -
 
     assert "PARTIAL_PACK" in scored.warnings
     assert "SEASON_PACK_COVERS_TARGET_SEASON" not in scored.match_reasons
+
+
+def test_long_running_episode_number_can_match_an_exact_release() -> None:
+    metadata = MetadataRecord(
+        tmdb_id=23,
+        media_type=MediaType.TV,
+        title="Long Runner",
+        year=1992,
+        episode_matrix={1: [1473]},
+    )
+    scored = score_torrent_candidate(
+        metadata,
+        TorrentCandidate(
+            site_id="avistaz",
+            torrent_id="episode-1473",
+            release_title="Long.Runner.S01E1473.1080p.WEB-DL",
+            details_ref="avistaz:details:episode-1473",
+            media_type=MediaType.TV,
+            tmdb_id=23,
+            season=1,
+            episodes=[1473],
+            seeders=3,
+            hit_and_run=False,
+        ),
+        missing_episodes=["S01E1473"],
+        preferences=MatchPreferences(),
+    )
+
+    assert "EPISODE_COVERAGE_EXACT" in scored.match_reasons
+    assert "PARTIAL_PACK" not in scored.warnings

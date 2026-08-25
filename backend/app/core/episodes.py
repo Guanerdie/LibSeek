@@ -5,9 +5,10 @@ from collections.abc import Mapping, Sequence
 
 EpisodeMatrix = dict[int, list[int]]
 
-_EPISODE_CODE = re.compile(r"(?i)^S(\d{1,2})E(\d{1,3})$")
+_EPISODE_CODE = re.compile(r"(?i)^S(\d{1,2})E(\d{1,5})$")
 _SEASON_CODE = re.compile(r"(?i)^S?(\d{1,2})$")
-_EPISODE_NUMBER = re.compile(r"(?i)^E?(\d{1,3})$")
+_EPISODE_NUMBER = re.compile(r"(?i)^E?(\d{1,5})$")
+_MAX_EPISODE_NUMBER = 99_999
 
 
 def _bounded_number(value: object, pattern: re.Pattern[str], *, minimum: int) -> int:
@@ -19,7 +20,7 @@ def _bounded_number(value: object, pattern: re.Pattern[str], *, minimum: int) ->
         number = int(match.group(1))
     else:
         raise ValueError("invalid episode number")
-    if not minimum <= number <= 999:
+    if not minimum <= number <= _MAX_EPISODE_NUMBER:
         raise ValueError("episode number is outside the supported range")
     return number
 

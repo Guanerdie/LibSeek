@@ -137,6 +137,44 @@ async def test_tv_episode_matrix_excludes_future_and_unknown_air_dates() -> None
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_tv_episode_matrix_accepts_long_running_episode_numbers() -> None:
+    def details(request: httpx.Request) -> httpx.Response:
+        name = "长寿节目" if request.url.params["language"] == "zh-CN" else "Long Runner"
+        return httpx.Response(
+            200,
+            json={
+                "id": 23,
+                "name": name,
+                "original_name": "그것이 알고싶다",
+                "first_air_date": "1992-03-31",
+                "number_of_seasons": 1,
+                "number_of_episodes": 1473,
+            },
+        )
+
+    respx.get(f"{BASE}/3/tv/23").mock(side_effect=details)
+    respx.get(f"{BASE}/3/tv/23/season/1").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "season_number": 1,
+                "episodes": [
+                    {"episode_number": 1473, "air_date": "2026-08-01"},
+                ],
+            },
+        )
+    )
+
+    tmdb = provider()
+    result = await tmdb.get_by_tmdb_id(MediaType.TV, 23)
+
+    assert result.episode_matrix == {1: [1473]}
+    assert result.number_of_episodes == 1473
+    await tmdb.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
 @pytest.mark.parametrize(
     ("media_type", "detail_path", "payload", "expected"),
     (

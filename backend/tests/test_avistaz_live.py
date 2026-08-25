@@ -160,6 +160,12 @@ def test_search_params_use_avistaz_numeric_contract(
     assert "subtitle[]" not in params
 
 
+def test_long_running_episode_number_is_parsed_from_release_title() -> None:
+    assert AvistaZAdapter._season_episodes(
+        "Long.Runner.S01E1473.1080p.WEB-DL"
+    ) == (1, [1473])
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_search_404_is_an_empty_result() -> None:

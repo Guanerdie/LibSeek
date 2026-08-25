@@ -569,7 +569,7 @@ class AvistaZAdapter(PtSiteAdapter):
     @staticmethod
     def _season_episodes(title: str) -> tuple[int | None, list[int] | None]:
         match = re.search(
-            r"(?i)\bS(\d{1,2})(?:E(\d{1,3})(?:-?E?(\d{1,3}))?)?\b", title
+            r"(?i)\bS(\d{1,2})(?:E(\d{1,5})(?:-?E?(\d{1,5}))?)?\b", title
         )
         if match is None:
             return None, None

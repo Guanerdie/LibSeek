@@ -17,7 +17,7 @@ from pydantic import (
 from app.core.episodes import EpisodeMatrix, normalize_episode_codes, normalize_episode_matrix
 from app.models.enums import IdentityConfidence, MediaType, MetadataStatus
 
-EpisodeCode = Annotated[str, StringConstraints(pattern=r"^S\d{2}E\d{2,3}$")]
+EpisodeCode = Annotated[str, StringConstraints(pattern=r"^S\d{2}E\d{2,5}$")]
 SiteId = Annotated[
     str,
     StringConstraints(

@@ -42,7 +42,7 @@ from app.simple.models import (
 )
 from app.simple.service import complete_search, queue_download
 
-_EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,3})$")
+_EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,5})$")
 _download_submission_lock = asyncio.Lock()
 _nextfind_sync_lock = asyncio.Lock()
 

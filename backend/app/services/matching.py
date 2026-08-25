@@ -246,8 +246,8 @@ def _is_release_boundary(token: str) -> bool:
     return bool(
         token in _RELEASE_BOUNDARY_TOKENS
         or re.fullmatch(r"(?:19|20)\d{2}", token)
-        or re.fullmatch(r"s\d{1,2}(?:e\d{1,3})?", token)
-        or re.fullmatch(r"e\d{1,3}", token)
+        or re.fullmatch(r"s\d{1,2}(?:e\d{1,5})?", token)
+        or re.fullmatch(r"e\d{1,5}", token)
         or re.fullmatch(r"\d{3,4}[pi]", token)
     )
 
@@ -255,7 +255,7 @@ def _is_release_boundary(token: str) -> bool:
 def _required_episode_map(values: list[str] | None) -> dict[int, set[int]]:
     result: dict[int, set[int]] = {}
     for value in values or []:
-        match = re.fullmatch(r"S(\d{2})E(\d{2,3})", value)
+        match = re.fullmatch(r"S(\d{2})E(\d{2,5})", value)
         if match:
             result.setdefault(int(match.group(1)), set()).add(int(match.group(2)))
     return result
