@@ -103,6 +103,9 @@ data class ConnectionUi(
 data class UninUiState(
     val isAuthenticated: Boolean = false,
     val isBusy: Boolean = false,
+    val isLibraryLoading: Boolean = false,
+    val isLibrarySyncing: Boolean = false,
+    val canSyncLibrary: Boolean = false,
     val currentDestination: UninDestination = UninDestination.Missing,
     val username: String = "",
     val password: String = "",

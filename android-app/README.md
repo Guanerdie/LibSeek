@@ -30,13 +30,13 @@ Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 可直接安装的本地分发包输出到：
 
 ```text
-D:\project\unin\output\android\UNIN-1.2.0.apk
+D:\project\unin\output\android\UNIN-1.2.1.apk
 ```
 
 使用 ADB 安装：
 
 ```powershell
-adb install -r D:\project\unin\output\android\UNIN-1.2.0.apk
+adb install -r D:\project\unin\output\android\UNIN-1.2.1.apk
 ```
 
 也可以把 APK 复制到手机后打开安装。首次启动使用 `unin.tlovex.de` 上已有的 UNIN 账号登录；APK 不包含默认账号或管理员密码。

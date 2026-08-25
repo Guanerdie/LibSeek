@@ -9,6 +9,9 @@ class ApiErrorPolicyTest {
     fun sessionErrorsExpireTheLocalSession() {
         assertTrue(ApiErrorPolicy.isSessionAuthenticationFailure(401, "AUTH_REQUIRED"))
         assertTrue(ApiErrorPolicy.isSessionAuthenticationFailure(401, "AUTH_SESSION_EXPIRED"))
+        assertTrue(ApiErrorPolicy.isSessionAuthenticationFailure(403, "CSRF_TOKEN_EXPIRED"))
+        assertTrue(ApiErrorPolicy.isSessionAuthenticationFailure(403, "CSRF_TOKEN_INVALID"))
+        assertTrue(ApiErrorPolicy.isSessionAuthenticationFailure(403, "CSRF_TOKEN_REQUIRED"))
     }
 
     @Test
@@ -16,5 +19,6 @@ class ApiErrorPolicyTest {
         assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(401, "QB_AUTH_FAILED"))
         assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(401, "PT_AUTH_FAILED"))
         assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(502, "AUTH_REQUIRED"))
+        assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(403, "AUTH_ROLE_FORBIDDEN"))
     }
 }

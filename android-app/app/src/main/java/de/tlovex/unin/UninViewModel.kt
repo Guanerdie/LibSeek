@@ -26,6 +26,7 @@ import de.tlovex.unin.data.model.PrincipalDto
 import de.tlovex.unin.data.model.PtSiteArchitecture
 import de.tlovex.unin.data.model.SearchDetailDto
 import de.tlovex.unin.data.model.SearchState
+import de.tlovex.unin.data.remote.peekErrorBody
 import de.tlovex.unin.data.repository.UninRepository
 import de.tlovex.unin.ui.AutomationPolicyUi
 import de.tlovex.unin.ui.AutomationRunState
@@ -67,6 +68,8 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -74,6 +77,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import retrofit2.HttpException
 
@@ -115,6 +120,11 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     ).orEmpty().filterTo(mutableSetOf()) { it.isNotBlank() }.toSet()
     private var mediaDetailJob: Job? = null
     private var searchJob: Job? = null
+    private var authenticationJob: Job? = null
+    private var libraryLoadJob: Job? = null
+    private var librarySyncJob: Job? = null
+    private var downloadsSyncJob: Job? = null
+    private val libraryOperationMutex = Mutex()
     private var automationRunPollJob: Job? = null
     private var automationRunPollId: String? = null
     private val authenticatedJobs = mutableSetOf<Job>()
@@ -194,7 +204,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restoreSession() {
-        viewModelScope.launch {
+        lateinit var job: Job
+        job = viewModelScope.launch {
             beginOperation()
             try {
                 val principal = repository.bootstrapSession()
@@ -217,6 +228,10 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 mutableIsInitialized.value = true
             }
         }
+        authenticationJob = job
+        job.invokeOnCompletion {
+            if (authenticationJob === job) authenticationJob = null
+        }
     }
 
     private fun updateUsername(value: String) {
@@ -230,9 +245,10 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private fun login() {
         val username = uiState.value.username.trim()
         val password = uiState.value.password
-        if (username.isEmpty() || password.isEmpty()) return
+        if (username.isEmpty() || password.isEmpty() || authenticationJob?.isActive == true) return
 
-        viewModelScope.launch {
+        lateinit var job: Job
+        job = viewModelScope.launch {
             beginOperation()
             mutableUiState.update { it.copy(loginError = null) }
             try {
@@ -248,9 +264,14 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 endOperation()
             }
         }
+        authenticationJob = job
+        job.invokeOnCompletion {
+            if (authenticationJob === job) authenticationJob = null
+        }
     }
 
     private fun logout() {
+        cancelAuthenticationJob()
         cancelAuthenticatedJobs()
         viewModelScope.launch {
             beginOperation()
@@ -271,7 +292,23 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadInitialContent() = supervisorScope {
-        val libraryRequest = async { loadAllLibrary() }
+        mutableUiState.update { it.copy(isLibraryLoading = true) }
+        val libraryRequest = async {
+            try {
+                libraryOperationMutex.withLock {
+                    val items = loadRecentLibrary()
+                    mutableUiState.update { state ->
+                        if (state.isAuthenticated) {
+                            state.copy(missingMedia = items.toMissingMedia(state.missingMedia))
+                        } else {
+                            state
+                        }
+                    }
+                }
+            } finally {
+                mutableUiState.update { it.copy(isLibraryLoading = false) }
+            }
+        }
         val downloadsRequest = async { loadAllDownloads() }
         val policyRequest = async { repository.automationPolicy() }
         val jobsRequest = async { loadAllAutomationJobs() }
@@ -310,8 +347,6 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
 
         mutableUiState.update { state ->
             state.copy(
-                missingMedia = libraryResult.getOrNull()?.toMissingMedia(state.missingMedia)
-                    ?: state.missingMedia,
                 downloads = downloadsResult.getOrNull()?.map { it.toUi() }
                     ?: state.downloads,
                 automationPolicy = policyResult.getOrNull()?.toUi()
@@ -364,30 +399,88 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadLibrary() {
-        launchAction("无法读取缺失影视") {
-            val items = loadAllLibrary()
-            mutableUiState.update { state ->
-                state.copy(missingMedia = items.toMissingMedia(state.missingMedia))
+        if (
+            uiState.value.isLibraryLoading ||
+            uiState.value.isLibrarySyncing ||
+            libraryLoadJob?.isActive == true ||
+            librarySyncJob?.isActive == true
+        ) return
+
+        mutableUiState.update { it.copy(isLibraryLoading = true) }
+        lateinit var job: Job
+        job = launchAction("无法读取缺失影视") {
+            try {
+                libraryOperationMutex.withLock {
+                    val items = loadRecentLibrary()
+                    mutableUiState.update { state ->
+                        state.copy(missingMedia = items.toMissingMedia(state.missingMedia))
+                    }
+                }
+            } finally {
+                mutableUiState.update { it.copy(isLibraryLoading = false) }
             }
+        }
+        libraryLoadJob = job
+        job.invokeOnCompletion {
+            if (libraryLoadJob === job) libraryLoadJob = null
         }
     }
 
     private fun syncLibrary() {
-        launchAction("无法同步缺失影视") {
-            val result = repository.syncLibrary()
-            val items = loadAllLibrary()
-            mutableUiState.update { state ->
-                state.copy(
-                    missingMedia = items.toMissingMedia(state.missingMedia),
-                    lastSyncedText = "刚刚同步",
-                    snackbarMessage = "同步完成：新增 ${result.created} 项，更新 ${result.updated} 项",
-                    connections = state.connections.withConnection(
-                        key = CONNECTION_NEXTFIND,
-                        connectionState = ConnectionState.Connected,
-                        description = "NextFind 媒体库同步正常",
-                    ),
-                )
+        if (currentRole == null || currentRole == AuthRole.VIEWER) {
+            mutableUiState.update { it.copy(snackbarMessage = "当前账号没有同步媒体库的权限") }
+            return
+        }
+        if (uiState.value.isLibrarySyncing || librarySyncJob?.isActive == true) return
+
+        libraryLoadJob?.cancel()
+        libraryLoadJob = null
+        mutableUiState.update {
+            it.copy(
+                isLibraryLoading = false,
+                isLibrarySyncing = true,
+            )
+        }
+        lateinit var job: Job
+        job = launchAction("无法同步缺失影视") {
+            try {
+                libraryOperationMutex.withLock {
+                    val result = repository.syncLibrary()
+                    mutableUiState.update { state ->
+                        state.copy(
+                            lastSyncedText = "刚刚同步",
+                            snackbarMessage = "同步完成：新增 ${result.created} 项，更新 ${result.updated} 项",
+                            connections = state.connections.withConnection(
+                                key = CONNECTION_NEXTFIND,
+                                connectionState = ConnectionState.Connected,
+                                description = "NextFind 媒体库同步正常",
+                            ),
+                        )
+                    }
+
+                    try {
+                        val items = loadRecentLibrary()
+                        mutableUiState.update { state ->
+                            state.copy(missingMedia = items.toMissingMedia(state.missingMedia))
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        if (error.isSessionAuthenticationFailure()) throw error
+                        mutableUiState.update {
+                            it.copy(
+                                snackbarMessage = "同步已完成，但列表刷新失败；请稍后重新进入缺失页面",
+                            )
+                        }
+                    }
+                }
+            } finally {
+                mutableUiState.update { it.copy(isLibrarySyncing = false) }
             }
+        }
+        librarySyncJob = job
+        job.invokeOnCompletion {
+            if (librarySyncJob === job) librarySyncJob = null
         }
     }
 
@@ -654,38 +747,47 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun syncDownloads() {
-        launchAction("无法同步下载状态") {
-            val result = repository.syncDownloads()
-            val downloads = loadAllDownloads()
-            val library = loadAllLibrary()
-            val unresolvedMediaIds = downloads.filter {
-                it.state == de.tlovex.unin.data.model.DownloadState.SUBMITTING ||
-                    it.state == de.tlovex.unin.data.model.DownloadState.OUTCOME_UNKNOWN
-            }.mapTo(mutableSetOf()) { it.mediaId }
-            val resolvedMediaIds = unknownDownloadSubmissionMediaIds - unresolvedMediaIds
-            resolvedMediaIds.forEach(::clearUnknownDownloadSubmission)
-            mutableUiState.update { state ->
-                state.copy(
-                    downloads = downloads.map { it.toUi() },
-                    missingMedia = library.toMissingMedia(state.missingMedia),
-                    downloadSubmissionUnknownMediaIds = unknownDownloadSubmissionMediaIds,
-                    snackbarMessage = when {
-                        resolvedMediaIds.isNotEmpty() && unknownDownloadSubmissionMediaIds.isEmpty() ->
-                            "已确认上次提交结果，可以继续选择资源"
-                        resolvedMediaIds.isNotEmpty() ->
-                            "已确认部分提交结果，其余任务仍需稍后同步"
-                        unknownDownloadSubmissionMediaIds.isNotEmpty() ->
-                            "上次提交仍未确认，请稍后再次同步"
-                        result.updated > 0 -> "已更新 ${result.updated} 个下载任务"
-                        else -> "下载状态已同步"
-                    },
-                    connections = state.connections.withConnection(
-                        key = CONNECTION_QB,
-                        connectionState = ConnectionState.Connected,
-                        description = "qBittorrent 状态同步正常",
-                    ),
-                )
+        if (downloadsSyncJob?.isActive == true) return
+
+        lateinit var job: Job
+        job = launchAction("无法同步下载状态") {
+            libraryOperationMutex.withLock {
+                val result = repository.syncDownloads()
+                val downloads = loadAllDownloads()
+                val library = loadRecentLibrary()
+                val unresolvedMediaIds = downloads.filter {
+                    it.state == de.tlovex.unin.data.model.DownloadState.SUBMITTING ||
+                        it.state == de.tlovex.unin.data.model.DownloadState.OUTCOME_UNKNOWN
+                }.mapTo(mutableSetOf()) { it.mediaId }
+                val resolvedMediaIds = unknownDownloadSubmissionMediaIds - unresolvedMediaIds
+                resolvedMediaIds.forEach(::clearUnknownDownloadSubmission)
+                mutableUiState.update { state ->
+                    state.copy(
+                        downloads = downloads.map { it.toUi() },
+                        missingMedia = library.toMissingMedia(state.missingMedia),
+                        downloadSubmissionUnknownMediaIds = unknownDownloadSubmissionMediaIds,
+                        snackbarMessage = when {
+                            resolvedMediaIds.isNotEmpty() && unknownDownloadSubmissionMediaIds.isEmpty() ->
+                                "已确认上次提交结果，可以继续选择资源"
+                            resolvedMediaIds.isNotEmpty() ->
+                                "已确认部分提交结果，其余任务仍需稍后同步"
+                            unknownDownloadSubmissionMediaIds.isNotEmpty() ->
+                                "上次提交仍未确认，请稍后再次同步"
+                            result.updated > 0 -> "已更新 ${result.updated} 个下载任务"
+                            else -> "下载状态已同步"
+                        },
+                        connections = state.connections.withConnection(
+                            key = CONNECTION_QB,
+                            connectionState = ConnectionState.Connected,
+                            description = "qBittorrent 状态同步正常",
+                        ),
+                    )
+                }
             }
+        }
+        downloadsSyncJob = job
+        job.invokeOnCompletion {
+            if (downloadsSyncJob === job) downloadsSyncJob = null
         }
     }
 
@@ -1216,6 +1318,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             UninUiState(
                 isAuthenticated = true,
                 isBusy = activeOperations > 0,
+                canSyncLibrary = principal.role != AuthRole.VIEWER,
                 accountDisplayName = principal.displayName(),
                 serverLabel = serverLabel,
                 connections = authenticatedConnections(),
@@ -1243,6 +1346,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun expireSession(message: String) {
+        cancelAuthenticationJob()
         cancelAuthenticatedJobs()
         searchJob?.cancel()
         mediaDetailJob?.cancel()
@@ -1253,18 +1357,42 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private fun cancelAuthenticatedJobs() {
         authenticatedJobs.toList().forEach { it.cancel() }
         authenticatedJobs.clear()
+        libraryLoadJob = null
+        librarySyncJob = null
+        downloadsSyncJob = null
         automationRunPollJob = null
         automationRunPollId = null
     }
 
-    private suspend fun loadAllLibrary(): List<MediaSummaryDto> {
-        val first = repository.library(page = 1, pageSize = PAGE_SIZE)
-        val items = first.items.toMutableList()
-        val pages = (first.total + PAGE_SIZE - 1) / PAGE_SIZE
-        for (page in 2..pages) {
-            items += repository.library(page = page, pageSize = PAGE_SIZE).items
-        }
-        return items.filter { it.state != MediaState.COMPLETE }
+    private fun cancelAuthenticationJob() {
+        authenticationJob?.cancel()
+        authenticationJob = null
+    }
+
+    private suspend fun loadRecentLibrary(): List<MediaSummaryDto> = coroutineScope {
+        LibraryWindow.combine(
+            LibraryWindow.states.map { state ->
+                async {
+                    val first = repository.library(
+                        state = state,
+                        page = 1,
+                        pageSize = LibraryWindow.pageSize,
+                    )
+                    buildList {
+                        addAll(first.items)
+                        LibraryWindow.additionalPages(first.total).forEach { page ->
+                            addAll(
+                                repository.library(
+                                    state = state,
+                                    page = page,
+                                    pageSize = LibraryWindow.pageSize,
+                                ).items,
+                            )
+                        }
+                    }
+                }
+            }.awaitAll(),
+        )
     }
 
     private suspend fun loadAllDownloads(): List<DownloadDto> {
@@ -1704,7 +1832,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             )
 
     private fun HttpException.errorBodySnapshot(): JSONObject? = runCatching {
-        val body = response()?.raw()?.peekBody(MAX_ERROR_BODY_BYTES)?.string().orEmpty()
+        val body = peekErrorBody(MAX_ERROR_BODY_BYTES).orEmpty()
         JSONObject(body)
     }.getOrNull()
 

@@ -67,6 +67,11 @@ fun MissingMediaScreen(
 ) {
     val movieCount = state.missingMedia.count { it.kind == MediaKind.Movie }
     val seriesCount = state.missingMedia.count { it.kind == MediaKind.Series }
+    val syncStatus = when {
+        state.isLibrarySyncing -> "正在同步 NextFind"
+        state.isLibraryLoading -> "正在读取最近项目"
+        else -> state.lastSyncedText
+    }
     LazyVerticalGrid(
         columns = GridCells.Adaptive(290.dp),
         modifier = modifier,
@@ -77,18 +82,22 @@ fun MissingMediaScreen(
         item(span = { GridItemSpan(maxLineSpan) }) {
             SectionHeading(
                 title = "缺失影视",
-                subtitle = "来自 NextFind · ${state.lastSyncedText}",
-                action = {
-                    GradientPrimaryButton(
-                        text = "同步",
-                        onClick = callbacks.onSyncMissing,
-                        loading = state.isBusy,
-                        icon = Icons.Outlined.CloudSync,
-                    )
+                subtitle = "来自 NextFind · $syncStatus",
+                action = if (state.canSyncLibrary) {
+                    {
+                        GradientPrimaryButton(
+                            text = "同步",
+                            onClick = callbacks.onSyncMissing,
+                            loading = state.isLibrarySyncing,
+                            icon = Icons.Outlined.CloudSync,
+                        )
+                    }
+                } else {
+                    null
                 },
             )
         }
-        item { MetricCard("全部缺失", state.missingMedia.size.toString(), UninBlue, Modifier.fillMaxWidth()) }
+        item { MetricCard("当前显示", state.missingMedia.size.toString(), UninBlue, Modifier.fillMaxWidth()) }
         item { MetricCard("电影", movieCount.toString(), UninCyan, Modifier.fillMaxWidth()) }
         item { MetricCard("剧集", seriesCount.toString(), UninViolet, Modifier.fillMaxWidth()) }
         if (state.missingMedia.isEmpty()) {
@@ -98,10 +107,35 @@ fun MissingMediaScreen(
                         Modifier.padding(32.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Icon(Icons.Outlined.CheckCircle, null, tint = UninSuccess, modifier = Modifier.size(44.dp))
+                        Icon(
+                            if (state.isLibraryLoading || state.isLibrarySyncing) {
+                                Icons.Outlined.CloudSync
+                            } else {
+                                Icons.Outlined.CheckCircle
+                            },
+                            null,
+                            tint = UninSuccess,
+                            modifier = Modifier.size(44.dp),
+                        )
                         Spacer(Modifier.height(12.dp))
-                        Text("当前没有缺失项目", style = MaterialTheme.typography.titleLarge)
-                        Text("点击同步以检查 NextFind 的最新状态", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            if (state.isLibraryLoading || state.isLibrarySyncing) {
+                                "正在更新缺失项目"
+                            } else {
+                                "当前没有缺失项目"
+                            },
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        Text(
+                            when {
+                                state.isLibraryLoading || state.isLibrarySyncing ->
+                                    "正在获取最新媒体状态，请稍候"
+                                state.canSyncLibrary ->
+                                    "点击同步以检查 NextFind 的最新状态"
+                                else -> "当前账号拥有只读权限"
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
