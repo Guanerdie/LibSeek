@@ -6,6 +6,9 @@ data class AutomationPolicyUpdateDto(
     val enabled: Boolean = false,
     @SerializedName("dry_run") val dryRun: Boolean = true,
     @SerializedName("auto_identify") val autoIdentify: Boolean = true,
+    @SerializedName("scope_mode") val scopeMode: AutomationScopeMode = AutomationScopeMode.FILTERS,
+    val regions: List<String> = emptyList(),
+    @SerializedName("selected_media_ids") val selectedMediaIds: List<String> = emptyList(),
     @SerializedName("site_ids") val siteIds: List<String> = listOf("avistaz"),
     @SerializedName("media_types") val mediaTypes: List<MediaType> =
         listOf(MediaType.MOVIE, MediaType.TV),
@@ -24,6 +27,9 @@ data class AutomationPolicyDto(
     val enabled: Boolean,
     @SerializedName("dry_run") val dryRun: Boolean,
     @SerializedName("auto_identify") val autoIdentify: Boolean,
+    @SerializedName("scope_mode") val scopeMode: AutomationScopeMode,
+    val regions: List<String>,
+    @SerializedName("selected_media_ids") val selectedMediaIds: List<String>,
     @SerializedName("site_ids") val siteIds: List<String>,
     @SerializedName("media_types") val mediaTypes: List<MediaType>,
     @SerializedName("minimum_score") val minimumScore: Double,
@@ -38,6 +44,11 @@ data class AutomationPolicyDto(
     @SerializedName("updated_at") val updatedAt: String,
     @SerializedName("last_run_at") val lastRunAt: String?,
 )
+
+enum class AutomationScopeMode {
+    @SerializedName("filters") FILTERS,
+    @SerializedName("selected") SELECTED,
+}
 
 enum class AutomationJobState {
     PENDING,
@@ -72,9 +83,23 @@ data class AutomationJobPageDto(
     @SerializedName("page_size") val pageSize: Int,
 )
 
-data class AutomationRunResultDto(
-    @SerializedName("run_id") val runId: String,
+enum class AutomationRunStateDto {
+    PENDING,
+    RUNNING,
+    SUCCEEDED,
+    FAILED,
+}
+
+data class AutomationRunDto(
+    val id: String,
+    val trigger: String,
+    val state: AutomationRunStateDto,
     val created: Int,
     val succeeded: Int,
     val failed: Int,
+    val deferred: Int,
+    @SerializedName("error_message") val errorMessage: String?,
+    @SerializedName("created_at") val createdAt: String,
+    @SerializedName("started_at") val startedAt: String?,
+    @SerializedName("finished_at") val finishedAt: String?,
 )

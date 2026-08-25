@@ -1,17 +1,27 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
-import { ApiError, automationApi } from '../api/client'
+import { ApiError, automationApi, dailyApi } from '../api/client'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
-import type { AutomationJob, AutomationPolicy, AutomationRunResult } from '../types'
+import type {
+  AutomationJob,
+  AutomationPolicy,
+  AutomationRun,
+  DailyMedia,
+  DailyMediaRegion,
+  DailyMediaType,
+} from '../types'
 import { formatShanghai } from '../utils/format'
 
 const form = reactive({
   enabled: false,
   dry_run: true,
   auto_identify: true,
+  scope_mode: 'filters' as 'filters' | 'selected',
+  regions: [] as DailyMediaRegion[],
+  selected_media_ids: [] as string[],
   site_ids: ['avistaz'],
   media_types: ['movie', 'tv'] as Array<'movie' | 'tv'>,
   minimum_score: 0.7,
@@ -27,14 +37,45 @@ const form = reactive({
 const jobs = ref<AutomationJob[]>([])
 const loading = ref(true)
 const saving = ref(false)
-const running = ref(false)
+const starting = ref(false)
 const error = ref<string | null>(null)
 const feedback = ref<string | null>(null)
+const currentRun = ref<AutomationRun | null>(null)
+const mediaOptions = ref<DailyMedia[]>([])
+const mediaOptionsTotal = ref(0)
+const mediaOptionsLoading = ref(false)
+const mediaQuery = reactive({
+  query: '',
+  region: '' as DailyMediaRegion | '',
+  mediaType: '' as DailyMediaType | '',
+})
+const regionOptions: DailyMediaRegion[] = ['欧美', '大陆', '港台', '韩国', '日本', '亚太']
+const runIsActive = computed(
+  () => currentRun.value?.state === 'PENDING' || currentRun.value?.state === 'RUNNING',
+)
+const runCompleted = computed(() => {
+  const run = currentRun.value
+  return run ? run.succeeded + run.failed + run.deferred : 0
+})
+const runProgress = computed(() => {
+  const run = currentRun.value
+  if (!run) return 0
+  if (run.created === 0) return runIsActive.value ? 0 : 100
+  return Math.min(100, Math.round((runCompleted.value / run.created) * 100))
+})
+
+const pollIntervalMs = 2_000
+let pollTimer: ReturnType<typeof globalThis.setTimeout> | undefined
+let pollGeneration = 0
+let isMounted = false
 
 function applyPolicy(policy: AutomationPolicy): void {
   form.enabled = policy.enabled
   form.dry_run = policy.dry_run
   form.auto_identify = policy.auto_identify
+  form.scope_mode = policy.scope_mode
+  form.regions = [...policy.regions]
+  form.selected_media_ids = [...policy.selected_media_ids]
   form.site_ids = [...policy.site_ids]
   form.media_types = [...policy.media_types]
   form.minimum_score = policy.minimum_score
@@ -52,17 +93,117 @@ function applyPolicy(policy: AutomationPolicy): void {
     : ''
 }
 
+async function loadMediaOptions(): Promise<void> {
+  mediaOptionsLoading.value = true
+  try {
+    const page = await dailyApi.media({
+      page: 1,
+      pageSize: 100,
+      query: mediaQuery.query.trim() || undefined,
+      region: mediaQuery.region || undefined,
+      mediaType: mediaQuery.mediaType || undefined,
+    })
+    mediaOptions.value = page.items
+    mediaOptionsTotal.value = page.total
+  } catch (caught) {
+    error.value = message(caught, '无法读取影视选择列表')
+  } finally {
+    mediaOptionsLoading.value = false
+  }
+}
+
+function toggleMedia(mediaId: string): void {
+  const index = form.selected_media_ids.indexOf(mediaId)
+  if (index >= 0) form.selected_media_ids.splice(index, 1)
+  else form.selected_media_ids.push(mediaId)
+}
+
 function message(caught: unknown, fallback: string): string {
   return caught instanceof ApiError ? caught.message : fallback
+}
+
+function isActive(run: AutomationRun): boolean {
+  return run.state === 'PENDING' || run.state === 'RUNNING'
+}
+
+function runSummary(run: AutomationRun): string {
+  const summary = `自动搜索${run.state === 'FAILED' ? '失败' : '完成'}：处理 ${run.created} 项，成功 ${run.succeeded} 项，失败 ${run.failed} 项`
+  return run.deferred > 0 ? `${summary}，等待后续执行 ${run.deferred} 项` : summary
+}
+
+function stopPolling(): void {
+  pollGeneration += 1
+  if (pollTimer !== undefined) {
+    globalThis.clearTimeout(pollTimer)
+    pollTimer = undefined
+  }
+}
+
+async function refreshJobs(): Promise<void> {
+  jobs.value = (await automationApi.jobs()).items
+}
+
+async function finishRun(run: AutomationRun): Promise<void> {
+  stopPolling()
+  currentRun.value = run
+  if (run.state === 'FAILED') {
+    feedback.value = null
+    error.value = run.error_message ?? runSummary(run)
+  } else {
+    error.value = null
+    feedback.value = runSummary(run)
+  }
+  try {
+    await refreshJobs()
+  } catch (caught) {
+    error.value = message(caught, '自动搜索已结束，但无法刷新任务记录')
+  }
+}
+
+function schedulePoll(runId: string, generation: number): void {
+  if (!isMounted || generation !== pollGeneration) return
+  pollTimer = globalThis.setTimeout(() => {
+    void pollRun(runId, generation)
+  }, pollIntervalMs)
+}
+
+async function pollRun(runId: string, generation: number): Promise<void> {
+  if (!isMounted || generation !== pollGeneration) return
+  pollTimer = undefined
+  try {
+    const run = await automationApi.runStatus(runId)
+    if (!isMounted || generation !== pollGeneration) return
+    error.value = null
+    currentRun.value = run
+    if (isActive(run)) schedulePoll(runId, generation)
+    else await finishRun(run)
+  } catch (caught) {
+    if (!isMounted || generation !== pollGeneration) return
+    error.value = message(caught, '无法读取自动搜索进度，将继续重试')
+    schedulePoll(runId, generation)
+  }
+}
+
+function startPolling(run: AutomationRun): void {
+  stopPolling()
+  const generation = pollGeneration
+  schedulePoll(run.id, generation)
 }
 
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [policy, page] = await Promise.all([automationApi.policy(), automationApi.jobs()])
+    const [policy, page, latestRun] = await Promise.all([
+      automationApi.policy(),
+      automationApi.jobs(),
+      automationApi.latestRun(),
+    ])
     applyPolicy(policy)
     jobs.value = page.items
+    currentRun.value = latestRun
+    if (latestRun && isActive(latestRun)) startPolling(latestRun)
+    await loadMediaOptions()
   } catch (caught) {
     error.value = message(caught, '无法读取自动化配置')
   } finally {
@@ -83,6 +224,9 @@ async function save(): Promise<void> {
       enabled: form.enabled,
       dry_run: form.dry_run,
       auto_identify: form.auto_identify,
+      scope_mode: form.scope_mode,
+      regions: form.regions,
+      selected_media_ids: form.selected_media_ids,
       site_ids: form.site_ids,
       media_types: form.media_types,
       minimum_score: form.minimum_score,
@@ -105,19 +249,23 @@ async function save(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  running.value = true
+  if (starting.value || runIsActive.value) return
+  starting.value = true
   error.value = null
   feedback.value = null
   try {
-    const result: AutomationRunResult = await automationApi.run()
-    const deferred = result.created - result.succeeded - result.failed
-    const summary = `${form.dry_run ? '试运行' : '运行'}完成：处理 ${result.created} 项，成功 ${result.succeeded} 项，失败 ${result.failed} 项`
-    feedback.value = deferred > 0 ? `${summary}，等待后续执行 ${deferred} 项` : summary
-    jobs.value = (await automationApi.jobs()).items
+    const createdRun = await automationApi.run()
+    currentRun.value = createdRun
+    if (isActive(createdRun)) {
+      feedback.value = '自动搜索已在后台开始，可离开页面后再回来查看进度。'
+      startPolling(createdRun)
+    } else {
+      await finishRun(createdRun)
+    }
   } catch (caught) {
-    error.value = message(caught, '无法执行自动搜索试运行')
+    error.value = message(caught, '无法启动自动搜索')
   } finally {
-    running.value = false
+    starting.value = false
   }
 }
 
@@ -132,7 +280,15 @@ async function retry(jobId: string): Promise<void> {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  isMounted = true
+  void load()
+})
+
+onBeforeUnmount(() => {
+  isMounted = false
+  stopPolling()
+})
 </script>
 
 <template>
@@ -144,13 +300,36 @@ onMounted(load)
         ? '按策略周期搜索缺失影视并解释候选选择；当前为试运行，不会提交下载。'
         : '按策略周期搜索并自动提交满足条件的候选；受 qB 写入开关和每日预算限制。'"
     >
-      <button class="button primary" :disabled="running || !form.enabled" @click="run">
-        {{ running ? '执行中…' : (form.dry_run ? '立即试运行' : '立即运行') }}
+      <button class="button primary" :disabled="starting || runIsActive || !form.enabled" @click="run">
+        {{ starting ? '启动中…' : (runIsActive ? '后台执行中…' : (form.dry_run ? '立即试运行' : '立即运行')) }}
       </button>
     </PageHeader>
 
     <PageState :loading="loading" :error="error" />
     <p v-if="feedback" class="configuration-message success">{{ feedback }}</p>
+
+    <article v-if="currentRun" class="panel library-filters automation-run-progress" aria-live="polite">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">CURRENT RUN</span>
+          <h2>后台自动搜索</h2>
+        </div>
+        <StatusPill :status="currentRun.state" />
+      </div>
+      <p class="muted">
+        {{ currentRun.trigger === 'scheduled' ? '周期任务' : '手动运行' }} ·
+        {{ formatShanghai(currentRun.started_at ?? currentRun.created_at) }}
+      </p>
+      <p>
+        已完成 {{ runCompleted }} / {{ currentRun.created }} 项 · 成功 {{ currentRun.succeeded }} 项 ·
+        失败 {{ currentRun.failed }} 项 · 等待后续 {{ currentRun.deferred }} 项
+      </p>
+      <div class="progress-track" :aria-label="`自动搜索进度 ${runProgress}%`">
+        <span :style="{ width: `${runProgress}%` }"></span>
+      </div>
+      <p v-if="runIsActive && currentRun.created === 0" class="muted">正在准备搜索任务…</p>
+      <p v-if="currentRun.error_message" class="inline-warning">{{ currentRun.error_message }}</p>
+    </article>
 
     <form v-if="!loading" class="panel" aria-labelledby="automation-policy-title" @submit.prevent="save">
       <div class="section-heading">
@@ -167,6 +346,18 @@ onMounted(load)
         <label class="configuration-checkbox">
           <input v-model="form.auto_identify" name="auto_identify" type="checkbox" /> 自动识别缺少 TMDB ID 的影视
         </label>
+        <label>
+          自动化范围
+          <select v-model="form.scope_mode" name="scope_mode">
+            <option value="filters">按类型和地区规则</option>
+            <option value="selected">只处理手动选择的影视</option>
+          </select>
+        </label>
+        <fieldset class="configuration-checkbox">
+          <legend>影视类型</legend>
+          <label><input v-model="form.media_types" type="checkbox" value="movie" /> 电影</label>
+          <label><input v-model="form.media_types" type="checkbox" value="tv" /> 电视剧</label>
+        </fieldset>
         <label>
           最低评分
           <input v-model.number="form.minimum_score" type="number" min="0" max="1" step="0.05" />
@@ -202,6 +393,68 @@ onMounted(load)
           每日自动下载体积（GiB，留空不限）
           <input v-model="form.daily_download_gib" type="number" min="0.1" step="0.1" />
         </label>
+      </div>
+      <div v-if="form.scope_mode === 'filters'" class="filter-heading">
+        <div>
+          <span class="eyebrow">REGIONS</span>
+          <strong>地区范围</strong>
+          <p class="muted">不选择地区时处理全部地区；可同时选择多个地区。</p>
+        </div>
+        <div class="configuration-field-grid">
+          <label v-for="region in regionOptions" :key="region" class="configuration-checkbox">
+            <input v-model="form.regions" type="checkbox" :value="region" /> {{ region }}
+          </label>
+        </div>
+      </div>
+      <div v-else class="automation-media-picker">
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">MANUAL SCOPE</span>
+            <strong>手动选择影视</strong>
+          </div>
+          <span class="muted">已选择 {{ form.selected_media_ids.length }} 项</span>
+        </div>
+        <div class="filter-grid">
+          <label>
+            关键词
+            <input v-model="mediaQuery.query" type="search" placeholder="中文名、原名" />
+          </label>
+          <label>
+            类型
+            <select v-model="mediaQuery.mediaType">
+              <option value="">全部类型</option>
+              <option value="movie">电影</option>
+              <option value="tv">电视剧</option>
+            </select>
+          </label>
+          <label>
+            地区
+            <select v-model="mediaQuery.region">
+              <option value="">全部地区</option>
+              <option v-for="region in regionOptions" :key="region" :value="region">{{ region }}</option>
+            </select>
+          </label>
+          <button class="button secondary" type="button" :disabled="mediaOptionsLoading" @click="loadMediaOptions">
+            {{ mediaOptionsLoading ? '查询中…' : '查询影视' }}
+          </button>
+        </div>
+        <p class="muted">当前查询 {{ mediaOptionsTotal }} 项，最多显示前 100 项；可用关键词继续缩小范围。</p>
+        <div class="download-stack automation-media-options">
+          <label v-for="item in mediaOptions" :key="item.id" class="download-card configuration-checkbox">
+            <input
+              type="checkbox"
+              :checked="form.selected_media_ids.includes(item.id)"
+              @change="toggleMedia(item.id)"
+            />
+            <span>
+              <strong>{{ item.title }}</strong>
+              <small class="muted">
+                {{ item.media_type === 'tv' ? '电视剧' : '电影' }} · {{ item.year ?? '年份未知' }} ·
+                {{ item.regions.length ? item.regions.join(' / ') : '地区未知' }}
+              </small>
+            </span>
+          </label>
+        </div>
       </div>
       <p class="muted">
         当前站点：AvistaZ；媒体类型：电影和电视剧。真实下载还要求部署环境启用 ENABLE_QB_WRITE。

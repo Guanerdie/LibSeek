@@ -9,7 +9,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routes import auth, configuration, health
-from app.core.automation_runner import automation_scheduler_loop, recover_interrupted_jobs
+from app.core.automation_runner import (
+    automation_scheduler_loop,
+    cancel_manual_automation_runs,
+    recover_interrupted_jobs,
+)
 from app.core.config import get_settings
 from app.core.security import sanitize_details
 from app.db.session import SessionFactory
@@ -32,6 +36,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await cancel_manual_automation_runs()
         if task is not None:
             stop.set()
             await task

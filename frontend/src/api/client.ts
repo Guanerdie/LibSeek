@@ -2,7 +2,7 @@ import type {
   AuthSetupStatus,
   AutomationJob,
   AutomationPolicy,
-  AutomationRunResult,
+  AutomationRun,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
@@ -214,7 +214,17 @@ export const automationApi = {
       body: JSON.stringify(payload),
     }),
   jobs: () => request<Page<AutomationJob>>('/api/automation/jobs?page=1&page_size=30'),
-  run: () => request<AutomationRunResult>('/api/automation/runs', { method: 'POST' }),
+  run: () => request<AutomationRun>('/api/automation/runs', { method: 'POST' }),
+  latestRun: async (): Promise<AutomationRun | null> => {
+    try {
+      return await request<AutomationRun | null>('/api/automation/runs/latest')
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 404) return null
+      throw caught
+    }
+  },
+  runStatus: (runId: string) =>
+    request<AutomationRun>(`/api/automation/runs/${encodeURIComponent(runId)}`),
   retry: (jobId: string) =>
     request<AutomationJob>(`/api/automation/jobs/${encodeURIComponent(jobId)}/retry`, {
       method: 'POST',

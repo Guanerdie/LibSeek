@@ -4,7 +4,7 @@ import de.tlovex.unin.data.model.AutomationJobDto
 import de.tlovex.unin.data.model.AutomationJobPageDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
-import de.tlovex.unin.data.model.AutomationRunResultDto
+import de.tlovex.unin.data.model.AutomationRunDto
 import de.tlovex.unin.data.model.ConfigurationStatusDto
 import de.tlovex.unin.data.model.ConfigurationUpdateRequestDto
 import de.tlovex.unin.data.model.ConnectionTestResultDto
@@ -145,7 +145,13 @@ interface UninApi {
     ): AutomationJobPageDto
 
     @POST("api/automation/runs")
-    suspend fun runAutomation(): AutomationRunResultDto
+    suspend fun runAutomation(): AutomationRunDto
+
+    @GET("api/automation/runs/latest")
+    suspend fun latestAutomationRun(): Response<AutomationRunDto>
+
+    @GET("api/automation/runs/{runId}")
+    suspend fun automationRun(@Path("runId") runId: String): AutomationRunDto
 
     @POST("api/automation/jobs/{jobId}/retry")
     suspend fun retryAutomationJob(@Path("jobId") jobId: String): AutomationJobDto

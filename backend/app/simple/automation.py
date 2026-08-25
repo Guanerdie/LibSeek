@@ -27,17 +27,21 @@ from app.simple.models import (
     AutomationJob,
     AutomationJobState,
     AutomationPolicy,
+    AutomationRun,
+    AutomationRunState,
     Download,
     DownloadState,
     LibraryMediaItem,
     MediaState,
     ReleaseCandidate,
 )
+from app.simple.regions import NextFindRegion, nextfind_regions
 from app.simple.schemas import AutomationPolicyUpdate
 from app.simple.service import create_search, get_search
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _run_lock = asyncio.Lock()
+_run_creation_lock = asyncio.Lock()
 _logger = logging.getLogger(__name__)
 _HARD_CORRECTNESS_WARNINGS = {
     "ID_MISMATCH",
@@ -77,6 +81,9 @@ async def update_policy(
     policy.enabled = payload.enabled
     policy.dry_run = payload.dry_run
     policy.auto_identify = payload.auto_identify
+    policy.scope_mode = payload.scope_mode
+    policy.regions = [item.value for item in payload.regions]
+    policy.selected_media_ids = payload.selected_media_ids
     policy.site_ids = payload.site_ids
     policy.media_types = [item.value for item in payload.media_types]
     policy.minimum_score = payload.minimum_score
@@ -105,6 +112,52 @@ async def list_jobs(
         .limit(page_size)
     )
     return list(rows.tuples()), int(total or 0)
+
+
+async def create_automation_run(
+    session: AsyncSession, *, trigger: str
+) -> AutomationRun:
+    async with _run_creation_lock:
+        policy = await get_policy(session)
+        if not policy.enabled:
+            raise AppError("AUTOMATION_DISABLED", "请先启用自动化策略", status_code=409)
+        active = await session.scalar(
+            select(AutomationRun)
+            .where(
+                AutomationRun.state.in_(
+                    (AutomationRunState.PENDING, AutomationRunState.RUNNING)
+                )
+            )
+            .order_by(AutomationRun.created_at.desc())
+            .limit(1)
+        )
+        if active is not None:
+            raise AppError(
+                "AUTOMATION_RUN_IN_PROGRESS",
+                "已有自动化运行正在执行，请等待完成",
+                status_code=409,
+            )
+        run = AutomationRun(trigger=trigger)
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        return run
+
+
+async def get_automation_run(session: AsyncSession, run_id: str) -> AutomationRun:
+    run = await session.get(AutomationRun, run_id)
+    if run is None:
+        raise AppError("AUTOMATION_RUN_NOT_FOUND", "自动化运行不存在", status_code=404)
+    return run
+
+
+async def get_latest_automation_run(session: AsyncSession) -> AutomationRun | None:
+    run: AutomationRun | None = await session.scalar(
+        select(AutomationRun)
+        .order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
+        .limit(1)
+    )
+    return run
 
 
 async def retry_job(session: AsyncSession, job_id: str) -> AutomationJob:
@@ -149,6 +202,7 @@ async def run_automation(
     trigger: str = "manual",
     limit: int = 20,
     stop_requested: Callable[[], bool] | None = None,
+    run_record: AutomationRun | None = None,
 ) -> tuple[str, int, int, int]:
     async with _run_lock:
         policy = await get_policy(session)
@@ -162,6 +216,11 @@ async def run_automation(
             )
 
         now = utc_now()
+        if run_record is not None:
+            run_record.state = AutomationRunState.RUNNING
+            run_record.started_at = now
+            run_record.error_message = None
+            await session.commit()
         policy.last_run_at = now
         queued_jobs = list(
             await session.scalars(
@@ -204,26 +263,36 @@ async def run_automation(
                 LibraryMediaItem.id.not_in(unavailable_media_ids),
             )
             .order_by(LibraryMediaItem.updated_at.asc())
-            .limit(remaining)
         )
         if not policy.auto_identify or metadata_factory is None:
             statement = statement.where(LibraryMediaItem.tmdb_id.is_not(None))
         if retry_media_ids:
             statement = statement.where(LibraryMediaItem.id.not_in(retry_media_ids))
-        media = list(await session.scalars(statement)) if remaining else []
+        if policy.scope_mode == "selected":
+            statement = statement.where(
+                LibraryMediaItem.id.in_(policy.selected_media_ids)
+            )
+        candidates = list(await session.scalars(statement)) if remaining else []
+        media = [item for item in candidates if _media_in_policy_scope(policy, item)][
+            :remaining
+        ]
 
-        run_id = str(uuid4())
+        run_id = run_record.id if run_record is not None else str(uuid4())
         new_jobs = [
             AutomationJob(run_id=run_id, media_id=item.id, trigger=trigger) for item in media
         ]
         session.add_all(new_jobs)
+        if run_record is not None:
+            run_record.created_count = len([*queued_jobs, *new_jobs])
         await session.commit()
 
         succeeded = 0
         failed = 0
+        deferred = 0
         jobs = [*queued_jobs, *new_jobs]
-        for job in jobs:
+        for index, job in enumerate(jobs):
             if stop_requested is not None and stop_requested():
+                deferred += len(jobs) - index
                 break
             completed = await _execute_job(
                 session,
@@ -238,6 +307,20 @@ async def run_automation(
                 succeeded += 1
             elif completed is False:
                 failed += 1
+            else:
+                deferred += 1
+            if run_record is not None:
+                run_record.succeeded_count = succeeded
+                run_record.failed_count = failed
+                run_record.deferred_count = deferred
+                await session.commit()
+        if run_record is not None:
+            run_record.succeeded_count = succeeded
+            run_record.failed_count = failed
+            run_record.deferred_count = deferred
+            run_record.state = AutomationRunState.SUCCEEDED
+            run_record.finished_at = utc_now()
+            await session.commit()
         return run_id, len(jobs), succeeded, failed
 
 
@@ -280,6 +363,24 @@ async def _execute_job(
         media = await session.get(LibraryMediaItem, job.media_id)
         if media is None:
             raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+        if not _media_in_policy_scope(policy, media):
+            job.decision = {
+                "mode": "dry-run" if policy.dry_run else "live",
+                "candidate_count": 0,
+                "selected_title": None,
+                "selected_score": None,
+                "rejected": [
+                    {
+                        "candidate_id": None,
+                        "title": media.title,
+                        "reasons": ["影视已从当前自动化范围中移除"],
+                    }
+                ],
+            }
+            job.state = AutomationJobState.SUCCEEDED
+            job.finished_at = utc_now()
+            await session.commit()
+            return True
         if media.tmdb_id is None:
             if not policy.auto_identify or metadata_factory is None:
                 raise AppError(
@@ -461,6 +562,15 @@ async def _execute_job(
                                 "reasons": ["媒体类型已从当前策略中移除"],
                             }
                         )
+                    if not _media_in_policy_scope(current_policy, current_media):
+                        accepted = None
+                        rejected.append(
+                            {
+                                "candidate_id": current_candidate.id,
+                                "title": current_candidate.title,
+                                "reasons": ["影视已从当前自动化范围中移除"],
+                            }
+                        )
                     if accepted is None:
                         job.decision = {
                             **job.decision,
@@ -559,6 +669,21 @@ async def _execute_job(
                 _logger.exception("Unexpected automation job failure", exc_info=exc)
         await session.commit()
         return False
+
+
+def _media_in_policy_scope(
+    policy: AutomationPolicy, media: LibraryMediaItem
+) -> bool:
+    if policy.scope_mode == "selected":
+        return media.id in set(policy.selected_media_ids)
+    if not policy.regions:
+        return True
+    allowed_regions = {NextFindRegion(value) for value in policy.regions}
+    return bool(
+        allowed_regions.intersection(
+            nextfind_regions(media.country_codes, media.original_language)
+        )
+    )
 
 
 async def _budget_reason(

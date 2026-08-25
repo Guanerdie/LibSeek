@@ -276,6 +276,9 @@ export interface AutomationPolicy {
   enabled: boolean
   dry_run: boolean
   auto_identify: boolean
+  scope_mode: 'filters' | 'selected'
+  regions: DailyMediaRegion[]
+  selected_media_ids: string[]
   site_ids: string[]
   media_types: DailyMediaType[]
   minimum_score: number
@@ -319,9 +322,18 @@ export interface AutomationJob {
   finished_at: string | null
 }
 
-export interface AutomationRunResult {
-  run_id: string
+export type AutomationRunState = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+export interface AutomationRun {
+  id: string
+  trigger: string
+  state: AutomationRunState
   created: number
   succeeded: number
   failed: number
+  deferred: number
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
 }

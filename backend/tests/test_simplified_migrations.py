@@ -33,6 +33,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         "alembic_version",
         "automation_jobs",
         "automation_policy",
+        "automation_runs",
         "downloads",
         "episodes",
         "library_media",
@@ -73,6 +74,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     command.downgrade(config, "20260823_0005")
     engine = create_engine(sqlite_url(database, async_driver=False))
     inspector = inspect(engine)
+    assert "automation_runs" not in inspector.get_table_names()
     download_columns = {
         column["name"]: column for column in inspector.get_columns("downloads")
     }

@@ -69,6 +69,8 @@ data class AutomationPolicyUi(
     val autoIdentify: Boolean = true,
     val siteNames: String = "AvistaZ",
     val mediaTypesText: String = "电影、电视剧",
+    val scopeText: String = "按筛选条件",
+    val regionsText: String = "全部地区",
     val minimumScore: Int = 70,
     val minimumSeeders: Int = 1,
     val maximumSizeGb: Int? = null,

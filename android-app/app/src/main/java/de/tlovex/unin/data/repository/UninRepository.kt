@@ -4,7 +4,7 @@ import de.tlovex.unin.data.model.AutomationJobDto
 import de.tlovex.unin.data.model.AutomationJobPageDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
-import de.tlovex.unin.data.model.AutomationRunResultDto
+import de.tlovex.unin.data.model.AutomationRunDto
 import de.tlovex.unin.data.model.AvistaZConfigurationUpdateDto
 import de.tlovex.unin.data.model.ConfigurationStatusDto
 import de.tlovex.unin.data.model.ConfigurationUpdateRequestDto
@@ -235,7 +235,15 @@ class UninRepository(
     suspend fun automationJobs(page: Int = 1, pageSize: Int = 30): AutomationJobPageDto =
         api.automationJobs(page, pageSize)
 
-    suspend fun runAutomation(): AutomationRunResultDto = api.runAutomation()
+    suspend fun runAutomation(): AutomationRunDto = api.runAutomation()
+
+    suspend fun latestAutomationRun(): AutomationRunDto? {
+        val response = api.latestAutomationRun()
+        if (!response.isSuccessful) throw HttpException(response)
+        return response.body()
+    }
+
+    suspend fun automationRun(runId: String): AutomationRunDto = api.automationRun(runId)
 
     suspend fun retryAutomationJob(jobId: String): AutomationJobDto =
         api.retryAutomationJob(jobId)

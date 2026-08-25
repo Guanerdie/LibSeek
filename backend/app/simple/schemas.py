@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import MediaType
 from app.simple.models import (
     AutomationJobState,
+    AutomationRunState,
     DownloadState,
     EpisodeState,
     MediaState,
@@ -166,6 +168,9 @@ class AutomationPolicyUpdate(BaseModel):
     enabled: bool = False
     dry_run: bool = True
     auto_identify: bool = True
+    scope_mode: Literal["filters", "selected"] = "filters"
+    regions: list[NextFindRegion] = Field(default_factory=list, max_length=6)
+    selected_media_ids: list[str] = Field(default_factory=list, max_length=500)
     site_ids: list[str] = Field(default_factory=lambda: ["avistaz"], min_length=1, max_length=10)
     media_types: list[MediaType] = Field(
         default_factory=lambda: [MediaType.MOVIE, MediaType.TV], min_length=1
@@ -187,6 +192,17 @@ class AutomationPolicyUpdate(BaseModel):
         if not normalized:
             raise ValueError("at least one site is required")
         return normalized
+
+    @field_validator("selected_media_ids")
+    @classmethod
+    def normalize_selected_media_ids(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @model_validator(mode="after")
+    def require_manual_selection(self) -> AutomationPolicyUpdate:
+        if self.scope_mode == "selected" and not self.selected_media_ids:
+            raise ValueError("manual selection requires at least one media item")
+        return self
 
 
 class AutomationPolicyView(AutomationPolicyUpdate):
@@ -223,8 +239,17 @@ class AutomationJobPage(BaseModel):
     page_size: int
 
 
-class AutomationRunResult(BaseModel):
-    run_id: str
-    created: int
-    succeeded: int
-    failed: int
+class AutomationRunView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    trigger: str
+    state: AutomationRunState
+    created: int = Field(validation_alias="created_count")
+    succeeded: int = Field(validation_alias="succeeded_count")
+    failed: int = Field(validation_alias="failed_count")
+    deferred: int = Field(validation_alias="deferred_count")
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None

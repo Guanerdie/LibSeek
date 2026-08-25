@@ -72,6 +72,13 @@ class AutomationJobState(StrEnum):
     FAILED = "FAILED"
 
 
+class AutomationRunState(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 def enum_column(enum_type: type[StrEnum], length: int) -> Enum:
     return Enum(
         enum_type,
@@ -276,6 +283,9 @@ class AutomationPolicy(Base):
     enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
     dry_run: Mapped[bool] = mapped_column(default=True, nullable=False)
     auto_identify: Mapped[bool] = mapped_column(default=True, nullable=False)
+    scope_mode: Mapped[str] = mapped_column(String(16), default="filters", nullable=False)
+    regions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    selected_media_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     site_ids: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["avistaz"], nullable=False)
     media_types: Mapped[list[str]] = mapped_column(
         JSON, default=lambda: [MediaType.MOVIE.value, MediaType.TV.value], nullable=False
@@ -293,6 +303,29 @@ class AutomationPolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
+
+
+class AutomationRun(Base):
+    __tablename__ = "automation_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    trigger: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
+    state: Mapped[AutomationRunState] = mapped_column(
+        enum_column(AutomationRunState, 16),
+        default=AutomationRunState.PENDING,
+        nullable=False,
+        index=True,
+    )
+    created_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    succeeded_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    deferred_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AutomationJob(Base):

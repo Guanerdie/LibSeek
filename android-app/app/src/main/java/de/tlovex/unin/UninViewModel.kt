@@ -11,6 +11,9 @@ import de.tlovex.unin.data.model.AutomationJobDto
 import de.tlovex.unin.data.model.AutomationJobState
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
+import de.tlovex.unin.data.model.AutomationRunDto
+import de.tlovex.unin.data.model.AutomationRunStateDto
+import de.tlovex.unin.data.model.AutomationScopeMode
 import de.tlovex.unin.data.model.CandidateDto
 import de.tlovex.unin.data.model.ConfigurationStatusDto
 import de.tlovex.unin.data.model.DownloadDto
@@ -112,6 +115,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     ).orEmpty().filterTo(mutableSetOf()) { it.isNotBlank() }.toSet()
     private var mediaDetailJob: Job? = null
     private var searchJob: Job? = null
+    private var automationRunPollJob: Job? = null
+    private var automationRunPollId: String? = null
     private val authenticatedJobs = mutableSetOf<Job>()
 
     val callbacks = UninCallbacks(
@@ -270,6 +275,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         val downloadsRequest = async { loadAllDownloads() }
         val policyRequest = async { repository.automationPolicy() }
         val jobsRequest = async { loadAllAutomationJobs() }
+        val latestRunRequest = async { repository.latestAutomationRun() }
         val configurationRequest = if (currentRole == AuthRole.ADMIN) {
             async { repository.configurationStatus() }
         } else {
@@ -280,12 +286,14 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         val downloadsResult = downloadsRequest.awaitResult()
         val policyResult = policyRequest.awaitResult()
         val jobsResult = jobsRequest.awaitResult()
+        val latestRunResult = latestRunRequest.awaitResult()
         val configurationResult = configurationRequest?.awaitResult()
         val failures = listOfNotNull(
             libraryResult.exceptionOrNull(),
             downloadsResult.exceptionOrNull(),
             policyResult.exceptionOrNull(),
             jobsResult.exceptionOrNull(),
+            latestRunResult.exceptionOrNull(),
             configurationResult?.exceptionOrNull(),
         )
 
@@ -318,6 +326,29 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                     errorMessage(it, "部分数据暂时无法读取")
                 },
             )
+        }
+
+        if (latestRunResult.isSuccess) {
+            val latestRun = latestRunResult.getOrNull()
+            if (latestRun == null) {
+                clearUnknownAutomationRun()
+                mutableUiState.update {
+                    it.copy(
+                        isAutomationRunInProgress = false,
+                        automationRunOutcomeUnknown = false,
+                    )
+                }
+            } else if (latestRun.isActive) {
+                startAutomationRunPolling(latestRun)
+            } else {
+                clearUnknownAutomationRun()
+                mutableUiState.update {
+                    it.copy(
+                        isAutomationRunInProgress = false,
+                        automationRunOutcomeUnknown = false,
+                    )
+                }
+            }
         }
     }
 
@@ -662,6 +693,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         launchAction("无法读取自动化配置") {
             val policy = repository.automationPolicy()
             val jobs = loadAllAutomationJobs()
+            val latestRun = repository.latestAutomationRun()
             currentPolicy = policy
             pendingPolicy = policy.toUpdate()
             mutableUiState.update {
@@ -669,6 +701,27 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                     automationPolicy = policy.toUi(),
                     automationRuns = jobs.map { it.toUi() },
                 )
+            }
+            if (latestRun == null) {
+                clearUnknownAutomationRun()
+                automationRunPollJob?.cancel()
+                mutableUiState.update {
+                    it.copy(
+                        isAutomationRunInProgress = false,
+                        automationRunOutcomeUnknown = false,
+                    )
+                }
+            } else if (latestRun.isActive) {
+                startAutomationRunPolling(latestRun)
+            } else {
+                clearUnknownAutomationRun()
+                automationRunPollJob?.cancel()
+                mutableUiState.update {
+                    it.copy(
+                        isAutomationRunInProgress = false,
+                        automationRunOutcomeUnknown = false,
+                    )
+                }
             }
         }
     }
@@ -719,29 +772,31 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val savedPolicy = persistPendingPolicy()
                 policy = savedPolicy
-                val result = repository.runAutomation()
-                val jobs = loadAllAutomationJobs()
-                val deferred = (result.created - result.succeeded - result.failed).coerceAtLeast(0)
-                val mode = if (savedPolicy.dryRun) "预演" else "运行"
-                val pendingText = if (deferred > 0) "，等待执行 $deferred 项" else ""
+                val run = repository.runAutomation()
                 clearUnknownAutomationRun()
+                startAutomationRunPolling(run)
                 mutableUiState.update {
                     it.copy(
-                        automationRuns = jobs.map { job -> job.toUi() },
                         automationRunOutcomeUnknown = false,
-                        snackbarMessage = "$mode 完成：处理 ${result.created} 项，成功 ${result.succeeded} 项，失败 ${result.failed} 项$pendingText",
+                        snackbarMessage = if (savedPolicy.dryRun) {
+                            "预演已进入后台，正在等待处理结果"
+                        } else {
+                            "自动化已进入后台，正在等待处理结果"
+                        },
                     )
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (policy != null && error.mayLeaveWriteOutcomeUnknown()) {
+                if (
+                    policy != null &&
+                    (error.mayLeaveWriteOutcomeUnknown() || error is HttpException && error.code() == 409)
+                ) {
                     reconcileUnknownAutomationRun()
                 } else {
+                    mutableUiState.update { it.copy(isAutomationRunInProgress = false) }
                     throw error
                 }
-            } finally {
-                mutableUiState.update { it.copy(isAutomationRunInProgress = false) }
             }
         }
     }
@@ -750,25 +805,28 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         launchAction("无法检查自动化运行状态") {
             val policy = repository.automationPolicy()
             val jobs = loadAllAutomationJobs()
+            val latestRun = repository.latestAutomationRun()
             currentPolicy = policy
             pendingPolicy = policy.toUpdate()
 
-            val resolved = hasUnknownAutomationRun &&
-                jobs.none { it.state == AutomationJobState.PENDING || it.state == AutomationJobState.RUNNING }
+            val resolved = hasUnknownAutomationRun && latestRun?.isActive != true
             if (resolved) clearUnknownAutomationRun()
 
             mutableUiState.update {
                 it.copy(
                     automationPolicy = policy.toUi(),
                     automationRuns = jobs.map { job -> job.toUi() },
-                    automationRunOutcomeUnknown = hasUnknownAutomationRun,
+                    isAutomationRunInProgress = latestRun?.isActive == true,
+                    automationRunOutcomeUnknown = hasUnknownAutomationRun && !resolved,
                     snackbarMessage = when {
+                        latestRun?.isActive == true -> latestRun.progressMessage()
                         resolved -> "服务器记录已确认上次运行结束，重复运行保护已解除"
                         hasUnknownAutomationRun -> "服务器尚未确认上次运行结束，已继续锁定重复运行"
                         else -> "自动化运行记录已刷新"
                     },
                 )
             }
+            if (latestRun?.isActive == true) startAutomationRunPolling(latestRun)
         }
     }
 
@@ -776,8 +834,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         rememberUnknownAutomationRun()
         val policy = runCatching { repository.automationPolicy() }.getOrNull()
         val jobs = runCatching { loadAllAutomationJobs() }.getOrNull()
-        val resolved = policy != null && jobs != null &&
-            jobs.none { it.state == AutomationJobState.PENDING || it.state == AutomationJobState.RUNNING }
+        val latestRunResult = runCatching { repository.latestAutomationRun() }
+        val latestRun = latestRunResult.getOrNull()
+        val resolved = latestRunResult.isSuccess && latestRun?.isActive != true
         if (resolved) clearUnknownAutomationRun()
 
         if (policy != null) {
@@ -788,14 +847,97 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             state.copy(
                 automationPolicy = policy?.toUi() ?: state.automationPolicy,
                 automationRuns = jobs?.map { it.toUi() } ?: state.automationRuns,
+                isAutomationRunInProgress = latestRun?.isActive == true,
                 automationRunOutcomeUnknown = hasUnknownAutomationRun,
-                snackbarMessage = if (resolved) {
-                    "运行响应中断，但已通过服务器记录确认任务结束"
-                } else {
-                    "运行响应中断，任务可能仍在服务器执行；已锁定重复运行，请稍后检查状态"
+                snackbarMessage = when {
+                    latestRun?.isActive == true -> "已找到服务端运行记录，将继续跟踪后台进度"
+                    resolved -> "服务端未发现活跃运行，重复运行保护已解除"
+                    else -> "运行响应中断，任务可能仍在服务器执行；已锁定重复运行，请稍后检查状态"
                 },
             )
         }
+        if (latestRun != null) startAutomationRunPolling(latestRun)
+    }
+
+    private fun startAutomationRunPolling(initialRun: AutomationRunDto) {
+        if (
+            initialRun.isActive &&
+            automationRunPollJob?.isActive == true &&
+            automationRunPollId == initialRun.id &&
+            uiState.value.isAutomationRunInProgress
+        ) {
+            return
+        }
+        automationRunPollId = initialRun.id
+
+        automationRunPollJob?.cancel()
+        mutableUiState.update {
+            it.copy(
+                isAutomationRunInProgress = initialRun.isActive,
+                automationRunOutcomeUnknown = false,
+            )
+        }
+
+        lateinit var pollingJob: Job
+        pollingJob = viewModelScope.launch {
+            var run = initialRun
+            var lastProgressMessage: String? = null
+            try {
+                while (run.isActive) {
+                    val progressMessage = run.progressMessage()
+                    if (progressMessage != lastProgressMessage) {
+                        mutableUiState.update { it.copy(snackbarMessage = progressMessage) }
+                        lastProgressMessage = progressMessage
+                    }
+                    delay(AUTOMATION_RUN_POLL_INTERVAL_MS)
+                    run = try {
+                        repository.automationRun(run.id)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        if (error.isSessionAuthenticationFailure()) {
+                            expireSession("登录已过期，请重新登录")
+                            return@launch
+                        }
+                        mutableUiState.update {
+                            it.copy(snackbarMessage = "暂时无法读取自动化进度，将继续后台重试")
+                        }
+                        continue
+                    }
+                }
+
+                clearUnknownAutomationRun()
+                val jobs = try {
+                    loadAllAutomationJobs()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (error.isSessionAuthenticationFailure()) {
+                        expireSession("登录已过期，请重新登录")
+                        return@launch
+                    }
+                    null
+                }
+                mutableUiState.update { state ->
+                    state.copy(
+                        automationRuns = jobs?.map { it.toUi() } ?: state.automationRuns,
+                        automationRunOutcomeUnknown = false,
+                        snackbarMessage = run.completionMessage(jobsRefreshed = jobs != null),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } finally {
+                if (automationRunPollJob === pollingJob) {
+                    automationRunPollJob = null
+                    automationRunPollId = null
+                    mutableUiState.update { it.copy(isAutomationRunInProgress = false) }
+                }
+            }
+        }
+        automationRunPollJob = pollingJob
+        authenticatedJobs += pollingJob
+        pollingJob.invokeOnCompletion { authenticatedJobs -= pollingJob }
     }
 
     private suspend fun persistPendingPolicy(): AutomationPolicyDto {
@@ -1111,6 +1253,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private fun cancelAuthenticatedJobs() {
         authenticatedJobs.toList().forEach { it.cancel() }
         authenticatedJobs.clear()
+        automationRunPollJob = null
+        automationRunPollId = null
     }
 
     private suspend fun loadAllLibrary(): List<MediaSummaryDto> {
@@ -1256,6 +1400,15 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         mediaTypesText = mediaTypes.joinToString("、") {
             if (it == MediaType.MOVIE) "电影" else "电视剧"
         }.ifBlank { "未设置" },
+        scopeText = when (scopeMode) {
+            AutomationScopeMode.FILTERS -> "按筛选条件"
+            AutomationScopeMode.SELECTED -> "手动选择 ${selectedMediaIds.size} 项"
+        },
+        regionsText = if (scopeMode == AutomationScopeMode.SELECTED) {
+            "不适用（手动选择）"
+        } else {
+            regions.joinToString("、").ifBlank { "全部地区" }
+        },
         minimumScore = (minimumScore * 100).roundToInt().coerceIn(0, 100),
         minimumSeeders = minimumSeeders,
         maximumSizeGb = maxSizeBytes?.let { (it.toDouble() / BYTES_PER_GIB).roundToInt() },
@@ -1273,6 +1426,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         enabled = enabled,
         dryRun = dryRun,
         autoIdentify = autoIdentify,
+        scopeMode = scopeMode,
+        regions = regions,
+        selectedMediaIds = selectedMediaIds,
         siteIds = siteIds,
         mediaTypes = mediaTypes,
         minimumScore = minimumScore,
@@ -1316,6 +1472,20 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             timeText = formatServerTime(createdAt),
             state = uiState,
         )
+    }
+
+    private val AutomationRunDto.isActive: Boolean
+        get() = state == AutomationRunStateDto.PENDING || state == AutomationRunStateDto.RUNNING
+
+    private fun AutomationRunDto.progressMessage(): String =
+        "自动化后台执行中：已创建 $created 项，成功 $succeeded 项，失败 $failed 项，等待 $deferred 项"
+
+    private fun AutomationRunDto.completionMessage(jobsRefreshed: Boolean): String {
+        val prefix = if (state == AutomationRunStateDto.FAILED) "自动化运行失败" else "自动化运行完成"
+        val detail = "$prefix：处理 $created 项，成功 $succeeded 项，失败 $failed 项，延后 $deferred 项"
+        val error = errorMessage?.takeIf { it.isNotBlank() }?.let { "；$it" }.orEmpty()
+        val refreshWarning = if (jobsRefreshed) "" else "；任务记录刷新失败，可稍后手动刷新"
+        return detail + error + refreshWarning
     }
 
     private fun MediaState.description(): String = when (this) {
@@ -1656,6 +1826,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         const val BYTES_PER_GIB = 1024L * 1024L * 1024L
         const val SEARCH_POLL_LIMIT = 60
         const val SEARCH_POLL_INTERVAL_MS = 1_000L
+        const val AUTOMATION_RUN_POLL_INTERVAL_MS = 2_000L
         const val MAX_ERROR_MESSAGE_LENGTH = 240
         const val MAX_ERROR_BODY_BYTES = 16_384L
         const val CONNECTION_SERVER = "unin"

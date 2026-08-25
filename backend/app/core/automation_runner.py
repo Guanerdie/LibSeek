@@ -26,11 +26,14 @@ from app.simple.models import (
     ActivityLog,
     AutomationJob,
     AutomationJobState,
+    AutomationRun,
+    AutomationRunState,
     Download,
     DownloadState,
 )
 
 _logger = logging.getLogger(__name__)
+_manual_run_tasks: set[asyncio.Task[None]] = set()
 
 
 async def recover_interrupted_jobs(session: AsyncSession) -> int:
@@ -76,7 +79,139 @@ async def recover_interrupted_jobs(session: AsyncSession) -> int:
             job.error_message = "上次执行被应用重启中断，等待重试"
     if jobs:
         await session.commit()
-    return len(jobs)
+    runs = list(
+        await session.scalars(
+            select(AutomationRun).where(
+                AutomationRun.state.in_(
+                    (AutomationRunState.PENDING, AutomationRunState.RUNNING)
+                )
+            )
+        )
+    )
+    for run in runs:
+        run.state = AutomationRunState.FAILED
+        run.error_message = "应用重启中断了本次自动化运行"
+        run.finished_at = utc_now()
+    if runs:
+        await session.commit()
+    return len(jobs) + len(runs)
+
+
+async def execute_recorded_automation_run(
+    session: AsyncSession,
+    run: AutomationRun,
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+) -> None:
+    run_id = run.id
+    try:
+        await automation.run_automation(
+            session,
+            adapter_factory=lambda site_id: build_pt_site(
+                site_id, allow_torrent_fetch=False
+            ),
+            pt_factory=lambda site_id: build_pt_site(
+                site_id, allow_torrent_fetch=True
+            ),
+            qb_factory=build_qb,
+            metadata_factory=build_tmdb,
+            trigger=run.trigger,
+            stop_requested=stop_requested,
+            run_record=run,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        message = exc.message if isinstance(exc, AppError) else "自动化运行失败"
+        try:
+            await session.rollback()
+            stored = await session.get(AutomationRun, run_id)
+            if stored is not None:
+                stored.state = AutomationRunState.FAILED
+                stored.error_message = message
+                stored.finished_at = utc_now()
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as persist_exc:
+            _logger.warning(
+                "Unable to persist automation run failure with its original session",
+                exc_info=persist_exc,
+            )
+            await _persist_automation_run_failure(run_id, message)
+        if not isinstance(exc, AppError):
+            _logger.exception("Unexpected automation run failure", exc_info=exc)
+
+
+async def _execute_manual_automation_run(run_id: str) -> None:
+    try:
+        async with SessionFactory() as session:
+            run = await session.get(AutomationRun, run_id)
+            if run is None:
+                return
+            await execute_recorded_automation_run(session, run)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _logger.exception(
+            "Manual automation run failed before execution was established",
+            exc_info=exc,
+        )
+        message = exc.message if isinstance(exc, AppError) else "自动化后台任务启动失败"
+        await _persist_automation_run_failure(run_id, message)
+
+
+async def _persist_automation_run_failure(run_id: str, message: str) -> None:
+    retry_delay = 1.0
+    while True:
+        try:
+            async with SessionFactory() as session:
+                run = await session.get(AutomationRun, run_id)
+                if run is None or run.state not in {
+                    AutomationRunState.PENDING,
+                    AutomationRunState.RUNNING,
+                }:
+                    return
+                run.state = AutomationRunState.FAILED
+                run.error_message = message
+                run.finished_at = utc_now()
+                await session.commit()
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _logger.warning(
+                "Unable to persist automation run failure; retrying",
+                exc_info=exc,
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 30.0)
+
+
+def _manual_run_done(task: asyncio.Task[None]) -> None:
+    _manual_run_tasks.discard(task)
+    if task.cancelled():
+        return
+    exception = task.exception()
+    if exception is not None:
+        _logger.error(
+            "Manual automation background task terminated unexpectedly",
+            exc_info=exception,
+        )
+
+
+def queue_manual_automation_run(run_id: str) -> None:
+    task = asyncio.create_task(_execute_manual_automation_run(run_id))
+    _manual_run_tasks.add(task)
+    task.add_done_callback(_manual_run_done)
+
+
+async def cancel_manual_automation_runs() -> None:
+    tasks = list(_manual_run_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def run_scheduled_cycle(
@@ -109,14 +244,9 @@ async def run_scheduled_cycle(
         if nextfind is not None:
             await close_adapter(nextfind)
 
-    await automation.run_automation(
-        session,
-        adapter_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
-        pt_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=True),
-        qb_factory=build_qb,
-        metadata_factory=build_tmdb,
-        trigger="scheduled",
-        stop_requested=stop_requested,
+    run = await automation.create_automation_run(session, trigger="scheduled")
+    await execute_recorded_automation_run(
+        session, run, stop_requested=stop_requested
     )
 
     return True

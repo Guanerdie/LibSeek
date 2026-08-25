@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import OperatorPrincipal, ViewerPrincipal
+from app.core.automation_runner import queue_manual_automation_run
 from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
@@ -32,7 +33,7 @@ from app.simple.schemas import (
     AutomationJobView,
     AutomationPolicyUpdate,
     AutomationPolicyView,
-    AutomationRunResult,
+    AutomationRunView,
     CandidateView,
     DownloadCreate,
     DownloadPage,
@@ -283,24 +284,36 @@ async def automation_jobs(
     )
 
 
-@router.post("/automation/runs", response_model=AutomationRunResult)
+@router.post(
+    "/automation/runs",
+    response_model=AutomationRunView,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def run_automation(
     session: Session, principal: OperatorPrincipal
-) -> AutomationRunResult:
+) -> AutomationRunView:
     del principal
-    run_id, created, succeeded, failed = await automation.run_automation(
-        session,
-        adapter_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
-        pt_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=True),
-        qb_factory=build_qb,
-        metadata_factory=build_tmdb,
-    )
-    return AutomationRunResult(
-        run_id=run_id,
-        created=created,
-        succeeded=succeeded,
-        failed=failed,
-    )
+    run = await automation.create_automation_run(session, trigger="manual")
+    queue_manual_automation_run(run.id)
+    return AutomationRunView.model_validate(run)
+
+
+@router.get("/automation/runs/latest", response_model=AutomationRunView | None)
+async def latest_automation_run(
+    session: Session, principal: ViewerPrincipal
+) -> AutomationRunView | None:
+    del principal
+    run = await automation.get_latest_automation_run(session)
+    return AutomationRunView.model_validate(run) if run is not None else None
+
+
+@router.get("/automation/runs/{run_id}", response_model=AutomationRunView)
+async def automation_run_status(
+    run_id: str, session: Session, principal: ViewerPrincipal
+) -> AutomationRunView:
+    del principal
+    run = await automation.get_automation_run(session, run_id)
+    return AutomationRunView.model_validate(run)
 
 
 @router.post("/automation/jobs/{job_id}/retry", response_model=AutomationJobView)

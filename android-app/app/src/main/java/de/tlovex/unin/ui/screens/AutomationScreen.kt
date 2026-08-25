@@ -148,6 +148,8 @@ fun AutomationScreen(
                     Text("完整策略范围", style = MaterialTheme.typography.titleMedium)
                     PolicySummaryRow("搜索站点", policy.siteNames)
                     PolicySummaryRow("媒体类型", policy.mediaTypesText)
+                    PolicySummaryRow("选择范围", policy.scopeText)
+                    PolicySummaryRow("地区", policy.regionsText)
                     PolicySummaryRow("自动识别", if (policy.autoIdentify) "开启" else "关闭")
                     PolicySummaryRow(
                         "带风险候选",

@@ -44,6 +44,7 @@ from app.simple.service import complete_search, queue_download
 
 _EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,3})$")
 _download_submission_lock = asyncio.Lock()
+_nextfind_sync_lock = asyncio.Lock()
 
 
 def build_nextfind(settings: Settings | None = None) -> NextFindAdapter:
@@ -184,18 +185,49 @@ async def close_adapter(adapter: object) -> None:
 
 
 async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> tuple[int, int]:
+    if _nextfind_sync_lock.locked():
+        raise AppError(
+            "NEXTFIND_SYNC_IN_PROGRESS",
+            "缺失影视资源同步正在进行，请稍后再试",
+            status_code=409,
+            retryable=True,
+        )
+    async with _nextfind_sync_lock:
+        return await _sync_nextfind_locked(session, adapter)
+
+
+async def _sync_nextfind_locked(
+    session: AsyncSession, adapter: MediaSourceAdapter
+) -> tuple[int, int]:
     await adapter.authenticate()
     result = await adapter.list_missing_media()
+    stored_items = list(
+        await session.scalars(
+            select(LibraryMediaItem).where(LibraryMediaItem.source == "nextfind")
+        )
+    )
+    stored_by_source_id = {
+        (item.source, item.source_item_id): item for item in stored_items
+    }
+    stored_episodes = list(
+        await session.scalars(
+            select(Episode)
+            .join(LibraryMediaItem, Episode.media_id == LibraryMediaItem.id)
+            .where(LibraryMediaItem.source == "nextfind")
+        )
+    )
+    episodes_by_media: dict[str, list[Episode]] = {}
+    for episode in stored_episodes:
+        episodes_by_media.setdefault(episode.media_id, []).append(episode)
+
     seen: set[str] = set()
+    discovered: list[tuple[LibraryMediaItem, list[str]]] = []
     created = 0
     updated = 0
     for source_item in result.items:
         seen.add(source_item.source_item_id)
-        existing = await session.scalar(
-            select(LibraryMediaItem).where(
-                LibraryMediaItem.source == source_item.source,
-                LibraryMediaItem.source_item_id == source_item.source_item_id,
-            )
+        existing = stored_by_source_id.get(
+            (source_item.source, source_item.source_item_id)
         )
         if existing is None:
             existing = LibraryMediaItem(
@@ -209,15 +241,20 @@ async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> t
         else:
             updated += 1
         _apply_discovery_item(existing, source_item)
-        await session.flush()
-        await _replace_missing_episodes(
-            session, existing.id, source_item.missing_episodes or []
+        discovered.append((existing, source_item.missing_episodes or []))
+
+    # Assign IDs for all newly discovered media in one database round trip, then
+    # reconcile episodes from the preloaded collection without per-item SELECTs.
+    await session.flush()
+    for media, missing_episodes in discovered:
+        _replace_missing_episodes_from_collection(
+            session,
+            media.id,
+            missing_episodes,
+            episodes_by_media.get(media.id, []),
         )
 
-    old_items = await session.scalars(
-        select(LibraryMediaItem).where(LibraryMediaItem.source == "nextfind")
-    )
-    for stored_item in old_items:
+    for stored_item in stored_items:
         if (
             stored_item.source_item_id not in seen
             and stored_item.state != MediaState.DOWNLOADING
@@ -271,6 +308,15 @@ async def _replace_missing_episodes(
     existing = list(
         await session.scalars(select(Episode).where(Episode.media_id == media_id))
     )
+    _replace_missing_episodes_from_collection(session, media_id, episode_codes, existing)
+
+
+def _replace_missing_episodes_from_collection(
+    session: AsyncSession,
+    media_id: str,
+    episode_codes: list[str],
+    existing: list[Episode],
+) -> None:
     existing_map = {(item.season_number, item.episode_number): item for item in existing}
     wanted: set[tuple[int, int]] = set()
     for code in episode_codes:

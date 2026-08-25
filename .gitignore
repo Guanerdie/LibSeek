@@ -3,6 +3,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.test-tmp/
 backend/.pytest-*/
 backend/.test-migration-*.db
 .mypy_cache/

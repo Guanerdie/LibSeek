@@ -31,6 +31,8 @@ from app.simple.integrations import submit_download, sync_download_statuses
 from app.simple.models import (
     AutomationJob,
     AutomationJobState,
+    AutomationRun,
+    AutomationRunState,
     Download,
     DownloadState,
     LibraryMediaItem,
@@ -226,6 +228,122 @@ async def test_automation_is_disabled_by_default(session_factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recorded_automation_run_persists_success_and_progress(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source_item_id="recorded-automation-success",
+            media_type=MediaType.MOVIE,
+            tmdb_id=499,
+            title="Recorded Automation Movie",
+            year=2026,
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.commit()
+        await update_policy(
+            session,
+            AutomationPolicyUpdate(enabled=True, minimum_score=0.5),
+        )
+        run = await automation.create_automation_run(session, trigger="manual")
+        run_id = run.id
+
+        result = await run_automation(
+            session,
+            adapter_factory=lambda _site_id: AvistaZMockAdapter(
+                fixtures=[movie_candidate(499, "recorded-success")]
+            ),
+            run_record=run,
+        )
+
+        assert result == (run_id, 1, 1, 0)
+        await session.refresh(run)
+        assert run.state == AutomationRunState.SUCCEEDED
+        assert run.created_count == 1
+        assert run.succeeded_count == 1
+        assert run.failed_count == 0
+        assert run.deferred_count == 0
+        assert run.started_at is not None
+        assert run.finished_at is not None
+
+    async with session_factory() as session:
+        stored = await session.get(AutomationRun, run_id)
+        assert stored is not None
+        assert stored.state == AutomationRunState.SUCCEEDED
+        assert (
+            stored.created_count,
+            stored.succeeded_count,
+            stored.failed_count,
+            stored.deferred_count,
+        ) == (1, 1, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_recorded_automation_run_persists_run_level_failure(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_run(*_args: object, **_kwargs: object) -> tuple[str, int, int, int]:
+        raise AppError("PT_CONFIGURATION_ERROR", "PT 配置错误", status_code=409)
+
+    monkeypatch.setattr(automation, "run_automation", fail_run)
+
+    async with session_factory() as session:
+        await update_policy(session, AutomationPolicyUpdate(enabled=True))
+        run = await automation.create_automation_run(session, trigger="manual")
+        run_id = run.id
+
+        await automation_runner.execute_recorded_automation_run(session, run)
+
+    async with session_factory() as session:
+        stored = await session.get(AutomationRun, run_id)
+        assert stored is not None
+        assert stored.state == AutomationRunState.FAILED
+        assert stored.error_message == "PT 配置错误"
+        assert stored.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_automation_run_recovers_when_initial_session_creation_fails(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with session_factory() as session:
+        await update_policy(session, AutomationPolicyUpdate(enabled=True))
+        run = await automation.create_automation_run(session, trigger="manual")
+        run_id = run.id
+
+    class FailingSessionContext:
+        async def __aenter__(self):
+            raise RuntimeError("database connection failed")
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    calls = 0
+
+    def flaky_session_factory():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return FailingSessionContext()
+        return session_factory()
+
+    monkeypatch.setattr(automation_runner, "SessionFactory", flaky_session_factory)
+
+    await automation_runner._execute_manual_automation_run(run_id)
+
+    assert calls == 2
+    async with session_factory() as session:
+        stored = await session.get(AutomationRun, run_id)
+        assert stored is not None
+        assert stored.state == AutomationRunState.FAILED
+        assert stored.error_message == "自动化后台任务启动失败"
+        assert stored.finished_at is not None
+
+
+@pytest.mark.asyncio
 async def test_dry_run_searches_and_records_the_selected_candidate(session_factory) -> None:
     async with session_factory() as session:
         media = LibraryMediaItem(
@@ -277,6 +395,92 @@ async def test_dry_run_searches_and_records_the_selected_candidate(session_facto
         assert job.selected_candidate_id is not None
         assert job.decision["mode"] == "dry-run"
         assert job.decision["selected_title"] == "Automation.Movie.2026.1080p.WEB-DL"
+
+
+@pytest.mark.asyncio
+async def test_automation_region_scope_only_creates_jobs_for_matching_media(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        korean = LibraryMediaItem(
+            source_item_id="automation-korean",
+            media_type=MediaType.MOVIE,
+            tmdb_id=601,
+            title="Korean Movie",
+            country_codes=["KR"],
+            state=MediaState.READY,
+        )
+        japanese = LibraryMediaItem(
+            source_item_id="automation-japanese",
+            media_type=MediaType.MOVIE,
+            tmdb_id=602,
+            title="Japanese Movie",
+            country_codes=["JP"],
+            state=MediaState.READY,
+        )
+        session.add_all([korean, japanese])
+        await session.commit()
+        await update_policy(
+            session,
+            AutomationPolicyUpdate(enabled=True, regions=["韩国"]),
+        )
+
+        run_id, created, _, _ = await run_dry_run(
+            session,
+            adapter_factory=lambda _site_id: AvistaZMockAdapter(fixtures=[]),
+        )
+
+        assert created == 1
+        job = await session.scalar(
+            select(AutomationJob).where(AutomationJob.run_id == run_id)
+        )
+        assert job is not None
+        assert job.media_id == korean.id
+
+
+@pytest.mark.asyncio
+async def test_automation_manual_scope_only_creates_jobs_for_selected_media(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        selected = LibraryMediaItem(
+            source_item_id="automation-selected",
+            media_type=MediaType.TV,
+            tmdb_id=701,
+            title="Selected Show",
+            country_codes=["KR"],
+            state=MediaState.READY,
+        )
+        unselected = LibraryMediaItem(
+            source_item_id="automation-unselected",
+            media_type=MediaType.TV,
+            tmdb_id=702,
+            title="Unselected Show",
+            country_codes=["KR"],
+            state=MediaState.READY,
+        )
+        session.add_all([selected, unselected])
+        await session.commit()
+        await update_policy(
+            session,
+            AutomationPolicyUpdate(
+                enabled=True,
+                scope_mode="selected",
+                selected_media_ids=[selected.id],
+            ),
+        )
+
+        run_id, created, _, _ = await run_dry_run(
+            session,
+            adapter_factory=lambda _site_id: AvistaZMockAdapter(fixtures=[]),
+        )
+
+        assert created == 1
+        job = await session.scalar(
+            select(AutomationJob).where(AutomationJob.run_id == run_id)
+        )
+        assert job is not None
+        assert job.media_id == selected.id
 
 
 @pytest.mark.asyncio
@@ -805,6 +1009,21 @@ async def test_restart_before_qb_add_is_safe_to_retry(session_factory) -> None:
         assert download.error_message == "应用在 qBittorrent 写入前重启，等待安全重试"
         assert job.state == AutomationJobState.RETRY_WAIT
         assert job.next_attempt_at is not None
+
+
+@pytest.mark.asyncio
+async def test_restart_marks_inflight_automation_runs_failed(session_factory) -> None:
+    async with session_factory() as session:
+        pending = AutomationRun(trigger="manual", state=AutomationRunState.PENDING)
+        running = AutomationRun(trigger="scheduled", state=AutomationRunState.RUNNING)
+        session.add_all([pending, running])
+        await session.commit()
+
+        assert await recover_interrupted_jobs(session) == 2
+        for run in (pending, running):
+            assert run.state == AutomationRunState.FAILED
+            assert run.error_message == "应用重启中断了本次自动化运行"
+            assert run.finished_at is not None
 
 
 def test_live_mode_never_accepts_identity_or_partial_pack_warnings() -> None:

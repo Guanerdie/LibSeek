@@ -16,6 +16,9 @@ from app.simple import routes as simple_routes
 from app.simple.models import (
     AutomationJob,
     AutomationJobState,
+    AutomationPolicy,
+    AutomationRun,
+    AutomationRunState,
     Download,
     DownloadState,
     LibraryMediaItem,
@@ -45,6 +48,8 @@ def test_runtime_exposes_the_daily_flow_without_retired_control_planes() -> None
         "/api/automation/policy",
         "/api/automation/jobs",
         "/api/automation/runs",
+        "/api/automation/runs/latest",
+        "/api/automation/runs/{run_id}",
         "/api/automation/jobs/{job_id}/retry",
     }.issubset(paths)
 
@@ -349,6 +354,128 @@ async def test_automation_policy_api_returns_safe_defaults(
     assert payload["retry_delay_minutes"] == 30
     assert payload["daily_download_limit"] == 3
     assert payload["last_run_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_automation_run_api_queues_once_and_exposes_persisted_progress(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with session_factory() as session:
+        session.add(AutomationPolicy(enabled=True))
+        await session.commit()
+
+    queued_run_ids: list[str] = []
+    monkeypatch.setattr(
+        simple_routes,
+        "queue_manual_automation_run",
+        queued_run_ids.append,
+    )
+
+    async def unexpected_inline_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("POST must not execute the long-running automation inline")
+
+    monkeypatch.setattr(simple_routes.automation, "run_automation", unexpected_inline_run)
+
+    async def session_override() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async def operator_override() -> Principal:
+        return Principal(
+            username="operator",
+            role=AuthRole.OPERATOR,
+            issued_at=0,
+            expires_at=2_000_000_000,
+            csrf_digest="test",
+        )
+
+    async def viewer_override() -> Principal:
+        return Principal(
+            username="viewer",
+            role=AuthRole.VIEWER,
+            issued_at=0,
+            expires_at=2_000_000_000,
+            csrf_digest="test",
+        )
+
+    app.dependency_overrides[get_session] = session_override
+    app.dependency_overrides[get_operator_principal] = operator_override
+    app.dependency_overrides[get_viewer_principal] = viewer_override
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            created = await client.post("/api/automation/runs")
+
+            assert created.status_code == 202
+            created_payload = created.json()
+            assert created_payload["state"] == "PENDING"
+            assert created_payload["created"] == 0
+            assert queued_run_ids == [created_payload["id"]]
+
+            conflict = await client.post("/api/automation/runs")
+            assert conflict.status_code == 409
+            assert conflict.json()["error_code"] == "AUTOMATION_RUN_IN_PROGRESS"
+            assert queued_run_ids == [created_payload["id"]]
+
+            async with session_factory() as session:
+                run = await session.get(AutomationRun, created_payload["id"])
+                assert run is not None
+                run.state = AutomationRunState.RUNNING
+                run.created_count = 4
+                run.succeeded_count = 2
+                run.failed_count = 1
+                run.deferred_count = 1
+                await session.commit()
+
+            status_response = await client.get(
+                f"/api/automation/runs/{created_payload['id']}"
+            )
+            latest_response = await client.get("/api/automation/runs/latest")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status_response.status_code == 200
+    assert latest_response.status_code == 200
+    for payload in (status_response.json(), latest_response.json()):
+        assert payload["id"] == created_payload["id"]
+        assert payload["state"] == "RUNNING"
+        assert payload["created"] == 4
+        assert payload["succeeded"] == 2
+        assert payload["failed"] == 1
+        assert payload["deferred"] == 1
+
+
+@pytest.mark.asyncio
+async def test_latest_automation_run_returns_null_when_no_run_exists(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def session_override() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async def viewer_override() -> Principal:
+        return Principal(
+            username="viewer",
+            role=AuthRole.VIEWER,
+            issued_at=0,
+            expires_at=2_000_000_000,
+            csrf_digest="test",
+        )
+
+    app.dependency_overrides[get_session] = session_override
+    app.dependency_overrides[get_viewer_principal] = viewer_override
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            response = await client.get("/api/automation/runs/latest")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() is None
 
 
 @pytest.mark.asyncio
