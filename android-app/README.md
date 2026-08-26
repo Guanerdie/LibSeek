@@ -2,7 +2,7 @@
 
 UNIN 的原生 Android 客户端，默认连接 `https://unin.tlovex.de/`。项目使用 Kotlin、Jetpack Compose、Retrofit 与 Material 3，不是 WebView 套壳；手机使用底部导航，平板使用侧边导航。
 
-客户端覆盖登录、缺失影视同步、TMDB 确认、PT 候选搜索、qBittorrent 下载状态、自动化策略、服务配置和连接测试。自动搜索以后台运行 ID 轮询进度，切换页面后可继续恢复跟踪。管理员可在 App 内配置 NextFind、TMDB、出站代理、AvistaZ/NexusPHP 与 qBittorrent；敏感字段只用于一次写入，不会由服务端回显，也不会写入 Android 本地状态或日志。
+客户端覆盖登录、缺失影视同步、TMDB 确认、PT 候选搜索、qBittorrent 下载状态、自动化策略、服务配置和连接测试。长列表在手机和平板上按页显示，并在切页后自动回到列表顶部；自动搜索以后台运行 ID 轮询进度，切换页面后可继续恢复跟踪。管理员可在 App 内配置 NextFind、TMDB、出站代理、AvistaZ/NexusPHP 与 qBittorrent；敏感字段只用于一次写入，不会由服务端回显，也不会写入 Android 本地状态或日志。
 
 ## 本地环境
 
@@ -30,13 +30,13 @@ Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 可直接安装的本地分发包输出到：
 
 ```text
-D:\project\unin\output\android\UNIN-1.2.1.apk
+D:\project\unin\output\android\UNIN-1.3.0.apk
 ```
 
 使用 ADB 安装：
 
 ```powershell
-adb install -r D:\project\unin\output\android\UNIN-1.2.1.apk
+adb install -r D:\project\unin\output\android\UNIN-1.3.0.apk
 ```
 
 也可以把 APK 复制到手机后打开安装。首次启动使用 `unin.tlovex.de` 上已有的 UNIN 账号登录；APK 不包含默认账号或管理员密码。

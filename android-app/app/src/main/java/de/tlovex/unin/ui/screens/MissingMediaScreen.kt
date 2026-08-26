@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -29,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,8 +52,11 @@ import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.GradientPrimaryButton
 import de.tlovex.unin.ui.components.MetricCard
 import de.tlovex.unin.ui.components.NeumorphicCard
+import de.tlovex.unin.ui.components.PaginationBar
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
+import de.tlovex.unin.ui.components.pageCount
+import de.tlovex.unin.ui.components.pageSlice
 import de.tlovex.unin.ui.theme.UninBlue
 import de.tlovex.unin.ui.theme.UninCyan
 import de.tlovex.unin.ui.theme.UninSuccess
@@ -65,6 +70,18 @@ fun MissingMediaScreen(
     contentPadding: androidx.compose.foundation.layout.PaddingValues,
     modifier: Modifier = Modifier,
 ) {
+    var page by remember { mutableStateOf(0) }
+    val pageSize = 24
+    val totalItems = state.missingMedia.size
+    val pages = pageCount(totalItems, pageSize)
+    val visibleMedia = pageSlice(state.missingMedia, page, pageSize)
+    val gridState = rememberLazyGridState()
+    LaunchedEffect(totalItems) {
+        page = page.coerceIn(0, (pages - 1).coerceAtLeast(0))
+    }
+    LaunchedEffect(page) {
+        gridState.animateScrollToItem(0)
+    }
     val movieCount = state.missingMedia.count { it.kind == MediaKind.Movie }
     val seriesCount = state.missingMedia.count { it.kind == MediaKind.Series }
     val syncStatus = when {
@@ -74,6 +91,7 @@ fun MissingMediaScreen(
     }
     LazyVerticalGrid(
         columns = GridCells.Adaptive(290.dp),
+        state = gridState,
         modifier = modifier,
         contentPadding = contentPadding,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -140,8 +158,16 @@ fun MissingMediaScreen(
                 }
             }
         } else {
-            items(state.missingMedia, key = { it.id }) { media ->
+            items(visibleMedia, key = { it.id }) { media ->
                 MissingMediaCard(media, callbacks, Modifier.fillMaxWidth())
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                PaginationBar(
+                    currentPage = page,
+                    totalItems = totalItems,
+                    pageSize = pageSize,
+                    onPageChange = { page = it },
+                )
             }
         }
     }

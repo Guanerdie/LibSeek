@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
@@ -19,6 +20,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,8 +37,11 @@ import de.tlovex.unin.ui.UninCallbacks
 import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.GradientPrimaryButton
 import de.tlovex.unin.ui.components.NeumorphicCard
+import de.tlovex.unin.ui.components.PaginationBar
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
+import de.tlovex.unin.ui.components.pageCount
+import de.tlovex.unin.ui.components.pageSlice
 import de.tlovex.unin.ui.theme.UninBlue
 import de.tlovex.unin.ui.theme.UninDanger
 import de.tlovex.unin.ui.theme.UninSuccess
@@ -53,7 +58,20 @@ fun AutomationScreen(
 ) {
     val policy = state.automationPolicy
     var liveConfirmation by remember { mutableStateOf<LiveAutomationConfirmation?>(null) }
+    var page by remember { mutableStateOf(0) }
+    val pageSize = 8
+    val totalItems = state.automationRuns.size
+    val pages = pageCount(totalItems, pageSize)
+    val visibleRuns = pageSlice(state.automationRuns, page, pageSize)
+    val listState = rememberLazyListState()
+    LaunchedEffect(totalItems) {
+        page = page.coerceIn(0, (pages - 1).coerceAtLeast(0))
+    }
+    LaunchedEffect(page) {
+        listState.animateScrollToItem(0)
+    }
     LazyColumn(
+        state = listState,
         modifier = modifier,
         contentPadding = contentPadding,
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -195,7 +213,7 @@ fun AutomationScreen(
                 }
             }
         } else {
-            items(state.automationRuns, key = { it.id }) { run ->
+            items(visibleRuns, key = { it.id }) { run ->
                 AutomationRunCard(
                     run = run,
                     retryEnabled = !state.isBusy && !state.automationRunOutcomeUnknown,
@@ -206,6 +224,14 @@ fun AutomationScreen(
                             liveConfirmation = LiveAutomationConfirmation.Retry(run)
                         }
                     },
+                )
+            }
+            item {
+                PaginationBar(
+                    currentPage = page,
+                    totalItems = totalItems,
+                    pageSize = pageSize,
+                    onPageChange = { page = it },
                 )
             }
         }

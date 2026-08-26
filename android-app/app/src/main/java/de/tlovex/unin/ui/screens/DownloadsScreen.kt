@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Refresh
@@ -19,6 +20,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -27,8 +33,11 @@ import de.tlovex.unin.ui.DownloadState
 import de.tlovex.unin.ui.UninCallbacks
 import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.NeumorphicCard
+import de.tlovex.unin.ui.components.PaginationBar
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
+import de.tlovex.unin.ui.components.pageCount
+import de.tlovex.unin.ui.components.pageSlice
 import de.tlovex.unin.ui.theme.UninBlue
 import de.tlovex.unin.ui.theme.UninDanger
 import de.tlovex.unin.ui.theme.UninSuccess
@@ -42,7 +51,20 @@ fun DownloadsScreen(
     contentPadding: androidx.compose.foundation.layout.PaddingValues,
     modifier: Modifier = Modifier,
 ) {
+    var page by remember { mutableStateOf(0) }
+    val pageSize = 8
+    val totalItems = state.downloads.size
+    val pages = pageCount(totalItems, pageSize)
+    val visibleDownloads = pageSlice(state.downloads, page, pageSize)
+    val listState = rememberLazyListState()
+    LaunchedEffect(totalItems) {
+        page = page.coerceIn(0, (pages - 1).coerceAtLeast(0))
+    }
+    LaunchedEffect(page) {
+        listState.animateScrollToItem(0)
+    }
     LazyColumn(
+        state = listState,
         modifier = modifier,
         contentPadding = contentPadding,
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -91,12 +113,20 @@ fun DownloadsScreen(
                 }
             }
         } else {
-            items(state.downloads, key = { it.id }) { item ->
+            items(visibleDownloads, key = { it.id }) { item ->
                 DownloadCard(
                     item = item,
                     callbacks = callbacks,
                     actionsEnabled = !state.isBusy,
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            item {
+                PaginationBar(
+                    currentPage = page,
+                    totalItems = totalItems,
+                    pageSize = pageSize,
+                    onPageChange = { page = it },
                 )
             }
         }

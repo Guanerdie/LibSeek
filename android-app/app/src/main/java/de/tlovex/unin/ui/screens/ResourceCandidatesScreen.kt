@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Download
@@ -24,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,8 +40,11 @@ import de.tlovex.unin.ui.UninDestination
 import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.GradientPrimaryButton
 import de.tlovex.unin.ui.components.NeumorphicCard
+import de.tlovex.unin.ui.components.PaginationBar
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
+import de.tlovex.unin.ui.components.pageCount
+import de.tlovex.unin.ui.components.pageSlice
 import de.tlovex.unin.ui.theme.UninCyan
 import de.tlovex.unin.ui.theme.UninDanger
 import de.tlovex.unin.ui.theme.UninSuccess
@@ -54,12 +59,25 @@ fun ResourceCandidatesScreen(
     modifier: Modifier = Modifier,
 ) {
     var candidateAwaitingConfirmation by remember { mutableStateOf<ResourceCandidateUi?>(null) }
+    var page by remember { mutableStateOf(0) }
+    val pageSize = 12
+    val totalItems = state.candidates.size
+    val pages = pageCount(totalItems, pageSize)
+    val visibleCandidates = pageSlice(state.candidates, page, pageSize)
+    val gridState = rememberLazyGridState()
+    LaunchedEffect(state.selectedMedia?.id, totalItems) {
+        page = page.coerceIn(0, (pages - 1).coerceAtLeast(0))
+    }
+    LaunchedEffect(page) {
+        gridState.animateScrollToItem(0)
+    }
     val submissionUnknownForSelected = state.selectedMedia?.id
         ?.let { it in state.downloadSubmissionUnknownMediaIds }
         ?: false
 
     LazyVerticalGrid(
         columns = GridCells.Adaptive(330.dp),
+        state = gridState,
         modifier = modifier,
         contentPadding = contentPadding,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -116,7 +134,7 @@ fun ResourceCandidatesScreen(
                 }
             }
         } else {
-            items(state.candidates, key = { it.id }) { candidate ->
+            items(visibleCandidates, key = { it.id }) { candidate ->
                 CandidateCard(
                     candidate = candidate,
                     onDownload = {
@@ -136,6 +154,14 @@ fun ResourceCandidatesScreen(
                         state.selectedMedia?.downloadActive != true,
                     loading = state.submittingCandidateId == candidate.id,
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                PaginationBar(
+                    currentPage = page,
+                    totalItems = totalItems,
+                    pageSize = pageSize,
+                    onPageChange = { page = it },
                 )
             }
         }
