@@ -562,7 +562,7 @@ onBeforeUnmount(() => {
               <strong>{{ job.media_title }}</strong>
               <p class="muted">{{ formatShanghai(job.created_at) }} · 候选 {{ job.decision.candidate_count ?? 0 }} 个</p>
               <p v-if="job.error_message" class="inline-warning">{{ job.error_message }}</p>
-              <button v-if="job.state === 'FAILED'" class="button secondary small" type="button" @click="retry(job.id)">
+              <button v-if="job.state === 'FAILED' || job.state === 'RETRY_WAIT'" class="button secondary small" type="button" @click="retry(job.id)">
                 重新执行
               </button>
             </div>

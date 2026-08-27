@@ -203,13 +203,13 @@ onBeforeUnmount(() => {
             </ul>
             <div class="automation-job-actions">
               <button
-                v-if="job.state === 'FAILED'"
+                v-if="job.state === 'FAILED' || job.state === 'RETRY_WAIT'"
                 class="button secondary small"
                 type="button"
                 :disabled="retryingJobId !== null"
                 @click="retry(job)"
               >
-                {{ retryingJobId === job.id ? '重试中…' : '重试任务' }}
+                {{ retryingJobId === job.id ? '重试中…' : (job.state === 'RETRY_WAIT' ? '立即重试' : '重试任务') }}
               </button>
               <a
                 v-if="job.state === 'FAILED' || job.search_id"

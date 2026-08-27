@@ -222,10 +222,13 @@ async def retry_job(session: AsyncSession, job_id: str) -> AutomationJob:
     job = await session.get(AutomationJob, job_id)
     if job is None:
         raise AppError("AUTOMATION_JOB_NOT_FOUND", "自动化任务不存在", status_code=404)
-    if job.state != AutomationJobState.FAILED:
+    if job.state not in {
+        AutomationJobState.FAILED,
+        AutomationJobState.RETRY_WAIT,
+    }:
         raise AppError(
             "AUTOMATION_JOB_NOT_FAILED",
-            "只有已失败的任务可以重新执行",
+            "只有失败或等待重试的任务可以重新执行",
             status_code=409,
         )
     job.state = AutomationJobState.RETRY_WAIT
