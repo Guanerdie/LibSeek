@@ -329,7 +329,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="page">
+  <section class="page automation-page">
     <PageHeader
       eyebrow="AUTOMATION"
       title="自动搜索"
