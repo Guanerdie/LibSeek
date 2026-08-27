@@ -2,7 +2,9 @@ import type {
   AuthSetupStatus,
   AutomationJob,
   AutomationPolicy,
+  AutomationJobPage,
   AutomationRun,
+  AutomationRunPage,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
@@ -213,7 +215,27 @@ export const automationApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
-  jobs: () => request<Page<AutomationJob>>('/api/automation/jobs?page=1&page_size=30'),
+  jobs: (params: { page?: number; pageSize?: number } = {}) =>
+    request<AutomationJobPage>(
+      `/api/automation/jobs?${queryString({
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 30,
+      })}`,
+    ),
+  runs: (params: { page?: number; pageSize?: number } = {}) =>
+    request<AutomationRunPage>(
+      `/api/automation/runs?${queryString({
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 10,
+      })}`,
+    ),
+  runJobs: (runId: string, params: { page?: number; pageSize?: number } = {}) =>
+    request<AutomationJobPage>(
+      `/api/automation/runs/${encodeURIComponent(runId)}/jobs?${queryString({
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 10,
+      })}`,
+    ),
   run: () => request<AutomationRun>('/api/automation/runs', { method: 'POST' }),
   latestRun: async (): Promise<AutomationRun | null> => {
     try {

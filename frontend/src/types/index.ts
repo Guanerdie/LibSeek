@@ -313,7 +313,7 @@ export interface AutomationJob {
     candidate_count?: number
     selected_title?: string | null
     selected_score?: number | null
-    rejected?: Array<{ candidate_id: string; title: string; reasons: string[] }>
+    rejected?: Array<{ candidate_id: string | null; title: string; reasons: string[] }>
     download_skipped?: string
     download_state?: DailyDownloadState
   }
@@ -337,3 +337,7 @@ export interface AutomationRun {
   started_at: string | null
   finished_at: string | null
 }
+
+export type AutomationRunPage = Page<AutomationRun>
+
+export type AutomationJobPage = Page<AutomationJob>

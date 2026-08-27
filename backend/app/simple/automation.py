@@ -101,17 +101,75 @@ async def update_policy(
 
 
 async def list_jobs(
-    session: AsyncSession, *, page: int, page_size: int
+    session: AsyncSession,
+    *,
+    page: int,
+    page_size: int,
+    run_id: str | None = None,
 ) -> tuple[list[tuple[AutomationJob, str]], int]:
-    total = await session.scalar(select(func.count()).select_from(AutomationJob))
+    """Return automation jobs in a stable, paginated order.
+
+    ``run_id`` is optional to preserve the original global jobs endpoint.  A
+    scoped query is used by the run-detail page so a long execution never
+    expands the document into one giant list.
+    """
+
+    count_statement = select(func.count()).select_from(AutomationJob)
+    jobs_statement = select(AutomationJob, LibraryMediaItem.title).join(
+        LibraryMediaItem, LibraryMediaItem.id == AutomationJob.media_id
+    )
+    if run_id is not None:
+        count_statement = count_statement.where(AutomationJob.run_id == run_id)
+        jobs_statement = jobs_statement.where(AutomationJob.run_id == run_id)
+
+    total = await session.scalar(count_statement)
     rows = await session.execute(
-        select(AutomationJob, LibraryMediaItem.title)
-        .join(LibraryMediaItem, LibraryMediaItem.id == AutomationJob.media_id)
+        jobs_statement
         .order_by(AutomationJob.created_at.desc(), AutomationJob.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
     return list(rows.tuples()), int(total or 0)
+
+
+async def list_automation_runs(
+    session: AsyncSession, *, page: int, page_size: int
+) -> tuple[list[AutomationRun], int]:
+    """Return execution history ordered newest first.
+
+    Runs are persisted independently from their jobs, so this query remains
+    useful while a run is pending (before any jobs have been created) and while
+    its counters are being updated by the background worker.
+    """
+
+    total = await session.scalar(select(func.count()).select_from(AutomationRun))
+    runs = list(
+        await session.scalars(
+            select(AutomationRun)
+            .order_by(AutomationRun.created_at.desc(), AutomationRun.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return runs, int(total or 0)
+
+
+async def list_run_jobs(
+    session: AsyncSession,
+    run_id: str,
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[list[tuple[AutomationJob, str]], int]:
+    """Return the jobs belonging to one execution run.
+
+    The run existence check is intentionally performed by the route (which can
+    return the established ``AUTOMATION_RUN_NOT_FOUND`` error).  Keeping this
+    helper query-only also lets internal callers inspect orphaned jobs created
+    by older databases if needed.
+    """
+
+    return await list_jobs(session, page=page, page_size=page_size, run_id=run_id)
 
 
 async def create_automation_run(

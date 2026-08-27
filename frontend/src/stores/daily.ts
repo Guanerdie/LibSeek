@@ -13,11 +13,16 @@ import type {
 interface DailyState {
   media: DailyMedia[]
   mediaTotal: number
+  mediaPage: number
+  mediaPageSize: number
   mediaFilterOptions: DailyMediaFilterOptions
   mediaQuery: DailyMediaQuery
   selectedMedia: DailyMediaDetail | null
   search: DailySearch | null
   downloads: DailyDownload[]
+  downloadsTotal: number
+  downloadsPage: number
+  downloadsPageSize: number
   mediaListLoading: boolean
   mediaSyncing: boolean
   mediaDetailLoading: boolean
@@ -34,11 +39,16 @@ export const useDailyStore = defineStore('daily', {
   state: (): DailyState => ({
     media: [],
     mediaTotal: 0,
+    mediaPage: 1,
+    mediaPageSize: 30,
     mediaFilterOptions: { media_types: [], regions: [], states: [], years: [] },
     mediaQuery: {},
     selectedMedia: null,
     search: null,
     downloads: [],
+    downloadsTotal: 0,
+    downloadsPage: 1,
+    downloadsPageSize: 30,
     mediaListLoading: false,
     mediaSyncing: false,
     mediaDetailLoading: false,
@@ -63,6 +73,8 @@ export const useDailyStore = defineStore('daily', {
         if (requestSequence === this.mediaRequestSequence) {
           this.media = response.items
           this.mediaTotal = response.total
+          this.mediaPage = response.page
+          this.mediaPageSize = response.page_size
           this.mediaFilterOptions = response.filter_options
         }
       } catch (error) {
@@ -82,6 +94,8 @@ export const useDailyStore = defineStore('daily', {
         if (requestSequence !== this.mediaRequestSequence) return
         this.media = response.items
         this.mediaTotal = response.total
+        this.mediaPage = response.page
+        this.mediaPageSize = response.page_size
         this.mediaFilterOptions = response.filter_options
       } catch (error) {
         if (requestSequence !== this.mediaRequestSequence) return
@@ -157,11 +171,19 @@ export const useDailyStore = defineStore('daily', {
         return false
       }
     },
-    async loadDownloads(): Promise<void> {
+    async loadDownloads(page?: number): Promise<void> {
       this.downloadsLoading = true
       this.downloadsError = null
       try {
-        this.downloads = (await dailyApi.downloads()).items
+        const requestedPage = page ?? this.downloadsPage
+        const response = await dailyApi.downloads({
+          page: requestedPage,
+          pageSize: this.downloadsPageSize,
+        })
+        this.downloads = response.items
+        this.downloadsTotal = response.total
+        this.downloadsPage = response.page
+        this.downloadsPageSize = response.page_size
       } catch (error) {
         this.downloads = []
         this.downloadsError = error instanceof ApiError ? error.message : '无法读取下载任务'
@@ -169,12 +191,20 @@ export const useDailyStore = defineStore('daily', {
         this.downloadsLoading = false
       }
     },
-    async refreshDownloads(): Promise<void> {
+    async refreshDownloads(page?: number): Promise<void> {
       this.downloadsSyncing = true
       this.downloadsError = null
       try {
         await dailyApi.syncDownloads()
-        this.downloads = (await dailyApi.downloads()).items
+        const requestedPage = page ?? this.downloadsPage
+        const response = await dailyApi.downloads({
+          page: requestedPage,
+          pageSize: this.downloadsPageSize,
+        })
+        this.downloads = response.items
+        this.downloadsTotal = response.total
+        this.downloadsPage = response.page
+        this.downloadsPageSize = response.page_size
       } catch (error) {
         this.downloadsError = error instanceof ApiError ? error.message : '无法同步下载状态'
       } finally {

@@ -253,3 +253,18 @@ class AutomationRunView(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class AutomationRunPage(BaseModel):
+    """A paginated list of automation executions.
+
+    A run is the unit shown in the automation history (rather than an
+    individual media job).  Keep the same compact run representation used by
+    the existing status endpoints so clients can use either endpoint without
+    a translation layer.
+    """
+
+    items: list[AutomationRunView]
+    total: int
+    page: int
+    page_size: int

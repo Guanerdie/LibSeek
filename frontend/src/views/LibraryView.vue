@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
+import Pagination from '../components/Pagination.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
 import type { DailyMediaRegion, DailyMediaState, DailyMediaType } from '../types'
@@ -50,6 +51,10 @@ function resetFilters(): void {
   filters.state = ''
   filters.year = ''
   void daily.loadMedia({})
+}
+
+function changePage(page: number): void {
+  void daily.loadMedia({ ...daily.mediaQuery, page })
 }
 
 onMounted(() => daily.loadMedia())
@@ -161,5 +166,12 @@ onMounted(() => daily.loadMedia())
         </RouterLink>
       </article>
     </div>
+    <Pagination
+      :page="daily.mediaPage"
+      :total="daily.mediaTotal"
+      :page-size="daily.mediaPageSize"
+      label="缺失影视分页"
+      @change="changePage"
+    />
   </section>
 </template>

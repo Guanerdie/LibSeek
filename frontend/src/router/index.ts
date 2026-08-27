@@ -5,6 +5,7 @@ import type { AuthRole } from '../types'
 import { safeInternalRedirect } from '../utils/navigation'
 import ConfigurationView from '../views/ConfigurationView.vue'
 import AutomationView from '../views/AutomationView.vue'
+import AutomationRunDetailView from '../views/AutomationRunDetailView.vue'
 import LoginView from '../views/LoginView.vue'
 import LibraryView from '../views/LibraryView.vue'
 import ResourcesView from '../views/ResourcesView.vue'
@@ -26,6 +27,7 @@ const router = createRouter({
     { path: '/library/:id/resources', component: ResourcesView },
     { path: '/downloads', component: DownloadsView },
     { path: '/automation', component: AutomationView, meta: { requiredRole: 'operator' } },
+    { path: '/automation/runs/:runId', component: AutomationRunDetailView, meta: { requiredRole: 'operator' } },
     { path: '/configuration', component: ConfigurationView, meta: { requiredRole: 'admin' } },
     { path: '/:pathMatch(.*)*', redirect: '/library' },
   ],

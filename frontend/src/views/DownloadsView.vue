@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
+import Pagination from '../components/Pagination.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
 import type { DailyDownload } from '../types'
@@ -33,6 +34,10 @@ async function retry(download: DailyDownload): Promise<void> {
   }
 }
 
+function changePage(page: number): void {
+  void daily.loadDownloads(page)
+}
+
 onMounted(() => {
   void daily.refreshDownloads()
   refreshTimer = globalThis.setInterval(() => {
@@ -48,7 +53,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="page">
     <PageHeader eyebrow="DOWNLOADS" title="下载" description="查看 qBittorrent 任务的当前状态。">
-      <button class="button secondary" :disabled="daily.downloadsSyncing" @click="daily.refreshDownloads">
+      <button class="button secondary" :disabled="daily.downloadsSyncing" @click="daily.refreshDownloads(daily.downloadsPage)">
         刷新
       </button>
     </PageHeader>
@@ -90,5 +95,12 @@ onBeforeUnmount(() => {
         </button>
       </article>
     </div>
+    <Pagination
+      :page="daily.downloadsPage"
+      :total="daily.downloadsTotal"
+      :page-size="daily.downloadsPageSize"
+      label="下载任务分页"
+      @change="changePage"
+    />
   </section>
 </template>

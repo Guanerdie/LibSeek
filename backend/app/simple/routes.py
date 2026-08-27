@@ -33,6 +33,7 @@ from app.simple.schemas import (
     AutomationJobView,
     AutomationPolicyUpdate,
     AutomationPolicyView,
+    AutomationRunPage,
     AutomationRunView,
     CandidateView,
     DownloadCreate,
@@ -268,11 +269,14 @@ async def save_automation_policy(
 async def automation_jobs(
     session: Session,
     principal: ViewerPrincipal,
+    run_id: str | None = Query(default=None, min_length=1, max_length=36),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=100),
 ) -> AutomationJobPage:
     del principal
-    rows, total = await automation.list_jobs(session, page=page, page_size=page_size)
+    rows, total = await automation.list_jobs(
+        session, page=page, page_size=page_size, run_id=run_id
+    )
     return AutomationJobPage(
         items=[
             AutomationJobView.model_validate({**job.__dict__, "media_title": title})
@@ -298,6 +302,32 @@ async def run_automation(
     return AutomationRunView.model_validate(run)
 
 
+@router.get("/automation/runs", response_model=AutomationRunPage)
+async def automation_runs(
+    session: Session,
+    principal: ViewerPrincipal,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+) -> AutomationRunPage:
+    """List executions for the automation history screen.
+
+    This endpoint deliberately returns run summaries only.  The potentially
+    long per-media task list is fetched from the scoped ``/jobs`` endpoint when
+    a user opens a run.
+    """
+
+    del principal
+    runs, total = await automation.list_automation_runs(
+        session, page=page, page_size=page_size
+    )
+    return AutomationRunPage(
+        items=[AutomationRunView.model_validate(run) for run in runs],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.get("/automation/runs/latest", response_model=AutomationRunView | None)
 async def latest_automation_run(
     session: Session, principal: ViewerPrincipal
@@ -314,6 +344,34 @@ async def automation_run_status(
     del principal
     run = await automation.get_automation_run(session, run_id)
     return AutomationRunView.model_validate(run)
+
+
+@router.get("/automation/runs/{run_id}/jobs", response_model=AutomationJobPage)
+async def automation_run_jobs(
+    run_id: str,
+    session: Session,
+    principal: ViewerPrincipal,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+) -> AutomationJobPage:
+    """List tasks for a single execution, with independent pagination."""
+
+    del principal
+    # Keep the same not-found contract as the existing run status endpoint;
+    # otherwise a typo would silently look like an empty successful run.
+    await automation.get_automation_run(session, run_id)
+    rows, total = await automation.list_run_jobs(
+        session, run_id, page=page, page_size=page_size
+    )
+    return AutomationJobPage(
+        items=[
+            AutomationJobView.model_validate({**job.__dict__, "media_title": title})
+            for job, title in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("/automation/jobs/{job_id}/retry", response_model=AutomationJobView)

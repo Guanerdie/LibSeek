@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ApiError, automationApi, dailyApi } from '../api/client'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
+import Pagination from '../components/Pagination.vue'
 import StatusPill from '../components/StatusPill.vue'
 import type {
   AutomationJob,
@@ -35,6 +36,11 @@ const form = reactive({
   daily_download_gib: '',
 })
 const jobs = ref<AutomationJob[]>([])
+const runs = ref<AutomationRun[]>([])
+const runsTotal = ref(0)
+const runsPage = ref(1)
+const runsPageSize = 10
+const runsLoading = ref(false)
 const loading = ref(true)
 const saving = ref(false)
 const starting = ref(false)
@@ -43,6 +49,8 @@ const feedback = ref<string | null>(null)
 const currentRun = ref<AutomationRun | null>(null)
 const mediaOptions = ref<DailyMedia[]>([])
 const mediaOptionsTotal = ref(0)
+const mediaOptionsPage = ref(1)
+const mediaOptionsPageSize = 10
 const mediaOptionsLoading = ref(false)
 const mediaQuery = reactive({
   query: '',
@@ -63,6 +71,8 @@ const runProgress = computed(() => {
   if (run.created === 0) return runIsActive.value ? 0 : 100
   return Math.min(100, Math.round((runCompleted.value / run.created) * 100))
 })
+// Keep the old jobs fallback for older API deployments and unit-test mocks.
+const runsApiAvailable = computed(() => typeof automationApi.runs === 'function')
 
 const pollIntervalMs = 2_000
 let pollTimer: ReturnType<typeof globalThis.setTimeout> | undefined
@@ -93,23 +103,28 @@ function applyPolicy(policy: AutomationPolicy): void {
     : ''
 }
 
-async function loadMediaOptions(): Promise<void> {
+async function loadMediaOptions(page = 1): Promise<void> {
   mediaOptionsLoading.value = true
   try {
-    const page = await dailyApi.media({
-      page: 1,
-      pageSize: 100,
+    const response = await dailyApi.media({
+      page,
+      pageSize: mediaOptionsPageSize,
       query: mediaQuery.query.trim() || undefined,
       region: mediaQuery.region || undefined,
       mediaType: mediaQuery.mediaType || undefined,
     })
-    mediaOptions.value = page.items
-    mediaOptionsTotal.value = page.total
+    mediaOptions.value = response.items
+    mediaOptionsTotal.value = response.total
+    mediaOptionsPage.value = response.page
   } catch (caught) {
     error.value = message(caught, '无法读取影视选择列表')
   } finally {
     mediaOptionsLoading.value = false
   }
+}
+
+function changeMediaOptionsPage(page: number): void {
+  void loadMediaOptions(page)
 }
 
 function toggleMedia(mediaId: string): void {
@@ -143,6 +158,25 @@ async function refreshJobs(): Promise<void> {
   jobs.value = (await automationApi.jobs()).items
 }
 
+async function loadRuns(page = runsPage.value): Promise<void> {
+  if (!runsApiAvailable.value) return
+  runsLoading.value = true
+  try {
+    const response = await automationApi.runs({ page, pageSize: runsPageSize })
+    runs.value = response.items
+    runsTotal.value = response.total
+    runsPage.value = response.page
+  } catch (caught) {
+    error.value = message(caught, '无法读取自动化执行记录')
+  } finally {
+    runsLoading.value = false
+  }
+}
+
+function changeRunsPage(page: number): void {
+  void loadRuns(page)
+}
+
 async function finishRun(run: AutomationRun): Promise<void> {
   stopPolling()
   currentRun.value = run
@@ -155,6 +189,7 @@ async function finishRun(run: AutomationRun): Promise<void> {
   }
   try {
     await refreshJobs()
+    await loadRuns(1)
   } catch (caught) {
     error.value = message(caught, '自动搜索已结束，但无法刷新任务记录')
   }
@@ -203,7 +238,7 @@ async function load(): Promise<void> {
     jobs.value = page.items
     currentRun.value = latestRun
     if (latestRun && isActive(latestRun)) startPolling(latestRun)
-    await loadMediaOptions()
+    await Promise.all([loadMediaOptions(), loadRuns(1)])
   } catch (caught) {
     error.value = message(caught, '无法读取自动化配置')
   } finally {
@@ -256,6 +291,7 @@ async function run(): Promise<void> {
   try {
     const createdRun = await automationApi.run()
     currentRun.value = createdRun
+    void loadRuns(1)
     if (isActive(createdRun)) {
       feedback.value = '自动搜索已在后台开始，可离开页面后再回来查看进度。'
       startPolling(createdRun)
@@ -274,6 +310,7 @@ async function retry(jobId: string): Promise<void> {
   try {
     await automationApi.retry(jobId)
     jobs.value = (await automationApi.jobs()).items
+    await loadRuns(runsPage.value)
     feedback.value = '失败任务已进入重试队列'
   } catch (caught) {
     error.value = message(caught, '无法重新执行任务')
@@ -314,7 +351,10 @@ onBeforeUnmount(() => {
           <span class="eyebrow">CURRENT RUN</span>
           <h2>后台自动搜索</h2>
         </div>
-        <StatusPill :status="currentRun.state" />
+        <div class="automation-current-actions">
+          <a class="button secondary small" :href="`/automation/runs/${currentRun.id}`">查看任务</a>
+          <StatusPill :status="currentRun.state" />
+        </div>
       </div>
       <p class="muted">
         {{ currentRun.trigger === 'scheduled' ? '周期任务' : '手动运行' }} ·
@@ -434,11 +474,11 @@ onBeforeUnmount(() => {
               <option v-for="region in regionOptions" :key="region" :value="region">{{ region }}</option>
             </select>
           </label>
-          <button class="button secondary" type="button" :disabled="mediaOptionsLoading" @click="loadMediaOptions">
+          <button class="button secondary" type="button" :disabled="mediaOptionsLoading" @click="loadMediaOptions(1)">
             {{ mediaOptionsLoading ? '查询中…' : '查询影视' }}
           </button>
         </div>
-        <p class="muted">当前查询 {{ mediaOptionsTotal }} 项，最多显示前 100 项；可用关键词继续缩小范围。</p>
+        <p class="muted">当前查询 {{ mediaOptionsTotal }} 项；每页显示 {{ mediaOptionsPageSize }} 项，可用关键词继续缩小范围。</p>
         <div class="download-stack automation-media-options">
           <label v-for="item in mediaOptions" :key="item.id" class="download-card configuration-checkbox">
             <input
@@ -455,6 +495,13 @@ onBeforeUnmount(() => {
             </span>
           </label>
         </div>
+        <Pagination
+          :page="mediaOptionsPage"
+          :total="mediaOptionsTotal"
+          :page-size="mediaOptionsPageSize"
+          label="影视选择分页"
+          @change="changeMediaOptionsPage"
+        />
       </div>
       <p class="muted">
         当前站点：AvistaZ；媒体类型：电影和电视剧。真实下载还要求部署环境启用 ENABLE_QB_WRITE。
@@ -466,41 +513,63 @@ onBeforeUnmount(() => {
       </div>
     </form>
 
-    <div v-if="!loading" class="panel">
+    <div v-if="!loading" class="panel automation-history">
       <div class="filter-heading">
-        <div><span class="eyebrow">RUN HISTORY</span><strong>最近试运行</strong></div>
-        <span class="muted">{{ jobs.length }} 条记录</span>
+        <div><span class="eyebrow">RUN HISTORY</span><strong>自动化执行记录</strong></div>
+        <span class="muted">{{ runsApiAvailable ? `${runsTotal} 次执行` : `${jobs.length} 条任务` }}</span>
       </div>
-      <p v-if="jobs.length === 0" class="muted">尚未执行自动搜索。</p>
-      <div v-else class="download-stack">
-        <article v-for="job in jobs" :key="job.id" class="download-card">
-          <div>
-            <strong>{{ job.media_title }}</strong>
-            <p class="muted">{{ formatShanghai(job.created_at) }} · 候选 {{ job.decision.candidate_count ?? 0 }} 个</p>
-            <p class="muted">
-              {{ job.trigger === 'scheduled' ? '周期任务' : '手动运行' }} · 已尝试 {{ job.attempt_count }} 次
-              <span v-if="job.next_attempt_at"> · 下次 {{ formatShanghai(job.next_attempt_at) }}</span>
-            </p>
-            <p v-if="job.decision.selected_title" class="configuration-message success">
-              试运行选择：{{ job.decision.selected_title }}（{{ Math.round((job.decision.selected_score ?? 0) * 100) }} 分）
-            </p>
-            <p v-else-if="job.state === 'SUCCEEDED'" class="inline-warning">没有候选满足当前策略</p>
-            <p v-if="job.decision.download_skipped" class="inline-warning">
-              {{ job.decision.download_skipped }}
-            </p>
-            <p v-if="job.error_message" class="inline-warning">{{ job.error_message }}</p>
-            <button
-              v-if="job.state === 'FAILED'"
-              class="button secondary small"
-              type="button"
-              @click="retry(job.id)"
-            >
-              重新执行
-            </button>
-          </div>
-          <StatusPill :status="job.state" />
-        </article>
-      </div>
+
+      <template v-if="runsApiAvailable">
+        <p v-if="runsLoading" class="muted">正在读取执行记录…</p>
+        <p v-else-if="runs.length === 0" class="muted">尚未执行自动搜索。</p>
+        <div v-else class="automation-run-list">
+          <article v-for="(runItem, index) in runs" :key="runItem.id" class="automation-run-card">
+            <div class="automation-run-card-main">
+              <div>
+                <span class="eyebrow">第 {{ (runsPage - 1) * runsPageSize + index + 1 }} 次执行</span>
+                <h3>{{ runItem.trigger === 'scheduled' ? '周期自动搜索' : '手动自动搜索' }}</h3>
+                <p class="muted">{{ formatShanghai(runItem.created_at) }}</p>
+              </div>
+              <StatusPill :status="runItem.state" />
+            </div>
+            <div class="automation-run-counts">
+              <strong>共 {{ runItem.created }} 项</strong>
+              <span class="success-text">成功 {{ runItem.succeeded }} 项</span>
+              <span v-if="runItem.failed" class="danger-text">失败 {{ runItem.failed }} 项</span>
+              <span v-if="runItem.deferred" class="warning-text">等待 {{ runItem.deferred }} 项</span>
+            </div>
+            <p v-if="runItem.error_message" class="inline-warning">{{ runItem.error_message }}</p>
+            <a class="button secondary small" :href="`/automation/runs/${runItem.id}`">
+              查看任务详情
+            </a>
+          </article>
+        </div>
+        <Pagination
+          :page="runsPage"
+          :total="runsTotal"
+          :page-size="runsPageSize"
+          label="自动化执行记录分页"
+          @change="changeRunsPage"
+        />
+      </template>
+
+      <!-- Compatibility fallback while an older API is being upgraded. -->
+      <template v-else>
+        <p v-if="jobs.length === 0" class="muted">尚未执行自动搜索。</p>
+        <div v-else class="download-stack">
+          <article v-for="job in jobs" :key="job.id" class="download-card">
+            <div>
+              <strong>{{ job.media_title }}</strong>
+              <p class="muted">{{ formatShanghai(job.created_at) }} · 候选 {{ job.decision.candidate_count ?? 0 }} 个</p>
+              <p v-if="job.error_message" class="inline-warning">{{ job.error_message }}</p>
+              <button v-if="job.state === 'FAILED'" class="button secondary small" type="button" @click="retry(job.id)">
+                重新执行
+              </button>
+            </div>
+            <StatusPill :status="job.state" />
+          </article>
+        </div>
+      </template>
     </div>
   </section>
 </template>
