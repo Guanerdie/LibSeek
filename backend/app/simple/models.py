@@ -117,6 +117,11 @@ class LibraryMediaItem(Base):
         enum_column(MediaState, 24), default=MediaState.MISSING, nullable=False, index=True
     )
     attention_reason: Mapped[str | None] = mapped_column(Text)
+    last_searched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    search_miss_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_search_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +52,36 @@ _HARD_CORRECTNESS_WARNINGS = {
 }
 _EXACT_IDENTITY_REASONS = {"TMDB_ID_EXACT", "IMDB_ID_EXACT"}
 _FALLBACK_IDENTITY_REASONS = {"TITLE_EXACT", "YEAR_MATCH", "MEDIA_TYPE_MATCH"}
+
+# Search cooldown: after an automation search finds nothing acceptable, wait
+# progressively longer before searching the same media item again.  Resources
+# that do not exist on the site today rarely appear within hours, so repeating
+# the same empty search every cycle only burns PT request quota.
+_SEARCH_MISS_COOLDOWNS = (
+    timedelta(days=1),
+    timedelta(days=3),
+    timedelta(days=7),
+)
+
+
+def _search_cooldown(miss_count: int) -> timedelta:
+    if miss_count <= 0:
+        return timedelta(0)
+    index = min(miss_count, len(_SEARCH_MISS_COOLDOWNS)) - 1
+    return _SEARCH_MISS_COOLDOWNS[index]
+
+
+def _record_search_outcome(
+    media: LibraryMediaItem, *, found_candidate: bool
+) -> None:
+    now = utc_now()
+    media.last_searched_at = now
+    if found_candidate:
+        media.search_miss_count = 0
+        media.next_search_at = None
+    else:
+        media.search_miss_count += 1
+        media.next_search_at = now + _search_cooldown(media.search_miss_count)
 
 
 async def get_policy(session: AsyncSession) -> AutomationPolicy:
@@ -365,6 +395,10 @@ async def run_automation(
                     )
                 ),
                 LibraryMediaItem.id.not_in(unavailable_media_ids),
+                or_(
+                    LibraryMediaItem.next_search_at.is_(None),
+                    LibraryMediaItem.next_search_at <= now,
+                ),
             )
             .order_by(LibraryMediaItem.updated_at.asc())
         )
@@ -567,6 +601,12 @@ async def _execute_job(
                     "selected_score": selected.score if selected else None,
                     "rejected": rejected,
                 }
+                _record_search_outcome(media, found_candidate=selected is not None)
+                if selected is None and media.next_search_at is not None:
+                    job.decision = {
+                        **job.decision,
+                        "search_cooldown_until": media.next_search_at.isoformat(),
+                    }
                 await session.commit()
 
         if selected is not None and not policy.dry_run:
