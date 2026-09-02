@@ -216,7 +216,9 @@ fun AutomationScreen(
             items(visibleRuns, key = { it.id }) { run ->
                 AutomationRunCard(
                     run = run,
-                    retryEnabled = !state.isBusy && !state.automationRunOutcomeUnknown,
+                    retryEnabled = !state.isBusy &&
+                        !state.isAutomationRunInProgress &&
+                        !state.automationRunOutcomeUnknown,
                     onRetry = {
                         if (policy.dryRun) {
                             callbacks.onRetryAutomation(run)
@@ -375,6 +377,8 @@ private fun AutomationRunCard(
         AutomationRunState.Success -> "成功" to UninSuccess
         AutomationRunState.DryRun -> "预演" to UninViolet
         AutomationRunState.Running -> "运行中" to UninBlue
+        AutomationRunState.Waiting -> "等待重试" to UninWarning
+        AutomationRunState.Superseded -> "已接替" to MaterialTheme.colorScheme.onSurfaceVariant
         AutomationRunState.Failed -> "失败" to UninDanger
     }
     NeumorphicCard(Modifier.fillMaxWidth()) {
@@ -386,7 +390,7 @@ private fun AutomationRunCard(
             }
             Column(horizontalAlignment = Alignment.End) {
                 StatusPill(label, color)
-                if (run.state == AutomationRunState.Failed) {
+                if (run.canRetry) {
                     TextButton(
                         onClick = onRetry,
                         enabled = retryEnabled,

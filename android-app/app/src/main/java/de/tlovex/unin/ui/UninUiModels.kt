@@ -15,7 +15,7 @@ enum class UninDestination {
 enum class MediaKind { Movie, Series }
 enum class DownloadState { Queued, Downloading, Seeding, Completed, OutcomeUnknown, Failed }
 enum class ConnectionState { Connected, Configured, Checking, Disconnected, NotConfigured }
-enum class AutomationRunState { Success, DryRun, Running, Failed }
+enum class AutomationRunState { Success, DryRun, Running, Waiting, Superseded, Failed }
 
 @Immutable
 data class MissingMediaUi(
@@ -89,6 +89,7 @@ data class AutomationRunUi(
     val detail: String,
     val timeText: String,
     val state: AutomationRunState,
+    val canRetry: Boolean = false,
 )
 
 @Immutable

@@ -962,29 +962,56 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startAutomationRunPolling(initialRun: AutomationRunDto) {
+        startAutomationRunPolling(runId = initialRun.id, initialRun = initialRun)
+    }
+
+    private fun startAutomationRunPolling(runId: String) {
+        startAutomationRunPolling(runId = runId, initialRun = null)
+    }
+
+    private fun startAutomationRunPolling(runId: String, initialRun: AutomationRunDto?) {
+        val shouldTrack = initialRun?.isActive ?: true
         if (
-            initialRun.isActive &&
+            shouldTrack &&
             automationRunPollJob?.isActive == true &&
-            automationRunPollId == initialRun.id &&
+            automationRunPollId == runId &&
             uiState.value.isAutomationRunInProgress
         ) {
             return
         }
-        automationRunPollId = initialRun.id
+        automationRunPollId = runId
 
         automationRunPollJob?.cancel()
         mutableUiState.update {
             it.copy(
-                isAutomationRunInProgress = initialRun.isActive,
+                isAutomationRunInProgress = shouldTrack,
                 automationRunOutcomeUnknown = false,
             )
         }
 
         lateinit var pollingJob: Job
         pollingJob = viewModelScope.launch {
-            var run = initialRun
             var lastProgressMessage: String? = null
             try {
+                var loadedRun = initialRun
+                while (loadedRun == null) {
+                    loadedRun = try {
+                        repository.automationRun(runId)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        if (error.isSessionAuthenticationFailure()) {
+                            expireSession("登录已过期，请重新登录")
+                            return@launch
+                        }
+                        mutableUiState.update {
+                            it.copy(snackbarMessage = "暂时无法读取自动化进度，将继续后台重试")
+                        }
+                        delay(AUTOMATION_RUN_POLL_INTERVAL_MS)
+                        null
+                    }
+                }
+                var run = requireNotNull(loadedRun)
                 while (run.isActive) {
                     val progressMessage = run.progressMessage()
                     if (progressMessage != lastProgressMessage) {
@@ -1062,14 +1089,37 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
+        mutableUiState.update { it.copy(isAutomationRunInProgress = true) }
         launchAction("无法重试自动化任务") {
-            repository.retryAutomationJob(run.id)
-            val jobs = loadAllAutomationJobs()
-            mutableUiState.update {
-                it.copy(
-                    automationRuns = jobs.map { job -> job.toUi() },
-                    snackbarMessage = "《${run.title}》已进入重试队列",
-                )
+            try {
+                val retryJob = repository.retryAutomationJob(run.id)
+                startAutomationRunPolling(retryJob.runId)
+                val jobs = try {
+                    loadAllAutomationJobs()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    null
+                }
+                mutableUiState.update { state ->
+                    state.copy(
+                        automationRuns = jobs?.map { job -> job.toUi() } ?: state.automationRuns,
+                        snackbarMessage = if (jobs == null) {
+                            "《${run.title}》已开始重试，任务列表稍后刷新"
+                        } else {
+                            "《${run.title}》已开始重试"
+                        },
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (error.mayLeaveWriteOutcomeUnknown() || error is HttpException && error.code() == 409) {
+                    reconcileUnknownAutomationRun()
+                } else {
+                    mutableUiState.update { it.copy(isAutomationRunInProgress = false) }
+                    throw error
+                }
             }
         }
     }
@@ -1581,17 +1631,21 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             if (!skipped.isNullOrBlank()) add(skipped)
             if (!errorMessage.isNullOrBlank()) add(errorMessage)
         }.joinToString(" · ")
-        val uiState = when (state) {
-            AutomationJobState.PENDING,
-            AutomationJobState.RUNNING,
-            AutomationJobState.RETRY_WAIT,
-            -> AutomationRunState.Running
-            AutomationJobState.SUCCEEDED -> if (mode == "dry-run") {
-                AutomationRunState.DryRun
-            } else {
-                AutomationRunState.Success
+        val uiState = if (supersededAt != null) {
+            AutomationRunState.Superseded
+        } else {
+            when (state) {
+                AutomationJobState.PENDING,
+                AutomationJobState.RUNNING,
+                -> AutomationRunState.Running
+                AutomationJobState.RETRY_WAIT -> AutomationRunState.Waiting
+                AutomationJobState.SUCCEEDED -> if (mode == "dry-run") {
+                    AutomationRunState.DryRun
+                } else {
+                    AutomationRunState.Success
+                }
+                AutomationJobState.FAILED -> AutomationRunState.Failed
             }
-            AutomationJobState.FAILED -> AutomationRunState.Failed
         }
         return AutomationRunUi(
             id = id,
@@ -1599,6 +1653,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             detail = details,
             timeText = formatServerTime(createdAt),
             state = uiState,
+            canRetry = supersededAt == null &&
+                (state == AutomationJobState.FAILED || state == AutomationJobState.RETRY_WAIT),
         )
     }
 

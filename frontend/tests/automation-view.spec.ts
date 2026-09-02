@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { AutomationPolicy, AutomationRun } from '../src/types'
+import type { AutomationJob, AutomationPolicy, AutomationRun } from '../src/types'
 import AutomationView from '../src/views/AutomationView.vue'
 
 const mocks = vi.hoisted(() => ({
@@ -56,6 +56,29 @@ function automationRun(overrides: Partial<AutomationRun> = {}): AutomationRun {
     created_at: '2026-08-25T00:00:00Z',
     started_at: null,
     finished_at: null,
+    ...overrides,
+  }
+}
+
+function automationJob(overrides: Partial<AutomationJob> = {}): AutomationJob {
+  return {
+    id: 'job-1',
+    run_id: 'run-old',
+    media_id: 'media-1',
+    media_title: 'Retry Movie',
+    state: 'FAILED',
+    search_id: null,
+    selected_candidate_id: null,
+    download_id: null,
+    retry_of_job_id: null,
+    trigger: 'manual',
+    attempt_count: 1,
+    next_attempt_at: null,
+    decision: {},
+    error_message: 'PT 搜索失败',
+    created_at: '2026-08-25T00:00:00Z',
+    finished_at: '2026-08-25T00:00:01Z',
+    superseded_at: null,
     ...overrides,
   }
 }
@@ -159,6 +182,51 @@ describe('automation settings', () => {
     expect(mocks.runStatus).toHaveBeenCalledWith('run-1')
     expect(wrapper.text()).toContain('自动搜索完成：处理 4 项，成功 3 项，失败 1 项')
     expect(mocks.jobs).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('tracks the new run created by an immediate retry', async () => {
+    vi.useFakeTimers()
+    const failedJob = automationJob()
+    const retryJob = automationJob({
+      id: 'job-retry',
+      run_id: 'run-retry',
+      state: 'PENDING',
+      retry_of_job_id: failedJob.id,
+      error_message: null,
+      finished_at: null,
+    })
+    mocks.jobs.mockResolvedValueOnce({
+      items: [failedJob], total: 1, page: 1, page_size: 30,
+    }).mockResolvedValue({
+      items: [retryJob, { ...failedJob, superseded_at: '2026-08-25T00:01:00Z' }],
+      total: 2,
+      page: 1,
+      page_size: 30,
+    })
+    mocks.retry.mockResolvedValue(retryJob)
+    mocks.runStatus
+      .mockRejectedValueOnce(new Error('temporary read failure'))
+      .mockResolvedValue(automationRun({ id: 'run-retry' }))
+
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+    const retryButton = wrapper.findAll('button').find((button) => button.text() === '重新执行')
+    expect(retryButton).toBeDefined()
+
+    await retryButton!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.retry).toHaveBeenCalledWith('job-1')
+    expect(mocks.runStatus).toHaveBeenCalledWith('run-retry')
+    expect(wrapper.text()).toContain('失败任务已立即开始重试')
+    expect(wrapper.text()).toContain('无法读取自动搜索进度，将继续重试')
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    await flushPromises()
+
+    expect(mocks.runStatus).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('后台执行中…')
     wrapper.unmount()
   })
 

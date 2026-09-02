@@ -118,6 +118,7 @@ async def test_auth_success_search_and_download_url_is_discarded() -> None:
     candidate = results[0]
     assert candidate.season == 1
     assert candidate.episodes == [3, 4, 5]
+    assert candidate.collection_type == "episode"
     assert candidate.details_ref.startswith("avistaz:details:")
     assert candidate.hit_and_run is True
     serialized = candidate.model_dump_json().casefold()
@@ -161,9 +162,20 @@ def test_search_params_use_avistaz_numeric_contract(
 
 
 def test_long_running_episode_number_is_parsed_from_release_title() -> None:
-    assert AvistaZAdapter._season_episodes(
-        "Long.Runner.S01E1473.1080p.WEB-DL"
-    ) == (1, [1473])
+    assert AvistaZAdapter._season_episodes("Long.Runner.S01E1473.1080p.WEB-DL") == (1, [1473])
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Show.S01.E01.1080p.WEB-DL", (1, [1])),
+        ("Show.S01.E01-E03.1080p.WEB-DL", (1, [1, 2, 3])),
+    ],
+)
+def test_episode_parser_accepts_common_separators(
+    title: str, expected: tuple[int, list[int]]
+) -> None:
+    assert AvistaZAdapter._season_episodes(title) == expected
 
 
 @pytest.mark.asyncio
@@ -172,9 +184,7 @@ async def test_search_404_is_an_empty_result() -> None:
     respx.post(f"{BASE}/api/v1/jackett/auth").mock(
         return_value=httpx.Response(200, json={"token": "memory-token"})
     )
-    route = respx.get(f"{BASE}/api/v1/jackett/torrents").mock(
-        return_value=httpx.Response(404)
-    )
+    route = respx.get(f"{BASE}/api/v1/jackett/torrents").mock(return_value=httpx.Response(404))
     avistaz = adapter()
     try:
         assert await avistaz.search(TorrentSearchRequest(tmdb=123)) == []
@@ -196,9 +206,7 @@ async def test_search_non_404_http_error_is_not_treated_as_empty(
     respx.post(f"{BASE}/api/v1/jackett/auth").mock(
         return_value=httpx.Response(200, json={"token": "memory-token"})
     )
-    respx.get(f"{BASE}/api/v1/jackett/torrents").mock(
-        return_value=httpx.Response(status_code)
-    )
+    respx.get(f"{BASE}/api/v1/jackett/torrents").mock(return_value=httpx.Response(status_code))
     avistaz = adapter()
     try:
         with pytest.raises(AppError) as caught:
@@ -719,6 +727,8 @@ async def test_authorization_header_is_not_forwarded_to_another_origin() -> None
         "/api/v1/jackett/auth",
         "/api/v1/jackett/torrents",
     ]
+
+
 @pytest.mark.asyncio
 async def test_default_policy_blocks_real_avistaz_network() -> None:
     avistaz = adapter()

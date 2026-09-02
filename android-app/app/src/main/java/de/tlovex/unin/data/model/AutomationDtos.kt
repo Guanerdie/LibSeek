@@ -67,6 +67,7 @@ data class AutomationJobDto(
     @SerializedName("search_id") val searchId: String?,
     @SerializedName("selected_candidate_id") val selectedCandidateId: String?,
     @SerializedName("download_id") val downloadId: String?,
+    @SerializedName("retry_of_job_id") val retryOfJobId: String? = null,
     val trigger: String,
     @SerializedName("attempt_count") val attemptCount: Int,
     @SerializedName("next_attempt_at") val nextAttemptAt: String?,
@@ -74,6 +75,7 @@ data class AutomationJobDto(
     @SerializedName("error_message") val errorMessage: String?,
     @SerializedName("created_at") val createdAt: String,
     @SerializedName("finished_at") val finishedAt: String?,
+    @SerializedName("superseded_at") val supersededAt: String? = null,
 )
 
 data class AutomationJobPageDto(

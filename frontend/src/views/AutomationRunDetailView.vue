@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, automationApi } from '../api/client'
 import PageHeader from '../components/PageHeader.vue'
@@ -11,6 +11,7 @@ import type { AutomationJob, AutomationRun } from '../types'
 import { formatShanghai, statusLabel } from '../utils/format'
 
 const route = useRoute()
+const router = useRouter()
 const runId = computed(() => String(route.params.runId))
 const run = ref<AutomationRun | null>(null)
 const jobs = ref<AutomationJob[]>([])
@@ -26,6 +27,7 @@ const retryingJobId = ref<string | null>(null)
 const pollIntervalMs = 2_000
 let pollTimer: ReturnType<typeof globalThis.setTimeout> | undefined
 let mounted = false
+let waitingForRetryRun = false
 
 const active = computed(() => run.value?.state === 'PENDING' || run.value?.state === 'RUNNING')
 const completed = computed(() => {
@@ -50,7 +52,7 @@ function stopPolling(): void {
 }
 
 function schedulePoll(): void {
-  if (!mounted || !active.value) return
+  if (!mounted || (!active.value && !waitingForRetryRun)) return
   pollTimer = globalThis.setTimeout(() => void poll(), pollIntervalMs)
 }
 
@@ -80,6 +82,7 @@ async function load(): Promise<void> {
       loadJobs(1),
     ])
     run.value = runResponse
+    waitingForRetryRun = false
     if (active.value) schedulePoll()
   } catch (caught) {
     error.value = message(caught, '无法读取自动化执行详情')
@@ -89,10 +92,11 @@ async function load(): Promise<void> {
 }
 
 async function poll(): Promise<void> {
-  if (!mounted || !active.value) return
+  if (!mounted || (!active.value && !waitingForRetryRun)) return
   pollTimer = undefined
   try {
     run.value = await automationApi.runStatus(runId.value)
+    waitingForRetryRun = false
     await loadJobs(jobsPage.value)
     if (active.value) schedulePoll()
   } catch (caught) {
@@ -113,9 +117,13 @@ async function retry(job: AutomationJob): Promise<void> {
   feedback.value = null
   try {
     const updated = await automationApi.retry(job.id)
-    const index = jobs.value.findIndex((item) => item.id === updated.id)
-    if (index >= 0) jobs.value[index] = updated
-    feedback.value = '失败任务已进入重试队列'
+    await router.push(`/automation/runs/${updated.run_id}`)
+    stopPolling()
+    run.value = null
+    jobs.value = []
+    waitingForRetryRun = true
+    feedback.value = '失败任务已立即开始重试'
+    void poll()
   } catch (caught) {
     error.value = message(caught, '无法重新执行任务')
   } finally {
@@ -189,7 +197,10 @@ onBeforeUnmount(() => {
                 <h3>{{ job.media_title }}</h3>
                 <p class="muted">{{ formatShanghai(job.created_at) }} · 尝试 {{ job.attempt_count }} 次</p>
               </div>
-              <StatusPill :status="job.state" :label="statusLabel(job.state)" />
+              <StatusPill
+                :status="job.superseded_at ? 'SUPERSEDED' : job.state"
+                :label="statusLabel(job.superseded_at ? 'SUPERSEDED' : job.state)"
+              />
             </div>
             <div class="automation-job-meta">
               <span v-if="job.decision.candidate_count !== undefined">候选 {{ job.decision.candidate_count }} 个</span>
@@ -203,7 +214,7 @@ onBeforeUnmount(() => {
             </ul>
             <div class="automation-job-actions">
               <button
-                v-if="job.state === 'FAILED' || job.state === 'RETRY_WAIT'"
+                v-if="(job.state === 'FAILED' || job.state === 'RETRY_WAIT') && !job.superseded_at"
                 class="button secondary small"
                 type="button"
                 :disabled="retryingJobId !== null"

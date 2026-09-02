@@ -379,7 +379,8 @@ async def retry_automation_job(
     job_id: str, session: Session, principal: OperatorPrincipal
 ) -> AutomationJobView:
     del principal
-    job = await automation.retry_job(session, job_id)
+    job, run = await automation.retry_job(session, job_id)
+    queue_manual_automation_run(run.id)
     media = await session.get(LibraryMediaItem, job.media_id)
     if media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)

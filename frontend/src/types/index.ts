@@ -305,6 +305,7 @@ export interface AutomationJob {
   search_id: string | null
   selected_candidate_id: string | null
   download_id: string | null
+  retry_of_job_id: string | null
   trigger: string
   attempt_count: number
   next_attempt_at: string | null
@@ -320,6 +321,7 @@ export interface AutomationJob {
   error_message: string | null
   created_at: string
   finished_at: string | null
+  superseded_at: string | null
 }
 
 export type AutomationRunState = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'

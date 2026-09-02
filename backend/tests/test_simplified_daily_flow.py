@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
 from typing import cast
 
 import bencodepy  # type: ignore[import-untyped]
@@ -12,6 +13,7 @@ from app.adapters.base import MediaSourceAdapter, MetadataProvider, PtSiteAdapte
 from app.adapters.downloaders.qbittorrent import QbAddResult, QbittorrentAdapter
 from app.adapters.pt_sites.avistaz import AvistaZMockAdapter
 from app.core.config import Settings
+from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import IdentityConfidence, MediaType, MetadataStatus
 from app.schemas.adapters import (
@@ -619,6 +621,34 @@ async def test_existing_adapters_feed_the_simplified_domain(session_factory) -> 
         assert candidate.score > 0.5
         assert candidate.download_factor == 0
         assert candidate.season_coverage == [1]
+
+
+@pytest.mark.asyncio
+async def test_full_sync_does_not_reset_unchanged_media_scheduling_order(
+    session_factory,
+) -> None:
+    old_timestamp = utc_now() - timedelta(days=10)
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source="nextfind",
+            source_item_id="source-tv-1",
+            media_type=MediaType.TV,
+            tmdb_id=300,
+            title="A Missing Show",
+            country_codes=["JP"],
+            original_language="ja",
+            state=MediaState.READY,
+            discovered_at=old_timestamp,
+            updated_at=old_timestamp,
+        )
+        session.add(media)
+        await session.commit()
+
+        await sync_nextfind(session, FakeNextFind())
+        await session.refresh(media)
+
+        assert media.discovered_at.replace(tzinfo=old_timestamp.tzinfo) == old_timestamp
+        assert media.updated_at.replace(tzinfo=old_timestamp.tzinfo) == old_timestamp
 
 
 @pytest.mark.asyncio

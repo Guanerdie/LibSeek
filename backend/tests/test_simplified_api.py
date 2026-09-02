@@ -481,7 +481,9 @@ async def test_latest_automation_run_returns_null_when_no_run_exists(
 @pytest.mark.asyncio
 async def test_failed_automation_job_can_be_explicitly_retried(
     session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    queued_runs: list[str] = []
     async with session_factory() as session:
         media = LibraryMediaItem(
             source_item_id="api-automation-retry",
@@ -499,7 +501,7 @@ async def test_failed_automation_job_can_be_explicitly_retried(
             attempt_count=3,
             error_message="PT 配置错误",
         )
-        session.add(job)
+        session.add_all([job, AutomationPolicy(id="default", enabled=True)])
         await session.commit()
         job_id = job.id
 
@@ -518,6 +520,9 @@ async def test_failed_automation_job_can_be_explicitly_retried(
 
     app.dependency_overrides[get_session] = session_override
     app.dependency_overrides[get_operator_principal] = operator_override
+    monkeypatch.setattr(
+        simple_routes, "queue_manual_automation_run", queued_runs.append
+    )
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
@@ -529,9 +534,16 @@ async def test_failed_automation_job_can_be_explicitly_retried(
     assert response.status_code == 200
     payload = response.json()
     assert payload["media_title"] == "Retry from API"
-    assert payload["state"] == "RETRY_WAIT"
+    assert payload["state"] == "PENDING"
     assert payload["attempt_count"] == 0
-    assert payload["next_attempt_at"] is not None
+    assert payload["next_attempt_at"] is None
+    assert payload["retry_of_job_id"] == job_id
+    assert queued_runs == [payload["run_id"]]
+
+    async with session_factory() as session:
+        source = await session.get(AutomationJob, job_id)
+        assert source is not None
+        assert source.superseded_at is not None
 
 
 @pytest.mark.asyncio

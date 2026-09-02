@@ -60,6 +60,25 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         column["name"]: column for column in inspector.get_columns("release_candidates")
     }
     assert candidate_columns["download_factor"]["nullable"] is True
+    assert candidate_columns["collection_type"]["nullable"] is True
+    assert candidate_columns["file_count"]["nullable"] is True
+    automation_job_columns = {
+        column["name"]: column for column in inspector.get_columns("automation_jobs")
+    }
+    assert automation_job_columns["retry_of_job_id"]["nullable"] is True
+    assert automation_job_columns["superseded_at"]["nullable"] is True
+    assert (
+        ("retry_of_job_id",),
+        "automation_jobs",
+        "SET NULL",
+    ) in {
+        (
+            tuple(item["constrained_columns"]),
+            item["referred_table"],
+            item["options"].get("ondelete"),
+        )
+        for item in inspector.get_foreign_keys("automation_jobs")
+    }
     download_columns = {
         column["name"]: column for column in inspector.get_columns("downloads")
     }
@@ -87,6 +106,13 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         column["name"] for column in inspector.get_columns("release_candidates")
     }
     assert "download_factor" not in candidate_columns
+    assert "collection_type" not in candidate_columns
+    assert "file_count" not in candidate_columns
+    automation_job_columns = {
+        column["name"] for column in inspector.get_columns("automation_jobs")
+    }
+    assert "retry_of_job_id" not in automation_job_columns
+    assert "superseded_at" not in automation_job_columns
     download_checks = {
         constraint["name"] for constraint in inspector.get_check_constraints("downloads")
     }

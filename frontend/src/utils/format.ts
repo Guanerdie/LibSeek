@@ -38,6 +38,7 @@ export function statusLabel(status: string): string {
       SUCCEEDED: '已完成',
       FAILED: '失败',
       RETRY_WAIT: '等待重试',
+      SUPERSEDED: '已由新任务接替',
       CANCELLED: '已取消',
       METADATA_PENDING: '等待元数据',
       PT_SEARCH_PENDING: '等待 PT 搜索',

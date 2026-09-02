@@ -46,16 +46,11 @@ _logger = logging.getLogger(__name__)
 _HARD_CORRECTNESS_WARNINGS = {
     "ID_MISMATCH",
     "ID_UNVERIFIED",
+    "TV_PACK_UNVERIFIED",
     "YEAR_MISMATCH",
-    "PARTIAL_PACK",
 }
 _EXACT_IDENTITY_REASONS = {"TMDB_ID_EXACT", "IMDB_ID_EXACT"}
 _FALLBACK_IDENTITY_REASONS = {"TITLE_EXACT", "YEAR_MATCH", "MEDIA_TYPE_MATCH"}
-_TV_COVERAGE_REASONS = {
-    "EPISODE_COVERAGE_EXACT",
-    "EPISODE_COVERAGE_COMPLETE",
-    "SEASON_PACK_COVERS_TARGET_SEASON",
-}
 
 
 async def get_policy(session: AsyncSession) -> AutomationPolicy:
@@ -74,9 +69,7 @@ async def get_policy(session: AsyncSession) -> AutomationPolicy:
     return policy
 
 
-async def update_policy(
-    session: AsyncSession, payload: AutomationPolicyUpdate
-) -> AutomationPolicy:
+async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) -> AutomationPolicy:
     policy = await get_policy(session)
     policy.enabled = payload.enabled
     policy.dry_run = payload.dry_run
@@ -124,8 +117,7 @@ async def list_jobs(
 
     total = await session.scalar(count_statement)
     rows = await session.execute(
-        jobs_statement
-        .order_by(AutomationJob.created_at.desc(), AutomationJob.id.desc())
+        jobs_statement.order_by(AutomationJob.created_at.desc(), AutomationJob.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -172,9 +164,7 @@ async def list_run_jobs(
     return await list_jobs(session, page=page, page_size=page_size, run_id=run_id)
 
 
-async def create_automation_run(
-    session: AsyncSession, *, trigger: str
-) -> AutomationRun:
+async def create_automation_run(session: AsyncSession, *, trigger: str) -> AutomationRun:
     async with _run_creation_lock:
         policy = await get_policy(session)
         if not policy.enabled:
@@ -182,9 +172,7 @@ async def create_automation_run(
         active = await session.scalar(
             select(AutomationRun)
             .where(
-                AutomationRun.state.in_(
-                    (AutomationRunState.PENDING, AutomationRunState.RUNNING)
-                )
+                AutomationRun.state.in_((AutomationRunState.PENDING, AutomationRunState.RUNNING))
             )
             .order_by(AutomationRun.created_at.desc())
             .limit(1)
@@ -218,27 +206,60 @@ async def get_latest_automation_run(session: AsyncSession) -> AutomationRun | No
     return run
 
 
-async def retry_job(session: AsyncSession, job_id: str) -> AutomationJob:
-    job = await session.get(AutomationJob, job_id)
-    if job is None:
-        raise AppError("AUTOMATION_JOB_NOT_FOUND", "自动化任务不存在", status_code=404)
-    if job.state not in {
-        AutomationJobState.FAILED,
-        AutomationJobState.RETRY_WAIT,
-    }:
-        raise AppError(
-            "AUTOMATION_JOB_NOT_FAILED",
-            "只有失败或等待重试的任务可以重新执行",
-            status_code=409,
+async def retry_job(session: AsyncSession, job_id: str) -> tuple[AutomationJob, AutomationRun]:
+    """Create an immediately executable retry run without rewriting history."""
+
+    async with _run_creation_lock:
+        source = await session.get(AutomationJob, job_id)
+        if source is None:
+            raise AppError("AUTOMATION_JOB_NOT_FOUND", "自动化任务不存在", status_code=404)
+        if (
+            source.state
+            not in {
+                AutomationJobState.FAILED,
+                AutomationJobState.RETRY_WAIT,
+            }
+            or source.superseded_at is not None
+        ):
+            raise AppError(
+                "AUTOMATION_JOB_NOT_FAILED",
+                "只有尚未重试的失败或等待任务可以重新执行",
+                status_code=409,
+            )
+
+        policy = await get_policy(session)
+        if not policy.enabled:
+            raise AppError("AUTOMATION_DISABLED", "请先启用自动化策略", status_code=409)
+        active = await session.scalar(
+            select(AutomationRun)
+            .where(
+                AutomationRun.state.in_((AutomationRunState.PENDING, AutomationRunState.RUNNING))
+            )
+            .order_by(AutomationRun.created_at.desc())
+            .limit(1)
         )
-    job.state = AutomationJobState.RETRY_WAIT
-    job.attempt_count = 0
-    job.next_attempt_at = utc_now()
-    job.error_message = None
-    job.finished_at = None
-    await session.commit()
-    await session.refresh(job)
-    return job
+        if active is not None:
+            raise AppError(
+                "AUTOMATION_RUN_IN_PROGRESS",
+                "已有自动化运行正在执行，请等待完成",
+                status_code=409,
+            )
+
+        run = AutomationRun(trigger="manual_retry", created_count=1)
+        session.add(run)
+        await session.flush()
+        retry = _copy_job_for_run(
+            source,
+            run_id=run.id,
+            trigger="manual_retry",
+            reset_attempts=True,
+        )
+        session.add(retry)
+        _supersede_job(source)
+        await session.commit()
+        await session.refresh(retry)
+        await session.refresh(run)
+        return retry, run
 
 
 def policy_is_due(policy: AutomationPolicy, now: datetime | None = None) -> bool:
@@ -277,28 +298,49 @@ async def run_automation(
             )
 
         now = utc_now()
+        run_id = run_record.id if run_record is not None else str(uuid4())
+        retry_only = run_record is not None and run_record.trigger == "manual_retry"
         if run_record is not None:
             run_record.state = AutomationRunState.RUNNING
             run_record.started_at = now
             run_record.error_message = None
             await session.commit()
-        policy.last_run_at = now
-        queued_jobs = list(
-            await session.scalars(
-                select(AutomationJob)
-                .where(
-                    (AutomationJob.state == AutomationJobState.PENDING)
-                    | (
-                        (AutomationJob.state == AutomationJobState.RETRY_WAIT)
-                        & (AutomationJob.next_attempt_at <= now)
-                    )
+        if not retry_only:
+            policy.last_run_at = now
+        queued_statement = select(AutomationJob).where(
+            AutomationJob.superseded_at.is_(None),
+            (
+                (AutomationJob.state == AutomationJobState.PENDING)
+                | (
+                    (AutomationJob.state == AutomationJobState.RETRY_WAIT)
+                    & (AutomationJob.next_attempt_at <= now)
                 )
-                .order_by(AutomationJob.created_at)
-                .limit(limit)
-            )
+            ),
         )
+        if retry_only:
+            # Clicking "retry" creates a run for exactly one copied job.  It
+            # must not also pick up unrelated due jobs or start a fresh scan.
+            queued_statement = queued_statement.where(AutomationJob.run_id == run_id)
+        queued_sources = list(
+            await session.scalars(queued_statement.order_by(AutomationJob.created_at).limit(limit))
+        )
+        queued_jobs: list[AutomationJob] = []
+        for source in queued_sources:
+            if run_record is None or source.run_id == run_id:
+                queued_jobs.append(source)
+                continue
+            retry = _copy_job_for_run(
+                source,
+                run_id=run_id,
+                trigger=trigger,
+                reset_attempts=False,
+            )
+            session.add(retry)
+            _supersede_job(source)
+            queued_jobs.append(retry)
         retry_media_ids = {job.media_id for job in queued_jobs}
         unavailable_media_ids = select(AutomationJob.media_id).where(
+            AutomationJob.superseded_at.is_(None),
             AutomationJob.state.in_(
                 (
                     AutomationJobState.PENDING,
@@ -306,9 +348,9 @@ async def run_automation(
                     AutomationJobState.RETRY_WAIT,
                     AutomationJobState.FAILED,
                 )
-            )
+            ),
         )
-        remaining = max(0, limit - len(queued_jobs))
+        remaining = 0 if retry_only else max(0, limit - len(queued_jobs))
         media_types = [MediaType(value) for value in policy.media_types]
         statement = (
             select(LibraryMediaItem)
@@ -330,15 +372,10 @@ async def run_automation(
         if retry_media_ids:
             statement = statement.where(LibraryMediaItem.id.not_in(retry_media_ids))
         if policy.scope_mode == "selected":
-            statement = statement.where(
-                LibraryMediaItem.id.in_(policy.selected_media_ids)
-            )
+            statement = statement.where(LibraryMediaItem.id.in_(policy.selected_media_ids))
         candidates = list(await session.scalars(statement)) if remaining else []
-        media = [item for item in candidates if _media_in_policy_scope(policy, item)][
-            :remaining
-        ]
+        media = [item for item in candidates if _media_in_policy_scope(policy, item)][:remaining]
 
-        run_id = run_record.id if run_record is not None else str(uuid4())
         new_jobs = [
             AutomationJob(run_id=run_id, media_id=item.id, trigger=trigger) for item in media
         ]
@@ -379,7 +416,8 @@ async def run_automation(
             run_record.succeeded_count = succeeded
             run_record.failed_count = failed
             run_record.deferred_count = deferred
-            run_record.state = AutomationRunState.SUCCEEDED
+            run_record.state = AutomationRunState.FAILED if failed else AutomationRunState.SUCCEEDED
+            run_record.error_message = f"{failed} 个任务执行失败" if failed else None
             run_record.finished_at = utc_now()
             await session.commit()
         return run_id, len(jobs), succeeded, failed
@@ -716,7 +754,10 @@ async def _execute_job(
         policy = stored_policy
         job.error_message = exc.message if isinstance(exc, AppError) else "自动搜索或下载失败"
         job.finished_at = utc_now()
-        if isinstance(exc, AppError) and exc.retryable and job.attempt_count < policy.max_attempts:
+        will_retry = (
+            isinstance(exc, AppError) and exc.retryable and job.attempt_count < policy.max_attempts
+        )
+        if will_retry:
             delay = min(
                 policy.retry_delay_minutes * (2 ** (job.attempt_count - 1)),
                 7 * 24 * 60,
@@ -729,21 +770,44 @@ async def _execute_job(
             if not isinstance(exc, AppError):
                 _logger.exception("Unexpected automation job failure", exc_info=exc)
         await session.commit()
-        return False
+        return None if will_retry else False
 
 
-def _media_in_policy_scope(
-    policy: AutomationPolicy, media: LibraryMediaItem
-) -> bool:
+def _copy_job_for_run(
+    source: AutomationJob,
+    *,
+    run_id: str,
+    trigger: str,
+    reset_attempts: bool,
+) -> AutomationJob:
+    return AutomationJob(
+        run_id=run_id,
+        media_id=source.media_id,
+        state=AutomationJobState.PENDING,
+        search_id=source.search_id,
+        selected_candidate_id=source.selected_candidate_id,
+        download_id=source.download_id,
+        retry_of_job_id=source.id,
+        trigger=trigger,
+        attempt_count=0 if reset_attempts else source.attempt_count,
+        decision=dict(source.decision or {}),
+    )
+
+
+def _supersede_job(source: AutomationJob) -> None:
+    """Close the queue entry without rewriting the original run's outcome."""
+
+    source.superseded_at = utc_now()
+
+
+def _media_in_policy_scope(policy: AutomationPolicy, media: LibraryMediaItem) -> bool:
     if policy.scope_mode == "selected":
         return media.id in set(policy.selected_media_ids)
     if not policy.regions:
         return True
     allowed_regions = {NextFindRegion(value) for value in policy.regions}
     return bool(
-        allowed_regions.intersection(
-            nextfind_regions(media.country_codes, media.original_language)
-        )
+        allowed_regions.intersection(nextfind_regions(media.country_codes, media.original_language))
     )
 
 
@@ -756,9 +820,9 @@ async def _budget_reason(
     exclude_download_id: str | None = None,
 ) -> str | None:
     now_shanghai = utc_now().astimezone(_SHANGHAI)
-    day_start = datetime.combine(
-        now_shanghai.date(), datetime.min.time(), _SHANGHAI
-    ).astimezone(UTC)
+    day_start = datetime.combine(now_shanghai.date(), datetime.min.time(), _SHANGHAI).astimezone(
+        UTC
+    )
     automated_download_ids = select(AutomationJob.download_id).where(
         AutomationJob.download_id.is_not(None)
     )
@@ -768,9 +832,7 @@ async def _budget_reason(
     ]
     if exclude_download_id is not None:
         filters.append(Download.id != exclude_download_id)
-    count = await session.scalar(
-        select(func.count()).select_from(Download).where(*filters)
-    )
+    count = await session.scalar(select(func.count()).select_from(Download).where(*filters))
     if int(count or 0) >= policy.daily_download_limit:
         return "已达到每日自动下载数量上限"
     if policy.daily_download_bytes is not None:
@@ -792,9 +854,7 @@ async def _budget_reason(
             .where(*filters)
         )
         candidate_size = (
-            candidate_size_bytes
-            if candidate_size_bytes is not None
-            else candidate.size_bytes or 0
+            candidate_size_bytes if candidate_size_bytes is not None else candidate.size_bytes or 0
         )
         if int(used or 0) + candidate_size > policy.daily_download_bytes:
             return "将超过每日自动下载体积上限"
@@ -826,11 +886,9 @@ def _choose_candidate(
             reasons.append("无法验证站点提供的 TMDB 或 IMDb")
         if "YEAR_MISMATCH" in hard_warnings and not exact_identity:
             reasons.append("资源年份与目标影视不匹配")
-        if "PARTIAL_PACK" in hard_warnings:
-            reasons.append("资源未完整覆盖目标季集")
-        if not exact_identity and not {"ID_MISMATCH", "ID_UNVERIFIED"}.intersection(
-            warning_set
-        ):
+        if "PARTIAL_PACK" in warning_set and media_type != MediaType.TV:
+            reasons.append("资源不是完整资源包")
+        if not exact_identity and not {"ID_MISMATCH", "ID_UNVERIFIED"}.intersection(warning_set):
             missing_fallback = _FALLBACK_IDENTITY_REASONS - match_reason_set
             if "TITLE_EXACT" in missing_fallback:
                 reasons.append("缺少精确 ID，且资源标题未与影视名称或别名精确匹配")
@@ -838,10 +896,8 @@ def _choose_candidate(
                 reasons.append("缺少精确 ID，且无法确认资源年份匹配")
             if "MEDIA_TYPE_MATCH" in missing_fallback:
                 reasons.append("缺少精确 ID，且无法确认影视类型匹配")
-        if media_type == MediaType.TV and not _TV_COVERAGE_REASONS.intersection(
-            match_reason_set
-        ):
-            reasons.append("无法确认资源完整覆盖目标季集")
+        if media_type == MediaType.TV and not _tv_pack_rank(candidate):
+            reasons.append("无法确认资源为全集包或完整季包")
         if candidate.score < policy.minimum_score:
             reasons.append("评分低于策略门槛")
         if (candidate.seeders or 0) <= 0:
@@ -857,6 +913,12 @@ def _choose_candidate(
         ):
             reasons.append("资源体积超过策略上限")
         soft_warnings = warning_set - _HARD_CORRECTNESS_WARNINGS
+        if media_type == MediaType.TV:
+            # Older stored candidates may still carry missing-episode warnings.
+            # They are irrelevant when the operator replaces the local TV item
+            # with a complete series or season pack.
+            soft_warnings.discard("PARTIAL_PACK")
+            soft_warnings.discard("EPISODE_OVERLAP")
         if soft_warnings and not policy.allow_warnings:
             reasons.append("候选包含风险提示")
         if reasons:
@@ -869,7 +931,11 @@ def _choose_candidate(
     if not eligible:
         return None, rejected
 
-    ranked = sorted(eligible, key=_candidate_rank, reverse=True)
+    ranked = sorted(
+        eligible,
+        key=lambda candidate: _candidate_rank(candidate, media_type=media_type),
+        reverse=True,
+    )
     selected = ranked[0]
     rejected.extend(
         {
@@ -895,6 +961,8 @@ def _refresh_candidate(target: ReleaseCandidate, source: ReleaseCandidate) -> No
         "source",
         "codec",
         "download_factor",
+        "collection_type",
+        "file_count",
         "season_coverage",
         "episode_coverage",
         "score",
@@ -905,22 +973,17 @@ def _refresh_candidate(target: ReleaseCandidate, source: ReleaseCandidate) -> No
         setattr(target, field, getattr(source, field))
 
 
-def _candidate_rank(candidate: ReleaseCandidate) -> tuple[int | float, ...]:
+def _candidate_rank(
+    candidate: ReleaseCandidate, *, media_type: MediaType
+) -> tuple[int | float, ...]:
     reasons = set(candidate.reasons or [])
     identity_rank = 2 if _EXACT_IDENTITY_REASONS.intersection(reasons) else 1
-    if "EPISODE_COVERAGE_EXACT" in reasons:
-        coverage_rank = 3
-    elif "EPISODE_COVERAGE_COMPLETE" in reasons:
-        coverage_rank = 2
-    elif "SEASON_PACK_COVERS_TARGET_SEASON" in reasons:
-        coverage_rank = 1
-    else:
-        coverage_rank = 0
+    coverage_rank = _tv_pack_rank(candidate) if media_type == MediaType.TV else 0
     seeders = candidate.seeders or 0
     seeder_health = 2 if seeders >= 3 else 1
     download_factor = candidate.download_factor
-    promotion_rank = 2 if download_factor == 0 else int(
-        download_factor is not None and download_factor < 1
+    promotion_rank = (
+        2 if download_factor == 0 else int(download_factor is not None and download_factor < 1)
     )
     return (
         identity_rank,
@@ -933,6 +996,104 @@ def _candidate_rank(candidate: ReleaseCandidate) -> tuple[int | float, ...]:
         seeders,
         candidate.score,
     )
+
+
+def _tv_pack_rank(candidate: ReleaseCandidate) -> int:
+    collection_type = re.sub(
+        r"[^a-z0-9]+", "_", (candidate.collection_type or "").strip().casefold()
+    ).strip("_")
+    normalized_raw_title = candidate.title.casefold()
+    normalized_title = re.sub(r"[^\w]+", " ", normalized_raw_title).strip()
+    title_words = set(normalized_title.split())
+    title_has_episode = bool(re.search(r"\bS\d{1,2}[ ._-]*E\d{1,5}\b", normalized_raw_title, re.I))
+    title_has_episode_range = bool(
+        re.search(
+            r"\bS\d{1,2}[ ._-]*E\d{1,5}[ ._]*[-~–—][ ._]*E?\d{1,5}\b",
+            normalized_raw_title,
+            re.I,
+        )
+    )
+    if len(candidate.episode_coverage or []) == 1 or (
+        title_has_episode and not title_has_episode_range
+    ):
+        return 0
+
+    title_is_non_pack = any(
+        _title_has_marker(normalized_title, marker)
+        for marker in (
+            "bonus",
+            "extra",
+            "extras",
+            "featurette",
+            "incomplete",
+            "partial",
+            "sample",
+            "special",
+            "specials",
+            "trailer",
+            "特典",
+            "特辑",
+            "花絮",
+            "预告",
+        )
+    )
+    if title_is_non_pack:
+        return 0
+
+    reasons = set(candidate.reasons or [])
+    if "TV_COMPLETE_SERIES_PACK" in reasons:
+        return 2
+    if "TV_COMPLETE_SEASON_PACK" in reasons:
+        return 1
+
+    title_is_series = any(
+        _title_has_marker(normalized_title, marker)
+        for marker in ("complete series", "series pack", "box set", "boxset", "全集", "全套")
+    )
+    title_is_season = any(
+        _title_has_marker(normalized_title, marker)
+        for marker in ("complete season", "full season", "season pack", "全季")
+    )
+    if title_is_series:
+        return 2
+    if title_is_season:
+        return 1
+    if re.search(r"\bS\d{1,2}\s*[-~–—]\s*S\d{1,2}\b", normalized_raw_title, re.I):
+        return 2
+    if "complete" in title_words or "完整版" in normalized_title:
+        return 1 if candidate.season_coverage else 2
+    if candidate.episode_coverage:
+        return 0
+    if candidate.file_count is not None and candidate.file_count <= 1:
+        return 0
+    if collection_type in {
+        "box_set",
+        "boxset",
+        "collection",
+        "complete",
+        "complete_series",
+        "full_series",
+        "series",
+        "series_pack",
+    }:
+        return 2
+    if collection_type in {
+        "complete_season",
+        "full_season",
+        "pack",
+        "season",
+        "season_pack",
+    }:
+        return 1
+    if candidate.season_coverage:
+        return 1
+    return 0
+
+
+def _title_has_marker(normalized_title: str, marker: str) -> bool:
+    if marker.isascii():
+        return bool(re.search(rf"(?:^|\s){re.escape(marker)}(?:$|\s)", normalized_title))
+    return marker in normalized_title
 
 
 def _resolution_rank(value: str | None) -> int:

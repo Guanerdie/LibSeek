@@ -208,6 +208,8 @@ class ReleaseCandidate(Base):
     source: Mapped[str | None] = mapped_column(String(80))
     codec: Mapped[str | None] = mapped_column(String(80))
     download_factor: Mapped[float | None] = mapped_column(Float)
+    collection_type: Mapped[str | None] = mapped_column(String(32))
+    file_count: Mapped[int | None] = mapped_column(Integer)
     season_coverage: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     episode_coverage: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
@@ -354,6 +356,9 @@ class AutomationJob(Base):
     download_id: Mapped[str | None] = mapped_column(
         ForeignKey("downloads.id", ondelete="SET NULL"), index=True
     )
+    retry_of_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("automation_jobs.id", ondelete="SET NULL"), index=True
+    )
     trigger: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -363,6 +368,7 @@ class AutomationJob(Base):
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class ActivityLog(Base):

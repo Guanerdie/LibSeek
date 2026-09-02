@@ -81,9 +81,7 @@ class AvistaZRawCandidate(BaseModel):
     codec: Any = Field(default=None, validation_alias=AliasChoices("codec", "format"))
     hdr: Any = None
     audio: Any = None
-    subtitles: Any = Field(
-        default=None, validation_alias=AliasChoices("subtitles", "subtitle")
-    )
+    subtitles: Any = Field(default=None, validation_alias=AliasChoices("subtitles", "subtitle"))
     size_bytes: Any = Field(
         default=None, validation_alias=AliasChoices("size_bytes", "size", "file_size")
     )
@@ -178,9 +176,7 @@ class AvistaZAdapter(PtSiteAdapter):
         self._candidate_memory: dict[str, TorrentCandidate] = {}
         self._download_memory: dict[str, str] = {}
 
-    def set_before_request_guard(
-        self, guard: Callable[[], Awaitable[None]] | None
-    ) -> None:
+    def set_before_request_guard(self, guard: Callable[[], Awaitable[None]] | None) -> None:
         self.before_request = guard
 
     def manifest(self) -> AdapterManifest:
@@ -415,8 +411,10 @@ class AvistaZAdapter(PtSiteAdapter):
                     details={"upstream_status_code": response.status_code},
                 )
             lowered_type = response.content_type.casefold()
-            if "html" in lowered_type or "json" in lowered_type or not response.content.startswith(
-                b"d"
+            if (
+                "html" in lowered_type
+                or "json" in lowered_type
+                or not response.content.startswith(b"d")
             ):
                 raise AppError(
                     "AVISTAZ_TORRENT_INVALID_RESPONSE",
@@ -521,8 +519,8 @@ class AvistaZAdapter(PtSiteAdapter):
         season = self._integer(raw.season) or parsed_season
         episodes = self._episode_list(raw.episodes) or parsed_episodes
         collection_type = self._text(raw.collection_type)
-        if collection_type is None:
-            collection_type = "season" if season is not None and not episodes else "episode"
+        if collection_type is None and episodes:
+            collection_type = "episode"
         internal_ref = hashlib.sha256(f"avistaz|{torrent_id}".encode()).hexdigest()[:32]
         return TorrentCandidate(
             site_id="avistaz",
@@ -530,8 +528,7 @@ class AvistaZAdapter(PtSiteAdapter):
             release_title=release_title,
             details_ref=f"avistaz:details:{internal_ref}",
             media_type=media_type,
-            tmdb_id=self._integer(raw.tmdb_id)
-            or self._integer(nested.tmdb if nested else None),
+            tmdb_id=self._integer(raw.tmdb_id) or self._integer(nested.tmdb if nested else None),
             imdb_id=self._text(raw.imdb_id) or self._text(nested.imdb if nested else None),
             year=self._year(release_title),
             season=season,
@@ -550,9 +547,7 @@ class AvistaZAdapter(PtSiteAdapter):
             completed=self._integer(raw.completed),
             download_factor=self._number(raw.download_factor),
             upload_factor=self._number(raw.upload_factor),
-            hit_and_run=effective_hnr_rule(
-                "avistaz", self._boolean(raw.hit_and_run)
-            ).applies,
+            hit_and_run=effective_hnr_rule("avistaz", self._boolean(raw.hit_and_run)).applies,
             info_hash=self._text(raw.info_hash),
             published_at=self._datetime(raw.published_at),
         )
@@ -569,7 +564,9 @@ class AvistaZAdapter(PtSiteAdapter):
     @staticmethod
     def _season_episodes(title: str) -> tuple[int | None, list[int] | None]:
         match = re.search(
-            r"(?i)\bS(\d{1,2})(?:E(\d{1,5})(?:-?E?(\d{1,5}))?)?\b", title
+            r"(?i)\bS(\d{1,2})(?:[ ._-]*E(\d{1,5})"
+            r"(?:[ ._]*[-~–—][ ._]*E?(\d{1,5}))?)?\b",
+            title,
         )
         if match is None:
             return None, None
@@ -635,9 +632,7 @@ class AvistaZAdapter(PtSiteAdapter):
     def _string_list(value: Any) -> list[str] | None:
         if isinstance(value, list):
             result = [
-                text
-                for item in value
-                if (text := AvistaZAdapter._named_text(item)) is not None
+                text for item in value if (text := AvistaZAdapter._named_text(item)) is not None
             ]
             return result or None
         if isinstance(value, str):

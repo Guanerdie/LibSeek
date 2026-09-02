@@ -110,6 +110,8 @@ class CandidateView(BaseModel):
     source: str | None
     codec: str | None
     download_factor: float | None
+    collection_type: str | None
+    file_count: int | None
     season_coverage: list[int]
     episode_coverage: list[str]
     score: float
@@ -223,6 +225,7 @@ class AutomationJobView(BaseModel):
     search_id: str | None
     selected_candidate_id: str | None
     download_id: str | None
+    retry_of_job_id: str | None
     trigger: str
     attempt_count: int
     next_attempt_at: datetime | None
@@ -230,6 +233,7 @@ class AutomationJobView(BaseModel):
     error_message: str | None
     created_at: datetime
     finished_at: datetime | None
+    superseded_at: datetime | None
 
 
 class AutomationJobPage(BaseModel):

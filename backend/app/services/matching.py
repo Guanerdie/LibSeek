@@ -30,6 +30,55 @@ _RELEASE_BOUNDARY_TOKENS = {
     "av1",
 }
 
+_TV_COMPLETE_SERIES_MARKERS = (
+    "complete series",
+    "series pack",
+    "box set",
+    "boxset",
+    "全集",
+    "全套",
+)
+_TV_COMPLETE_SEASON_MARKERS = (
+    "complete season",
+    "full season",
+    "season pack",
+    "全季",
+)
+_TV_GENERIC_COMPLETE_MARKERS = ("完整版",)
+_TV_NON_PACK_MARKERS = (
+    "bonus",
+    "extra",
+    "extras",
+    "featurette",
+    "incomplete",
+    "partial",
+    "sample",
+    "special",
+    "specials",
+    "trailer",
+    "特典",
+    "特辑",
+    "花絮",
+    "预告",
+)
+_TV_SERIES_COLLECTION_TYPES = {
+    "box_set",
+    "boxset",
+    "collection",
+    "complete",
+    "complete_series",
+    "full_series",
+    "series",
+    "series_pack",
+}
+_TV_SEASON_COLLECTION_TYPES = {
+    "complete_season",
+    "full_season",
+    "pack",
+    "season",
+    "season_pack",
+}
+
 
 class MediaForScoring(Protocol):
     media_type: MediaType
@@ -130,34 +179,20 @@ def score_torrent_candidate(
     else:
         warnings.append("ID_MISMATCH")
 
-    required = _required_episode_map(missing_episodes)
-    if metadata.media_type == MediaType.TV and required:
-        target_seasons = set(required)
-        if len(target_seasons) > 1:
-            warnings.append("PARTIAL_PACK")
-        elif candidate.season in target_seasons:
+    # Local episode gaps are intentionally not part of automated selection.
+    # The operator replaces an incomplete local TV item with a complete series
+    # or season pack after download, so only the release's pack shape matters.
+    del missing_episodes
+    if metadata.media_type == MediaType.TV:
+        pack_reason = _tv_pack_reason(candidate)
+        if pack_reason == "TV_COMPLETE_SERIES_PACK":
+            score += 0.09
+            reasons.append(pack_reason)
+        elif pack_reason == "TV_COMPLETE_SEASON_PACK":
             score += 0.07
-            reasons.append("SEASON_EXACT")
-            required_episodes = required[candidate.season]
-            if candidate.episodes is None and candidate.collection_type == "season":
-                score += 0.07
-                reasons.append("SEASON_PACK_COVERS_TARGET_SEASON")
-            elif candidate.episodes:
-                offered = set(candidate.episodes)
-                overlap = offered & required_episodes
-                if offered == required_episodes:
-                    score += 0.09
-                    reasons.append("EPISODE_COVERAGE_EXACT")
-                elif required_episodes.issubset(offered):
-                    score += 0.07
-                    reasons.append("EPISODE_COVERAGE_COMPLETE")
-                    warnings.append("EPISODE_OVERLAP")
-                else:
-                    warnings.append("PARTIAL_PACK")
-                    if overlap:
-                        warnings.append("EPISODE_OVERLAP")
+            reasons.append(pack_reason)
         else:
-            warnings.append("PARTIAL_PACK")
+            warnings.append("TV_PACK_UNVERIFIED")
 
     if candidate.year is not None and metadata.year is not None:
         if candidate.year == metadata.year:
@@ -207,9 +242,7 @@ def score_torrent_candidate(
 
 
 def _release_title_matches(metadata: MetadataRecord, release_title: str) -> bool:
-    release_tokens = _title_tokens(
-        re.sub(r"^(?:\s*\[[^\]]+\]\s*)+", "", release_title)
-    )
+    release_tokens = _title_tokens(re.sub(r"^(?:\s*\[[^\]]+\]\s*)+", "", release_title))
     if not release_tokens:
         return False
 
@@ -252,13 +285,73 @@ def _is_release_boundary(token: str) -> bool:
     )
 
 
-def _required_episode_map(values: list[str] | None) -> dict[int, set[int]]:
-    result: dict[int, set[int]] = {}
-    for value in values or []:
-        match = re.fullmatch(r"S(\d{2})E(\d{2,5})", value)
-        if match:
-            result.setdefault(int(match.group(1)), set()).add(int(match.group(2)))
-    return result
+def _title_has_marker(normalized_title: str, marker: str) -> bool:
+    if marker.isascii():
+        return bool(re.search(rf"(?:^|\s){re.escape(marker)}(?:$|\s)", normalized_title))
+    return marker in normalized_title
+
+
+def _tv_pack_reason(candidate: TorrentCandidate) -> str | None:
+    collection_type = re.sub(
+        r"[^a-z0-9]+", "_", (candidate.collection_type or "").strip().casefold()
+    ).strip("_")
+    normalized_raw_title = unicodedata.normalize("NFKC", candidate.release_title).casefold()
+    normalized_title = re.sub(
+        r"[^\w]+",
+        " ",
+        normalized_raw_title,
+    ).strip()
+    title_words = set(normalized_title.split())
+    title_has_episode = bool(re.search(r"\bS\d{1,2}[ ._-]*E\d{1,5}\b", normalized_raw_title, re.I))
+    title_has_episode_range = bool(
+        re.search(
+            r"\bS\d{1,2}[ ._-]*E\d{1,5}[ ._]*[-~–—][ ._]*E?\d{1,5}\b",
+            normalized_raw_title,
+            re.I,
+        )
+    )
+    if len(candidate.episodes or []) == 1 or (title_has_episode and not title_has_episode_range):
+        return None
+
+    title_is_series = any(
+        _title_has_marker(normalized_title, marker) for marker in _TV_COMPLETE_SERIES_MARKERS
+    )
+    title_is_season = any(
+        _title_has_marker(normalized_title, marker) for marker in _TV_COMPLETE_SEASON_MARKERS
+    )
+    title_is_generically_complete = "complete" in title_words or any(
+        _title_has_marker(normalized_title, marker) for marker in _TV_GENERIC_COMPLETE_MARKERS
+    )
+    title_is_non_pack = any(
+        _title_has_marker(normalized_title, marker) for marker in _TV_NON_PACK_MARKERS
+    )
+    title_has_season_range = bool(
+        re.search(r"\bS\d{1,2}\s*[-~–—]\s*S\d{1,2}\b", normalized_raw_title, re.I)
+    )
+
+    if title_is_non_pack:
+        return None
+    if title_is_series:
+        return "TV_COMPLETE_SERIES_PACK"
+    if title_is_season:
+        return "TV_COMPLETE_SEASON_PACK"
+    if title_has_season_range:
+        return "TV_COMPLETE_SERIES_PACK"
+    if title_is_generically_complete:
+        return (
+            "TV_COMPLETE_SEASON_PACK" if candidate.season is not None else "TV_COMPLETE_SERIES_PACK"
+        )
+    if candidate.episodes:
+        return None
+    if candidate.file_count is not None and candidate.file_count <= 1:
+        return None
+    if collection_type in _TV_SERIES_COLLECTION_TYPES:
+        return "TV_COMPLETE_SERIES_PACK"
+    if collection_type in _TV_SEASON_COLLECTION_TYPES:
+        return "TV_COMPLETE_SEASON_PACK"
+    if candidate.season is not None:
+        return "TV_COMPLETE_SEASON_PACK"
+    return None
 
 
 def _normalized_title(value: str | None) -> str:

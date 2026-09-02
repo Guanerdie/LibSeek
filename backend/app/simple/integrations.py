@@ -235,6 +235,7 @@ async def _sync_nextfind_locked(
                 source_item_id=source_item.source_item_id,
                 media_type=source_item.media_type,
                 title=source_item.title,
+                discovered_at=source_item.discovered_at,
             )
             session.add(existing)
             created += 1
@@ -298,8 +299,10 @@ def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None
     if not active_state:
         target.state = MediaState.READY if item.tmdb_id is not None else MediaState.NEEDS_ATTENTION
         target.attention_reason = None if item.tmdb_id is not None else "需要确认 TMDB 影视信息"
-    target.discovered_at = item.discovered_at
-    target.updated_at = item.updated_at
+    # ``updated_at`` is the local scheduling/fairness timestamp.  Replacing it
+    # with the timestamp of every full discovery response made the same first
+    # page of media look oldest on every cycle.  SQLAlchemy updates it naturally
+    # when any persisted field above really changes.
 
 
 async def _replace_missing_episodes(
@@ -519,12 +522,6 @@ async def run_release_search(
     await _enrich_media_search_titles(session, media, metadata_factory)
     search.state = SearchState.RUNNING
     await session.commit()
-    episodes = list(await session.scalars(select(Episode).where(Episode.media_id == media.id)))
-    missing = [
-        f"S{item.season_number:02d}E{item.episode_number:02d}"
-        for item in episodes
-        if item.state == EpisodeState.MISSING
-    ]
     metadata = MetadataRecord(
         tmdb_id=media.tmdb_id,
         imdb_id=media.imdb_id,
@@ -546,7 +543,7 @@ async def run_release_search(
                 scored = score_torrent_candidate(
                     metadata,
                     raw,
-                    missing_episodes=missing,
+                    missing_episodes=None,
                     preferences=MatchPreferences(
                         resolutions=settings.preferred_resolutions,
                         sources=settings.preferred_sources,
@@ -587,6 +584,8 @@ def _candidate_from_adapter(
         source=candidate.source,
         codec=candidate.codec,
         download_factor=candidate.download_factor,
+        collection_type=candidate.collection_type,
+        file_count=candidate.file_count,
         season_coverage=season_coverage,
         episode_coverage=episode_coverage,
         score=candidate.match_score or 0,

@@ -225,6 +225,12 @@ function startPolling(run: AutomationRun): void {
   schedulePoll(run.id, generation)
 }
 
+function startPollingNow(runId: string): void {
+  stopPolling()
+  const generation = pollGeneration
+  void pollRun(runId, generation)
+}
+
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
@@ -308,10 +314,14 @@ async function run(): Promise<void> {
 async function retry(jobId: string): Promise<void> {
   error.value = null
   try {
-    await automationApi.retry(jobId)
-    jobs.value = (await automationApi.jobs()).items
-    await loadRuns(runsPage.value)
-    feedback.value = '失败任务已进入重试队列'
+    const retryJob = await automationApi.retry(jobId)
+    feedback.value = '失败任务已立即开始重试'
+    startPollingNow(retryJob.run_id)
+    try {
+      await Promise.all([refreshJobs(), loadRuns(1)])
+    } catch (caught) {
+      error.value = message(caught, '重试已启动，但任务列表暂时无法刷新')
+    }
   } catch (caught) {
     error.value = message(caught, '无法重新执行任务')
   }
@@ -562,11 +572,11 @@ onBeforeUnmount(() => {
               <strong>{{ job.media_title }}</strong>
               <p class="muted">{{ formatShanghai(job.created_at) }} · 候选 {{ job.decision.candidate_count ?? 0 }} 个</p>
               <p v-if="job.error_message" class="inline-warning">{{ job.error_message }}</p>
-              <button v-if="job.state === 'FAILED' || job.state === 'RETRY_WAIT'" class="button secondary small" type="button" @click="retry(job.id)">
+              <button v-if="(job.state === 'FAILED' || job.state === 'RETRY_WAIT') && !job.superseded_at" class="button secondary small" type="button" @click="retry(job.id)">
                 重新执行
               </button>
             </div>
-            <StatusPill :status="job.state" />
+            <StatusPill :status="job.superseded_at ? 'SUPERSEDED' : job.state" />
           </article>
         </div>
       </template>

@@ -105,9 +105,7 @@ class UniqueMetadataProvider(MetadataProvider):
         del media_type, tmdb_id
         return {}
 
-    async def get_country_codes(
-        self, media_type: MediaType, tmdb_id: int
-    ) -> list[str] | None:
+    async def get_country_codes(self, media_type: MediaType, tmdb_id: int) -> list[str] | None:
         del media_type, tmdb_id
         return None
 
@@ -280,6 +278,39 @@ async def test_recorded_automation_run_persists_success_and_progress(
 
 
 @pytest.mark.asyncio
+async def test_recorded_run_is_failed_when_a_job_permanently_fails(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source_item_id="recorded-automation-failure",
+            media_type=MediaType.MOVIE,
+            tmdb_id=498,
+            title="Recorded Automation Failure",
+            year=2026,
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.commit()
+        await update_policy(session, AutomationPolicyUpdate(enabled=True))
+        run = await automation.create_automation_run(session, trigger="manual")
+
+        result = await run_automation(
+            session,
+            adapter_factory=lambda _site_id: FailingSearchAdapter(retryable=False),
+            run_record=run,
+        )
+
+        assert result == (run.id, 1, 0, 1)
+        assert run.state == AutomationRunState.FAILED
+        assert run.created_count == 1
+        assert run.succeeded_count == 0
+        assert run.failed_count == 1
+        assert run.deferred_count == 0
+        assert run.error_message == "1 个任务执行失败"
+
+
+@pytest.mark.asyncio
 async def test_recorded_automation_run_persists_run_level_failure(
     session_factory,
     monkeypatch: pytest.MonkeyPatch,
@@ -431,9 +462,7 @@ async def test_automation_region_scope_only_creates_jobs_for_matching_media(
         )
 
         assert created == 1
-        job = await session.scalar(
-            select(AutomationJob).where(AutomationJob.run_id == run_id)
-        )
+        job = await session.scalar(select(AutomationJob).where(AutomationJob.run_id == run_id))
         assert job is not None
         assert job.media_id == korean.id
 
@@ -476,9 +505,7 @@ async def test_automation_manual_scope_only_creates_jobs_for_selected_media(
         )
 
         assert created == 1
-        job = await session.scalar(
-            select(AutomationJob).where(AutomationJob.run_id == run_id)
-        )
+        job = await session.scalar(select(AutomationJob).where(AutomationJob.run_id == run_id))
         assert job is not None
         assert job.media_id == selected.id
 
@@ -673,7 +700,7 @@ async def test_retryable_failure_waits_until_due_and_reuses_the_job(session_fact
             session,
             adapter_factory=lambda _site_id: FailingSearchAdapter(retryable=True),
         )
-        assert (created, succeeded, failed) == (1, 0, 1)
+        assert (created, succeeded, failed) == (1, 0, 0)
         job = await session.scalar(select(AutomationJob))
         assert job is not None
         assert job.state == AutomationJobState.RETRY_WAIT
@@ -726,9 +753,100 @@ async def test_non_retryable_failure_requires_explicit_retry(session_factory) ->
             session, adapter_factory=lambda _site_id: AvistaZMockAdapter()
         )
         assert created == 0
-        await retry_job(session, job.id)
-        assert job.state == AutomationJobState.RETRY_WAIT
-        assert job.attempt_count == 0
+        unrelated = LibraryMediaItem(
+            source_item_id="automation-unrelated-to-retry",
+            media_type=MediaType.MOVIE,
+            tmdb_id=513,
+            title="Unrelated Movie",
+            state=MediaState.READY,
+        )
+        session.add(unrelated)
+        await session.commit()
+        last_full_run_at = (await get_policy(session)).last_run_at
+        retry, run = await retry_job(session, job.id)
+        assert job.state == AutomationJobState.FAILED
+        assert job.superseded_at is not None
+        assert retry.state == AutomationJobState.PENDING
+        assert retry.attempt_count == 0
+        assert retry.retry_of_job_id == job.id
+        assert retry.run_id == run.id
+
+        result = await run_automation(
+            session,
+            adapter_factory=lambda _site_id: AvistaZMockAdapter(
+                fixtures=[movie_candidate(511, "manual-retry-success")]
+            ),
+            run_record=run,
+        )
+        run_jobs = list(
+            await session.scalars(select(AutomationJob).where(AutomationJob.run_id == run.id))
+        )
+        unrelated_job = await session.scalar(
+            select(AutomationJob).where(AutomationJob.media_id == unrelated.id)
+        )
+        assert result == (run.id, 1, 1, 0)
+        assert run_jobs == [retry]
+        assert unrelated_job is None
+        assert (await get_policy(session)).last_run_at == last_full_run_at
+
+
+@pytest.mark.asyncio
+async def test_due_retry_is_copied_into_the_new_run_without_moving_history(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source_item_id="automation-run-retry-lineage",
+            media_type=MediaType.MOVIE,
+            tmdb_id=512,
+            title="Run Retry Lineage",
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.commit()
+        await update_policy(
+            session,
+            AutomationPolicyUpdate(enabled=True, minimum_score=0.5),
+        )
+
+        first_run = await automation.create_automation_run(session, trigger="scheduled")
+        await run_automation(
+            session,
+            adapter_factory=lambda _site_id: FailingSearchAdapter(retryable=True),
+            run_record=first_run,
+        )
+        first_job = await session.scalar(
+            select(AutomationJob).where(AutomationJob.run_id == first_run.id)
+        )
+        assert first_job is not None
+        assert first_job.state == AutomationJobState.RETRY_WAIT
+        assert first_run.deferred_count == 1
+        assert first_run.failed_count == 0
+        first_job.next_attempt_at = utc_now() - timedelta(seconds=1)
+        await session.commit()
+        first_next_attempt_at = first_job.next_attempt_at
+
+        second_run = await automation.create_automation_run(session, trigger="scheduled")
+        await run_automation(
+            session,
+            adapter_factory=lambda _site_id: AvistaZMockAdapter(
+                fixtures=[movie_candidate(512, "lineage-success")]
+            ),
+            run_record=second_run,
+        )
+        second_job = await session.scalar(
+            select(AutomationJob).where(AutomationJob.run_id == second_run.id)
+        )
+
+        assert second_job is not None
+        assert second_job.retry_of_job_id == first_job.id
+        assert second_job.state == AutomationJobState.SUCCEEDED
+        assert first_job.run_id == first_run.id
+        assert first_job.state == AutomationJobState.RETRY_WAIT
+        assert first_job.next_attempt_at == first_next_attempt_at
+        assert first_job.superseded_at is not None
+        assert second_run.created_count == 1
+        assert second_run.succeeded_count == 1
 
 
 @pytest.mark.asyncio
@@ -1052,7 +1170,7 @@ def test_live_mode_never_accepts_identity_or_partial_pack_warnings() -> None:
     assert selected is None
     assert rejected[0]["reasons"] == [
         "站点提供的 TMDB 或 IMDb 与目标影视不匹配",
-        "资源未完整覆盖目标季集",
+        "资源不是完整资源包",
     ]
 
 
@@ -1122,27 +1240,106 @@ def test_title_fallback_requires_title_year_and_media_type_evidence() -> None:
     assert rejected[0]["reasons"] == ["缺少精确 ID，且无法确认资源年份匹配"]
 
 
-def test_tv_candidates_always_require_verified_season_or_episode_coverage() -> None:
+def test_tv_candidates_require_a_complete_series_or_season_pack() -> None:
     policy = automation.AutomationPolicy(
         enabled=True,
         dry_run=False,
         minimum_score=0.5,
         minimum_seeders=1,
     )
-    missing_coverage = release_candidate("no-coverage")
-    covered = release_candidate(
-        "covered",
-        reasons=["TMDB_ID_EXACT", "SEASON_EXACT", "EPISODE_COVERAGE_EXACT"],
-    )
+    single_episode = release_candidate("single-episode")
+    single_episode.season_coverage = [1]
+    single_episode.episode_coverage = ["S01E01"]
+    covered = release_candidate("covered", reasons=["TMDB_ID_EXACT", "TV_COMPLETE_SEASON_PACK"])
+    covered.collection_type = "season"
+    covered.season_coverage = [1]
 
     selected, rejected = automation._choose_candidate(
         policy,
-        [missing_coverage, covered],
+        [single_episode, covered],
         media_type=MediaType.TV,
     )
 
     assert selected is covered
-    assert rejected[0]["reasons"] == ["无法确认资源完整覆盖目标季集"]
+    assert rejected[0]["reasons"] == ["无法确认资源为全集包或完整季包"]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Candidate.S01.E01.1080p.WEB-DL",
+        "Candidate.S01.Special.1080p.WEB-DL",
+        "Candidate.Complete.Series.Trailer.1080p.WEB-DL",
+        "Candidate.Incomplete.Season.1.1080p.WEB-DL",
+    ],
+)
+def test_live_mode_rejects_legacy_ambiguous_season_candidates(title: str) -> None:
+    policy = automation.AutomationPolicy(
+        enabled=True,
+        dry_run=False,
+        minimum_score=0.5,
+        minimum_seeders=1,
+    )
+    candidate = release_candidate("legacy-ambiguous-season")
+    candidate.title = title
+    candidate.collection_type = "season"
+    candidate.file_count = 2
+    candidate.season_coverage = [1]
+
+    selected, rejected = automation._choose_candidate(
+        policy,
+        [candidate],
+        media_type=MediaType.TV,
+    )
+
+    assert selected is None
+    assert rejected[0]["reasons"] == ["无法确认资源为全集包或完整季包"]
+
+
+def test_live_mode_rejects_a_non_pack_title_even_with_a_stale_pack_reason() -> None:
+    policy = automation.AutomationPolicy(
+        enabled=True,
+        dry_run=False,
+        minimum_score=0.5,
+        minimum_seeders=1,
+    )
+    candidate = release_candidate(
+        "stale-complete-series-trailer",
+        reasons=["TMDB_ID_EXACT", "TV_COMPLETE_SERIES_PACK"],
+    )
+    candidate.title = "Candidate.Complete.Series.Trailer.1080p.WEB-DL"
+    candidate.collection_type = "complete_series"
+    candidate.file_count = 12
+
+    selected, rejected = automation._choose_candidate(
+        policy,
+        [candidate],
+        media_type=MediaType.TV,
+    )
+
+    assert selected is None
+    assert rejected[0]["reasons"] == ["无法确认资源为全集包或完整季包"]
+
+
+def test_tv_candidate_ranking_prefers_a_complete_series_over_one_season() -> None:
+    policy = automation.AutomationPolicy(
+        enabled=True,
+        dry_run=False,
+        minimum_score=0.5,
+        minimum_seeders=1,
+    )
+    season = release_candidate("season-pack", reasons=["TMDB_ID_EXACT", "TV_COMPLETE_SEASON_PACK"])
+    season.collection_type = "season"
+    season.season_coverage = [1]
+    complete = release_candidate(
+        "complete-series",
+        reasons=["TMDB_ID_EXACT", "TV_COMPLETE_SERIES_PACK"],
+    )
+    complete.collection_type = "complete_series"
+
+    selected, _ = automation._choose_candidate(policy, [season, complete], media_type=MediaType.TV)
+
+    assert selected is complete
 
 
 def test_candidate_ranking_prioritizes_identity_resolution_and_then_size() -> None:
@@ -1183,6 +1380,26 @@ def test_candidate_ranking_prioritizes_identity_resolution_and_then_size() -> No
     assert selected is exact_2160p_large
     assert len(rejected) == 3
     assert all(item["reasons"] == ["符合硬性条件，但综合排序低于已选资源"] for item in rejected)
+
+
+def test_movie_ranking_ignores_tv_pack_labels() -> None:
+    policy = automation.AutomationPolicy(
+        enabled=True,
+        dry_run=False,
+        minimum_score=0.5,
+        minimum_seeders=1,
+    )
+    misleading_pack = release_candidate("movie-complete-series", size_bytes=40_000)
+    misleading_pack.collection_type = "complete_series"
+    regular = release_candidate("regular-movie", size_bytes=60_000)
+
+    selected, _ = automation._choose_candidate(
+        policy,
+        [misleading_pack, regular],
+        media_type=MediaType.MOVIE,
+    )
+
+    assert selected is regular
 
 
 def test_candidate_ranking_avoids_a_fragile_single_seeder_before_size() -> None:
@@ -1726,18 +1943,21 @@ async def test_unknown_qb_add_outcome_is_linked_and_never_submitted_twice(
         assert download.state == DownloadState.OUTCOME_UNKNOWN
         assert job.state == AutomationJobState.FAILED
 
-        await retry_job(session, job.id)
+        retry, retry_run = await retry_job(session, job.id)
         _, created, succeeded, failed = await run_automation(
             session,
             adapter_factory=lambda _site_id: search_adapter,
             pt_factory=lambda _site_id: torrent_source,
             qb_factory=lambda: cast(QbittorrentAdapter, qb_impl),
+            run_record=retry_run,
         )
 
         assert (created, succeeded, failed) == (1, 0, 1)
         assert qb_impl.add_calls == 1
         assert job.state == AutomationJobState.FAILED
-        assert job.error_message == "qBittorrent 写入结果未知，请等待状态对账"
+        assert job.superseded_at is not None
+        assert retry.state == AutomationJobState.FAILED
+        assert retry.error_message == "qBittorrent 写入结果未知，请等待状态对账"
 
 
 @pytest.mark.asyncio
@@ -1831,9 +2051,7 @@ async def test_known_duplicate_hash_links_the_job_without_reporting_false_succes
         )
 
         assert (created, succeeded, failed) == (1, 0, 1)
-        job = await session.scalar(
-            select(AutomationJob).where(AutomationJob.media_id == media.id)
-        )
+        job = await session.scalar(select(AutomationJob).where(AutomationJob.media_id == media.id))
         assert job is not None
         assert job.download_id == existing_download.id
         assert job.state == AutomationJobState.FAILED
@@ -1946,9 +2164,7 @@ async def test_pending_job_from_an_interrupted_batch_is_processed(session_factor
         )
         session.add(pending)
         await session.commit()
-        await update_policy(
-            session, AutomationPolicyUpdate(enabled=True, minimum_score=0.5)
-        )
+        await update_policy(session, AutomationPolicyUpdate(enabled=True, minimum_score=0.5))
 
         _, created, succeeded, failed = await run_dry_run(
             session,
@@ -1999,9 +2215,7 @@ async def test_automation_identifies_a_unique_tmdb_match_before_search(session_f
         )
         session.add(media)
         await session.commit()
-        await update_policy(
-            session, AutomationPolicyUpdate(enabled=True, minimum_score=0.5)
-        )
+        await update_policy(session, AutomationPolicyUpdate(enabled=True, minimum_score=0.5))
 
         _, created, succeeded, failed = await run_automation(
             session,
