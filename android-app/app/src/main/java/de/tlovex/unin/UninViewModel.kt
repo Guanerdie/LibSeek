@@ -1091,7 +1091,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         }
         mutableUiState.update { it.copy(isAutomationRunInProgress = true) }
         launchAction("无法重试自动化任务") {
+            var policy: AutomationPolicyDto? = null
             try {
+                policy = persistPendingPolicy()
                 val retryJob = repository.retryAutomationJob(run.id)
                 startAutomationRunPolling(retryJob.runId)
                 val jobs = try {
@@ -1114,7 +1116,10 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (error.mayLeaveWriteOutcomeUnknown() || error is HttpException && error.code() == 409) {
+                if (
+                    policy != null &&
+                    (error.mayLeaveWriteOutcomeUnknown() || error is HttpException && error.code() == 409)
+                ) {
                     reconcileUnknownAutomationRun()
                 } else {
                     mutableUiState.update { it.copy(isAutomationRunInProgress = false) }

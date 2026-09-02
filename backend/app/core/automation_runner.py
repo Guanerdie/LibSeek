@@ -12,6 +12,7 @@ from app.core.time import utc_now
 from app.db.session import SessionFactory
 from app.errors import AppError
 from app.simple import automation
+from app.simple.automation_state import refresh_automation_run_summary
 from app.simple.integrations import (
     build_nextfind,
     build_pt_site,
@@ -37,48 +38,6 @@ _manual_run_tasks: set[asyncio.Task[None]] = set()
 
 
 async def recover_interrupted_jobs(session: AsyncSession) -> int:
-    jobs = list(
-        await session.scalars(
-            select(AutomationJob).where(AutomationJob.state == AutomationJobState.RUNNING)
-        )
-    )
-    for job in jobs:
-        download = await session.get(Download, job.download_id) if job.download_id else None
-        if download is not None and download.state == DownloadState.SUBMITTING:
-            if download.submitted_at is None:
-                download.state = DownloadState.ERROR
-                download.error_message = "应用在 qBittorrent 写入前重启，等待安全重试"
-                job.state = AutomationJobState.RETRY_WAIT
-                job.next_attempt_at = utc_now()
-                job.error_message = download.error_message
-            else:
-                download.state = DownloadState.OUTCOME_UNKNOWN
-                download.error_message = "应用在 qBittorrent 写入期间重启，请等待状态对账"
-                job.state = AutomationJobState.FAILED
-                job.next_attempt_at = None
-                job.error_message = download.error_message
-                job.finished_at = utc_now()
-        elif download is not None and download.state == DownloadState.OUTCOME_UNKNOWN:
-            job.state = AutomationJobState.FAILED
-            job.next_attempt_at = None
-            job.error_message = download.error_message or "qBittorrent 写入结果未知"
-            job.finished_at = utc_now()
-        elif download is not None and download.state in {
-            DownloadState.QUEUED,
-            DownloadState.DOWNLOADING,
-            DownloadState.PAUSED,
-            DownloadState.SEEDING,
-            DownloadState.COMPLETED,
-        }:
-            job.state = AutomationJobState.SUCCEEDED
-            job.next_attempt_at = None
-            job.finished_at = utc_now()
-        else:
-            job.state = AutomationJobState.RETRY_WAIT
-            job.next_attempt_at = utc_now()
-            job.error_message = "上次执行被应用重启中断，等待重试"
-    if jobs:
-        await session.commit()
     runs = list(
         await session.scalars(
             select(AutomationRun).where(
@@ -88,13 +47,109 @@ async def recover_interrupted_jobs(session: AsyncSession) -> int:
             )
         )
     )
+    jobs = list(
+        await session.scalars(
+            select(AutomationJob).where(
+                AutomationJob.state.in_(
+                    (AutomationJobState.PENDING, AutomationJobState.RUNNING)
+                ),
+            )
+        )
+    )
+    policy = await automation.get_policy(session)
+    for job in jobs:
+        await _recover_interrupted_job(
+            session,
+            job,
+            max_attempts=policy.max_attempts,
+            retry_message="上次执行被应用重启中断，等待重试",
+        )
     for run in runs:
-        run.state = AutomationRunState.FAILED
-        run.error_message = "应用重启中断了本次自动化运行"
+        refreshed = await refresh_automation_run_summary(session, run.id)
+        if refreshed is None:
+            continue
+        if (
+            refreshed.created_count == 0
+            or refreshed.failed_count > 0
+            or refreshed.deferred_count > 0
+        ):
+            refreshed.state = AutomationRunState.FAILED
+            refreshed.error_message = "应用重启中断了本次自动化运行"
+        else:
+            refreshed.state = AutomationRunState.SUCCEEDED
+            refreshed.error_message = None
         run.finished_at = utc_now()
-    if runs:
+    if jobs or runs:
         await session.commit()
     return len(jobs) + len(runs)
+
+
+async def _recover_interrupted_job(
+    session: AsyncSession,
+    job: AutomationJob,
+    *,
+    max_attempts: int,
+    retry_message: str,
+) -> None:
+    download = await session.get(Download, job.download_id) if job.download_id else None
+    if download is not None and download.state == DownloadState.SUBMITTING:
+        if download.submitted_at is None:
+            download.state = DownloadState.ERROR
+            download.error_message = "应用在 qBittorrent 写入前重启，等待安全重试"
+            _defer_or_fail_job(
+                job,
+                max_attempts=max_attempts,
+                retry_message=download.error_message,
+            )
+        else:
+            download.state = DownloadState.OUTCOME_UNKNOWN
+            download.error_message = "应用在 qBittorrent 写入期间重启，请等待状态对账"
+            _fail_job(job, download.error_message)
+    elif download is not None and download.state == DownloadState.OUTCOME_UNKNOWN:
+        _fail_job(job, download.error_message or "qBittorrent 写入结果未知")
+    elif download is not None and download.state in {
+        DownloadState.QUEUED,
+        DownloadState.DOWNLOADING,
+        DownloadState.PAUSED,
+        DownloadState.SEEDING,
+        DownloadState.COMPLETED,
+    }:
+        job.state = AutomationJobState.SUCCEEDED
+        job.error_message = None
+        job.next_attempt_at = None
+        job.finished_at = utc_now()
+    elif (
+        download is not None
+        and download.state == DownloadState.ERROR
+        and job.state != AutomationJobState.PENDING
+    ):
+        _fail_job(job, download.error_message or "已有下载处于错误状态")
+    else:
+        _defer_or_fail_job(
+            job,
+            max_attempts=max_attempts,
+            retry_message=retry_message,
+        )
+
+
+def _defer_or_fail_job(
+    job: AutomationJob, *, max_attempts: int, retry_message: str
+) -> None:
+    job.error_message = retry_message
+    job.finished_at = utc_now()
+    if job.attempt_count < max_attempts:
+        job.state = AutomationJobState.RETRY_WAIT
+        job.next_attempt_at = utc_now()
+    else:
+        job.state = AutomationJobState.FAILED
+        job.next_attempt_at = None
+
+
+def _fail_job(job: AutomationJob, message: str) -> None:
+    job.state = AutomationJobState.FAILED
+    job.error_message = message
+    job.next_attempt_at = None
+    job.finished_at = utc_now()
 
 
 async def execute_recorded_automation_run(
@@ -125,12 +180,7 @@ async def execute_recorded_automation_run(
         message = exc.message if isinstance(exc, AppError) else "自动化运行失败"
         try:
             await session.rollback()
-            stored = await session.get(AutomationRun, run_id)
-            if stored is not None:
-                stored.state = AutomationRunState.FAILED
-                stored.error_message = message
-                stored.finished_at = utc_now()
-                await session.commit()
+            await _fail_automation_run(session, run_id, message)
         except asyncio.CancelledError:
             raise
         except Exception as persist_exc:
@@ -166,16 +216,7 @@ async def _persist_automation_run_failure(run_id: str, message: str) -> None:
     while True:
         try:
             async with SessionFactory() as session:
-                run = await session.get(AutomationRun, run_id)
-                if run is None or run.state not in {
-                    AutomationRunState.PENDING,
-                    AutomationRunState.RUNNING,
-                }:
-                    return
-                run.state = AutomationRunState.FAILED
-                run.error_message = message
-                run.finished_at = utc_now()
-                await session.commit()
+                await _fail_automation_run(session, run_id, message)
                 return
         except asyncio.CancelledError:
             raise
@@ -186,6 +227,43 @@ async def _persist_automation_run_failure(run_id: str, message: str) -> None:
             )
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 30.0)
+
+
+async def _fail_automation_run(
+    session: AsyncSession, run_id: str, message: str
+) -> bool:
+    run = await session.get(AutomationRun, run_id)
+    if run is None or run.state not in {
+        AutomationRunState.PENDING,
+        AutomationRunState.RUNNING,
+    }:
+        return False
+    policy = await automation.get_policy(session)
+    jobs = list(
+        await session.scalars(
+            select(AutomationJob).where(
+                AutomationJob.run_id == run_id,
+                AutomationJob.state.in_(
+                    (AutomationJobState.PENDING, AutomationJobState.RUNNING)
+                ),
+            )
+        )
+    )
+    for job in jobs:
+        await _recover_interrupted_job(
+            session,
+            job,
+            max_attempts=policy.max_attempts,
+            retry_message=message,
+        )
+    refreshed = await refresh_automation_run_summary(session, run_id)
+    if refreshed is None:
+        return False
+    refreshed.state = AutomationRunState.FAILED
+    refreshed.error_message = message
+    refreshed.finished_at = utc_now()
+    await session.commit()
+    return True
 
 
 def _manual_run_done(task: asyncio.Task[None]) -> None:

@@ -237,7 +237,7 @@ def test_an_ambiguous_tv_release_is_not_treated_as_a_complete_pack(
     assert "TV_PACK_UNVERIFIED" in scored.warnings
 
 
-def test_a_complete_series_title_is_recognized_as_a_replacement_pack() -> None:
+def test_a_multi_season_range_is_not_mistaken_for_the_complete_series() -> None:
     metadata = MetadataRecord(
         tmdb_id=24,
         media_type=MediaType.TV,
@@ -261,5 +261,82 @@ def test_a_complete_series_title_is_recognized_as_a_replacement_pack() -> None:
         preferences=MatchPreferences(),
     )
 
-    assert "TV_COMPLETE_SERIES_PACK" in scored.match_reasons
+    assert "TV_COMPLETE_SEASON_PACK" in scored.match_reasons
+    assert "TV_COMPLETE_SERIES_PACK" not in scored.match_reasons
     assert "TV_PACK_UNVERIFIED" not in scored.warnings
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Series.S01.EP01.1080p.WEB-DL",
+        "Series.S01.Episode.01.1080p.WEB-DL",
+        "Series.1x01.1080p.WEB-DL",
+        "Series.S01.Preview.1080p.WEB-DL",
+        "Series.S01.Teaser.1080p.WEB-DL",
+        "Series.S01.Promo.1080p.WEB-DL",
+        "Series.S01.OVA.1080p.WEB-DL",
+        "Series.S01.Behind.the.Scenes.1080p.WEB-DL",
+        "Series.S01.Part.1.1080p.WEB-DL",
+        "Series.S01.Vol.1.1080p.WEB-DL",
+        "Series.S00.1080p.WEB-DL",
+    ],
+)
+def test_common_non_pack_titles_are_rejected(title: str) -> None:
+    metadata = MetadataRecord(
+        tmdb_id=26,
+        media_type=MediaType.TV,
+        title="Series",
+        year=2020,
+    )
+    scored = score_torrent_candidate(
+        metadata,
+        TorrentCandidate(
+            site_id="avistaz",
+            torrent_id=f"unsafe-{title}",
+            release_title=title,
+            details_ref="avistaz:details:unsafe-tv-release",
+            media_type=MediaType.TV,
+            tmdb_id=26,
+            year=2020,
+            collection_type="season",
+            file_count=12,
+            seeders=3,
+            hit_and_run=False,
+        ),
+        missing_episodes=None,
+        preferences=MatchPreferences(),
+    )
+
+    assert "TV_COMPLETE_SEASON_PACK" not in scored.match_reasons
+    assert "TV_COMPLETE_SERIES_PACK" not in scored.match_reasons
+    assert "TV_PACK_UNVERIFIED" in scored.warnings
+
+
+def test_worded_complete_season_title_is_recognized() -> None:
+    metadata = MetadataRecord(
+        tmdb_id=27,
+        media_type=MediaType.TV,
+        title="Series",
+        year=2020,
+    )
+    scored = score_torrent_candidate(
+        metadata,
+        TorrentCandidate(
+            site_id="avistaz",
+            torrent_id="worded-complete-season",
+            release_title="Series.Season.1.Complete.1080p.WEB-DL",
+            details_ref="avistaz:details:worded-complete-season",
+            media_type=MediaType.TV,
+            tmdb_id=27,
+            year=2020,
+            file_count=12,
+            seeders=3,
+            hit_and_run=False,
+        ),
+        missing_episodes=None,
+        preferences=MatchPreferences(),
+    )
+
+    assert "TV_COMPLETE_SEASON_PACK" in scored.match_reasons
+    assert "TV_COMPLETE_SERIES_PACK" not in scored.match_reasons

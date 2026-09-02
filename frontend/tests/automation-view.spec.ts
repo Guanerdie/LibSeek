@@ -142,6 +142,10 @@ describe('automation settings', () => {
     await wrapper.get('button.button.primary').trigger('click')
     await flushPromises()
 
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ dry_run: true }))
+    expect(mocks.updatePolicy.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.run.mock.invocationCallOrder[0],
+    )
     expect(wrapper.text()).toContain('自动搜索已在后台开始')
     expect(wrapper.text()).toContain('后台执行中…')
 
@@ -217,6 +221,10 @@ describe('automation settings', () => {
     await retryButton!.trigger('click')
     await flushPromises()
 
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ dry_run: true }))
+    expect(mocks.updatePolicy.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.retry.mock.invocationCallOrder[0],
+    )
     expect(mocks.retry).toHaveBeenCalledWith('job-1')
     expect(mocks.runStatus).toHaveBeenCalledWith('run-retry')
     expect(wrapper.text()).toContain('失败任务已立即开始重试')

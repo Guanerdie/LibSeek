@@ -170,6 +170,9 @@ def test_long_running_episode_number_is_parsed_from_release_title() -> None:
     [
         ("Show.S01.E01.1080p.WEB-DL", (1, [1])),
         ("Show.S01.E01-E03.1080p.WEB-DL", (1, [1, 2, 3])),
+        ("Show.S01.EP01.1080p.WEB-DL", (1, [1])),
+        ("Show.S01.Episode.01.1080p.WEB-DL", (1, [1])),
+        ("Show.1x01.1080p.WEB-DL", (1, [1])),
     ],
 )
 def test_episode_parser_accepts_common_separators(

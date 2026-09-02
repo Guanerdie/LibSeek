@@ -17,6 +17,7 @@ from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import MediaType
+from app.services.tv_pack import classify_tv_pack, tv_pack_rank
 from app.simple.integrations import (
     close_adapter,
     identify_media,
@@ -886,6 +887,8 @@ def _choose_candidate(
             reasons.append("无法验证站点提供的 TMDB 或 IMDb")
         if "YEAR_MISMATCH" in hard_warnings and not exact_identity:
             reasons.append("资源年份与目标影视不匹配")
+        if "TV_PACK_UNVERIFIED" in hard_warnings:
+            reasons.append("无法确认资源为全集包或完整季包")
         if "PARTIAL_PACK" in warning_set and media_type != MediaType.TV:
             reasons.append("资源不是完整资源包")
         if not exact_identity and not {"ID_MISMATCH", "ID_UNVERIFIED"}.intersection(warning_set):
@@ -896,7 +899,11 @@ def _choose_candidate(
                 reasons.append("缺少精确 ID，且无法确认资源年份匹配")
             if "MEDIA_TYPE_MATCH" in missing_fallback:
                 reasons.append("缺少精确 ID，且无法确认影视类型匹配")
-        if media_type == MediaType.TV and not _tv_pack_rank(candidate):
+        if (
+            media_type == MediaType.TV
+            and not _tv_pack_rank(candidate)
+            and "无法确认资源为全集包或完整季包" not in reasons
+        ):
             reasons.append("无法确认资源为全集包或完整季包")
         if candidate.score < policy.minimum_score:
             reasons.append("评分低于策略门槛")
@@ -999,101 +1006,15 @@ def _candidate_rank(
 
 
 def _tv_pack_rank(candidate: ReleaseCandidate) -> int:
-    collection_type = re.sub(
-        r"[^a-z0-9]+", "_", (candidate.collection_type or "").strip().casefold()
-    ).strip("_")
-    normalized_raw_title = candidate.title.casefold()
-    normalized_title = re.sub(r"[^\w]+", " ", normalized_raw_title).strip()
-    title_words = set(normalized_title.split())
-    title_has_episode = bool(re.search(r"\bS\d{1,2}[ ._-]*E\d{1,5}\b", normalized_raw_title, re.I))
-    title_has_episode_range = bool(
-        re.search(
-            r"\bS\d{1,2}[ ._-]*E\d{1,5}[ ._]*[-~–—][ ._]*E?\d{1,5}\b",
-            normalized_raw_title,
-            re.I,
+    return tv_pack_rank(
+        classify_tv_pack(
+            candidate.title,
+            collection_type=candidate.collection_type,
+            seasons=candidate.season_coverage,
+            episodes=candidate.episode_coverage,
+            file_count=candidate.file_count,
         )
     )
-    if len(candidate.episode_coverage or []) == 1 or (
-        title_has_episode and not title_has_episode_range
-    ):
-        return 0
-
-    title_is_non_pack = any(
-        _title_has_marker(normalized_title, marker)
-        for marker in (
-            "bonus",
-            "extra",
-            "extras",
-            "featurette",
-            "incomplete",
-            "partial",
-            "sample",
-            "special",
-            "specials",
-            "trailer",
-            "特典",
-            "特辑",
-            "花絮",
-            "预告",
-        )
-    )
-    if title_is_non_pack:
-        return 0
-
-    reasons = set(candidate.reasons or [])
-    if "TV_COMPLETE_SERIES_PACK" in reasons:
-        return 2
-    if "TV_COMPLETE_SEASON_PACK" in reasons:
-        return 1
-
-    title_is_series = any(
-        _title_has_marker(normalized_title, marker)
-        for marker in ("complete series", "series pack", "box set", "boxset", "全集", "全套")
-    )
-    title_is_season = any(
-        _title_has_marker(normalized_title, marker)
-        for marker in ("complete season", "full season", "season pack", "全季")
-    )
-    if title_is_series:
-        return 2
-    if title_is_season:
-        return 1
-    if re.search(r"\bS\d{1,2}\s*[-~–—]\s*S\d{1,2}\b", normalized_raw_title, re.I):
-        return 2
-    if "complete" in title_words or "完整版" in normalized_title:
-        return 1 if candidate.season_coverage else 2
-    if candidate.episode_coverage:
-        return 0
-    if candidate.file_count is not None and candidate.file_count <= 1:
-        return 0
-    if collection_type in {
-        "box_set",
-        "boxset",
-        "collection",
-        "complete",
-        "complete_series",
-        "full_series",
-        "series",
-        "series_pack",
-    }:
-        return 2
-    if collection_type in {
-        "complete_season",
-        "full_season",
-        "pack",
-        "season",
-        "season_pack",
-    }:
-        return 1
-    if candidate.season_coverage:
-        return 1
-    return 0
-
-
-def _title_has_marker(normalized_title: str, marker: str) -> bool:
-    if marker.isascii():
-        return bool(re.search(rf"(?:^|\s){re.escape(marker)}(?:$|\s)", normalized_title))
-    return marker in normalized_title
 
 
 def _resolution_rank(value: str | None) -> int:

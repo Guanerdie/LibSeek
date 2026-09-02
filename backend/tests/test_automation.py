@@ -336,6 +336,46 @@ async def test_recorded_automation_run_persists_run_level_failure(
 
 
 @pytest.mark.asyncio
+async def test_run_level_failure_releases_pending_jobs_for_retry(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_run(*_args: object, **_kwargs: object) -> tuple[str, int, int, int]:
+        raise AppError("AUTOMATION_POLICY_CHANGED", "策略已变更", status_code=409)
+
+    monkeypatch.setattr(automation, "run_automation", fail_run)
+
+    async with session_factory() as session:
+        await update_policy(session, AutomationPolicyUpdate(enabled=True))
+        media = LibraryMediaItem(
+            source_item_id="run-start-failure",
+            media_type=MediaType.MOVIE,
+            tmdb_id=498,
+            title="Run Start Failure",
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.flush()
+        run = await automation.create_automation_run(session, trigger="manual_retry")
+        job = AutomationJob(
+            run_id=run.id,
+            media_id=media.id,
+            state=AutomationJobState.PENDING,
+            trigger="manual_retry",
+        )
+        session.add(job)
+        await session.commit()
+
+        await automation_runner.execute_recorded_automation_run(session, run)
+
+        assert job.state == AutomationJobState.RETRY_WAIT
+        assert job.next_attempt_at is not None
+        assert run.state == AutomationRunState.FAILED
+        assert run.created_count == 1
+        assert run.deferred_count == 1
+
+
+@pytest.mark.asyncio
 async def test_manual_automation_run_recovers_when_initial_session_creation_fails(
     session_factory,
     monkeypatch: pytest.MonkeyPatch,
@@ -1055,6 +1095,14 @@ async def test_restart_marks_an_inflight_qb_write_as_unknown(session_factory) ->
         )
         session.add(download)
         await session.flush()
+        run = AutomationRun(
+            id="restart-run",
+            trigger="manual",
+            state=AutomationRunState.RUNNING,
+            created_count=1,
+        )
+        session.add(run)
+        await session.flush()
         job = AutomationJob(
             run_id="restart-run",
             media_id=media.id,
@@ -1065,15 +1113,20 @@ async def test_restart_marks_an_inflight_qb_write_as_unknown(session_factory) ->
         session.add(job)
         await session.commit()
 
-        assert await recover_interrupted_jobs(session) == 1
+        assert await recover_interrupted_jobs(session) == 2
         assert download.state == DownloadState.OUTCOME_UNKNOWN
         assert job.state == AutomationJobState.FAILED
         assert job.next_attempt_at is None
+        assert run.state == AutomationRunState.FAILED
+        assert run.failed_count == 1
 
         await sync_download_statuses(session, cast(QbittorrentAdapter, FoundQbTorrent()))
         assert download.state == DownloadState.DOWNLOADING
         assert job.state == AutomationJobState.SUCCEEDED
         assert job.error_message is None
+        assert run.state == AutomationRunState.SUCCEEDED
+        assert run.succeeded_count == 1
+        assert run.failed_count == 0
 
 
 @pytest.mark.asyncio
@@ -1142,6 +1195,158 @@ async def test_restart_marks_inflight_automation_runs_failed(session_factory) ->
             assert run.state == AutomationRunState.FAILED
             assert run.error_message == "应用重启中断了本次自动化运行"
             assert run.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_restart_makes_a_pending_retry_job_retryable_and_updates_counts(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source_item_id="pending-retry-restart",
+            media_type=MediaType.MOVIE,
+            tmdb_id=532,
+            title="Pending Retry Restart",
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.flush()
+        run = AutomationRun(trigger="manual_retry", state=AutomationRunState.PENDING)
+        session.add(run)
+        await session.flush()
+        job = AutomationJob(
+            run_id=run.id,
+            media_id=media.id,
+            state=AutomationJobState.PENDING,
+            trigger="manual_retry",
+        )
+        session.add(job)
+        await session.commit()
+
+        assert await recover_interrupted_jobs(session) == 2
+        assert job.state == AutomationJobState.RETRY_WAIT
+        assert job.next_attempt_at is not None
+        assert job.finished_at is not None
+        assert run.state == AutomationRunState.FAILED
+        assert run.created_count == 1
+        assert run.succeeded_count == 0
+        assert run.failed_count == 0
+        assert run.deferred_count == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_respects_the_maximum_attempt_count(session_factory) -> None:
+    async with session_factory() as session:
+        await update_policy(
+            session,
+            AutomationPolicyUpdate(enabled=True, max_attempts=1),
+        )
+        media = LibraryMediaItem(
+            source_item_id="exhausted-restart",
+            media_type=MediaType.MOVIE,
+            tmdb_id=533,
+            title="Exhausted Restart",
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.flush()
+        run = AutomationRun(trigger="manual", state=AutomationRunState.RUNNING)
+        session.add(run)
+        await session.flush()
+        job = AutomationJob(
+            run_id=run.id,
+            media_id=media.id,
+            state=AutomationJobState.RUNNING,
+            attempt_count=1,
+        )
+        session.add(job)
+        await session.commit()
+
+        assert await recover_interrupted_jobs(session) == 2
+        assert job.state == AutomationJobState.FAILED
+        assert job.next_attempt_at is None
+        assert run.state == AutomationRunState.FAILED
+        assert run.failed_count == 1
+
+
+@pytest.mark.asyncio
+async def test_qb_reconciliation_keeps_superseded_history_immutable_and_updates_run(
+    session_factory,
+) -> None:
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source_item_id="reconcile-lineage",
+            media_type=MediaType.MOVIE,
+            tmdb_id=534,
+            title="Reconcile Lineage",
+            state=MediaState.NEEDS_ATTENTION,
+        )
+        session.add(media)
+        await session.flush()
+        search = ReleaseSearch(media_id=media.id, site_ids=["avistaz"])
+        session.add(search)
+        await session.flush()
+        candidate = ReleaseCandidate(
+            search_id=search.id,
+            site_id="avistaz",
+            torrent_id="reconcile-lineage",
+            title="Restart.Movie.1080p.WEB-DL",
+            size_bytes=2_000_000,
+            seeders=5,
+            score=0.9,
+        )
+        session.add(candidate)
+        await session.flush()
+        download = Download(
+            media_id=media.id,
+            candidate_id=candidate.id,
+            info_hash="a" * 40,
+            name=candidate.title,
+            state=DownloadState.OUTCOME_UNKNOWN,
+        )
+        session.add(download)
+        old_run = AutomationRun(
+            trigger="manual",
+            state=AutomationRunState.FAILED,
+            created_count=1,
+            failed_count=1,
+        )
+        current_run = AutomationRun(
+            trigger="manual_retry",
+            state=AutomationRunState.FAILED,
+            created_count=1,
+            failed_count=1,
+        )
+        session.add_all([old_run, current_run])
+        await session.flush()
+        old_job = AutomationJob(
+            run_id=old_run.id,
+            media_id=media.id,
+            download_id=download.id,
+            state=AutomationJobState.FAILED,
+            superseded_at=utc_now(),
+        )
+        session.add(old_job)
+        await session.flush()
+        current_job = AutomationJob(
+            run_id=current_run.id,
+            media_id=media.id,
+            download_id=download.id,
+            state=AutomationJobState.FAILED,
+            retry_of_job_id=old_job.id,
+        )
+        session.add(current_job)
+        await session.commit()
+
+        await sync_download_statuses(session, cast(QbittorrentAdapter, FoundQbTorrent()))
+
+        assert old_job.state == AutomationJobState.FAILED
+        assert old_run.state == AutomationRunState.FAILED
+        assert old_run.failed_count == 1
+        assert current_job.state == AutomationJobState.SUCCEEDED
+        assert current_run.state == AutomationRunState.SUCCEEDED
+        assert current_run.succeeded_count == 1
+        assert current_run.failed_count == 0
 
 
 def test_live_mode_never_accepts_identity_or_partial_pack_warnings() -> None:
@@ -1310,6 +1515,32 @@ def test_live_mode_rejects_a_non_pack_title_even_with_a_stale_pack_reason() -> N
     candidate.title = "Candidate.Complete.Series.Trailer.1080p.WEB-DL"
     candidate.collection_type = "complete_series"
     candidate.file_count = 12
+
+    selected, rejected = automation._choose_candidate(
+        policy,
+        [candidate],
+        media_type=MediaType.TV,
+    )
+
+    assert selected is None
+    assert rejected[0]["reasons"] == ["无法确认资源为全集包或完整季包"]
+
+
+def test_live_mode_always_rejects_an_unverified_tv_pack_warning() -> None:
+    policy = automation.AutomationPolicy(
+        enabled=True,
+        dry_run=False,
+        minimum_score=0.5,
+        minimum_seeders=1,
+    )
+    candidate = release_candidate(
+        "fullwidth-trailer",
+        reasons=["TMDB_ID_EXACT", "TV_COMPLETE_SERIES_PACK"],
+    )
+    candidate.title = "Candidate.Complete.Series.ＴＲＡＩＬＥＲ.1080p.WEB-DL"
+    candidate.collection_type = "complete_series"
+    candidate.file_count = 12
+    candidate.warnings = ["TV_PACK_UNVERIFIED"]
 
     selected, rejected = automation._choose_candidate(
         policy,

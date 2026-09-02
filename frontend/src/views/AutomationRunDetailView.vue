@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, automationApi } from '../api/client'
@@ -86,6 +86,7 @@ async function load(): Promise<void> {
     if (active.value) schedulePoll()
   } catch (caught) {
     error.value = message(caught, '无法读取自动化执行详情')
+    if (waitingForRetryRun) schedulePoll()
   } finally {
     loading.value = false
   }
@@ -97,6 +98,7 @@ async function poll(): Promise<void> {
   try {
     run.value = await automationApi.runStatus(runId.value)
     waitingForRetryRun = false
+    error.value = null
     await loadJobs(jobsPage.value)
     if (active.value) schedulePoll()
   } catch (caught) {
@@ -116,15 +118,12 @@ async function retry(job: AutomationJob): Promise<void> {
   error.value = null
   feedback.value = null
   try {
+    waitingForRetryRun = true
     const updated = await automationApi.retry(job.id)
     await router.push(`/automation/runs/${updated.run_id}`)
-    stopPolling()
-    run.value = null
-    jobs.value = []
-    waitingForRetryRun = true
     feedback.value = '失败任务已立即开始重试'
-    void poll()
   } catch (caught) {
+    waitingForRetryRun = false
     error.value = message(caught, '无法重新执行任务')
   } finally {
     retryingJobId.value = null
@@ -142,6 +141,16 @@ function manualScreeningHref(job: AutomationJob): string {
 
 onMounted(() => {
   mounted = true
+  void load()
+})
+
+watch(runId, () => {
+  stopPolling()
+  run.value = null
+  jobs.value = []
+  jobsTotal.value = 0
+  jobsPage.value = 1
+  feedback.value = null
   void load()
 })
 

@@ -257,30 +257,7 @@ async function save(): Promise<void> {
   error.value = null
   feedback.value = null
   try {
-    const maxSize = form.max_size_gib ? Number(form.max_size_gib) * 1024 ** 3 : null
-    const dailyBytes = form.daily_download_gib
-      ? Number(form.daily_download_gib) * 1024 ** 3
-      : null
-    const policy = await automationApi.updatePolicy({
-      enabled: form.enabled,
-      dry_run: form.dry_run,
-      auto_identify: form.auto_identify,
-      scope_mode: form.scope_mode,
-      regions: form.regions,
-      selected_media_ids: form.selected_media_ids,
-      site_ids: form.site_ids,
-      media_types: form.media_types,
-      minimum_score: form.minimum_score,
-      minimum_seeders: form.minimum_seeders,
-      max_size_bytes: maxSize ? Math.round(maxSize) : null,
-      allow_warnings: form.allow_warnings,
-      interval_minutes: form.interval_minutes,
-      retry_delay_minutes: form.retry_delay_minutes,
-      max_attempts: form.max_attempts,
-      daily_download_limit: form.daily_download_limit,
-      daily_download_bytes: dailyBytes ? Math.round(dailyBytes) : null,
-    })
-    applyPolicy(policy)
+    await persistFormPolicy()
     feedback.value = '策略已保存'
   } catch (caught) {
     error.value = message(caught, '无法保存自动化策略')
@@ -289,12 +266,41 @@ async function save(): Promise<void> {
   }
 }
 
+async function persistFormPolicy(): Promise<AutomationPolicy> {
+  const maxSize = form.max_size_gib ? Number(form.max_size_gib) * 1024 ** 3 : null
+  const dailyBytes = form.daily_download_gib
+    ? Number(form.daily_download_gib) * 1024 ** 3
+    : null
+  const policy = await automationApi.updatePolicy({
+    enabled: form.enabled,
+    dry_run: form.dry_run,
+    auto_identify: form.auto_identify,
+    scope_mode: form.scope_mode,
+    regions: form.regions,
+    selected_media_ids: form.selected_media_ids,
+    site_ids: form.site_ids,
+    media_types: form.media_types,
+    minimum_score: form.minimum_score,
+    minimum_seeders: form.minimum_seeders,
+    max_size_bytes: maxSize ? Math.round(maxSize) : null,
+    allow_warnings: form.allow_warnings,
+    interval_minutes: form.interval_minutes,
+    retry_delay_minutes: form.retry_delay_minutes,
+    max_attempts: form.max_attempts,
+    daily_download_limit: form.daily_download_limit,
+    daily_download_bytes: dailyBytes ? Math.round(dailyBytes) : null,
+  })
+  applyPolicy(policy)
+  return policy
+}
+
 async function run(): Promise<void> {
   if (starting.value || runIsActive.value) return
   starting.value = true
   error.value = null
   feedback.value = null
   try {
+    await persistFormPolicy()
     const createdRun = await automationApi.run()
     currentRun.value = createdRun
     void loadRuns(1)
@@ -314,6 +320,7 @@ async function run(): Promise<void> {
 async function retry(jobId: string): Promise<void> {
   error.value = null
   try {
+    await persistFormPolicy()
     const retryJob = await automationApi.retry(jobId)
     feedback.value = '失败任务已立即开始重试'
     startPollingNow(retryJob.run_id)

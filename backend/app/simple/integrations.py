@@ -26,10 +26,12 @@ from app.schemas.adapters import (
 )
 from app.services.matching import MatchPreferences, score_torrent_candidate
 from app.services.torrent_validation import validate_torrent
+from app.simple.automation_state import refresh_automation_run_summary
 from app.simple.models import (
     ActivityLog,
     AutomationJob,
     AutomationJobState,
+    AutomationRunState,
     Download,
     DownloadState,
     Episode,
@@ -907,14 +909,36 @@ async def sync_download_statuses(
         if outcome_was_unknown:
             jobs = list(
                 await session.scalars(
-                    select(AutomationJob).where(AutomationJob.download_id == download.id)
+                    select(AutomationJob).where(
+                        AutomationJob.download_id == download.id,
+                        AutomationJob.state == AutomationJobState.FAILED,
+                        AutomationJob.superseded_at.is_(None),
+                    )
                 )
             )
+            affected_run_ids: set[str] = set()
             for job in jobs:
                 job.state = AutomationJobState.SUCCEEDED
                 job.error_message = None
                 job.next_attempt_at = None
                 job.finished_at = utc_now()
+                affected_run_ids.add(job.run_id)
+            for run_id in affected_run_ids:
+                run = await refresh_automation_run_summary(session, run_id)
+                if run is None or run.state in {
+                    AutomationRunState.PENDING,
+                    AutomationRunState.RUNNING,
+                }:
+                    continue
+                run.state = (
+                    AutomationRunState.FAILED
+                    if run.failed_count
+                    else AutomationRunState.SUCCEEDED
+                )
+                run.error_message = (
+                    f"{run.failed_count} 个任务执行失败" if run.failed_count else None
+                )
+                run.finished_at = utc_now()
         updated += 1
     await session.commit()
     return updated

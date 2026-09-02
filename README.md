@@ -68,9 +68,9 @@ docker compose up --build -d
 ENABLE_QB_WRITE=true
 ```
 
-Compose 默认启动一个应用内轻量调度器。调度器只支持单 Uvicorn 进程部署，不需要
-Redis、Celery 或独立 Worker；本地使用 `uvicorn --reload` 时应设置
-`AUTOMATION_SCHEDULER_ENABLED=false`。即使调度器运行，自动化策略仍需在页面中单独启用。
+Compose 包含一个应用内轻量调度器，但默认保持关闭；部署并检查完成后，再明确设置
+`AUTOMATION_SCHEDULER_ENABLED=true`。调度器只支持单 Uvicorn 进程部署，不需要
+Redis、Celery 或独立 Worker；即使调度器运行，自动化策略仍需在页面中单独启用。
 
 qB 保存路径和分类都是可选项：路径留空时使用下载器默认路径，分类留空时使用候选资源
 的 PT 站点标识。认证会话与 CSRF 校验始终保留；Token、密码和代理认证信息仅保存在

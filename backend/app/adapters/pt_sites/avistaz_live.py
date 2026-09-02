@@ -516,7 +516,8 @@ class AvistaZAdapter(PtSiteAdapter):
             requested_type,
         )
         parsed_season, parsed_episodes = self._season_episodes(release_title)
-        season = self._integer(raw.season) or parsed_season
+        raw_season = self._integer(raw.season)
+        season = raw_season if raw_season is not None else parsed_season
         episodes = self._episode_list(raw.episodes) or parsed_episodes
         collection_type = self._text(raw.collection_type)
         if collection_type is None and episodes:
@@ -564,10 +565,16 @@ class AvistaZAdapter(PtSiteAdapter):
     @staticmethod
     def _season_episodes(title: str) -> tuple[int | None, list[int] | None]:
         match = re.search(
-            r"(?i)\bS(\d{1,2})(?:[ ._-]*E(\d{1,5})"
-            r"(?:[ ._]*[-~–—][ ._]*E?(\d{1,5}))?)?\b",
+            r"(?i)\bS(\d{1,2})(?:[ ._-]*(?:EPISODE|EP|E)[ ._-]*(\d{1,5})"
+            r"(?:[ ._]*[-~–—][ ._]*(?:(?:EPISODE|EP|E)[ ._-]*)?(\d{1,5}))?)?\b",
             title,
         )
+        if match is None:
+            match = re.search(
+                r"(?i)\b(\d{1,2})x(\d{1,5})"
+                r"(?:[ ._]*[-~–—][ ._]*(?:\d{1,2}x)?(\d{1,5}))?\b",
+                title,
+            )
         if match is None:
             return None, None
         season = int(match.group(1))
