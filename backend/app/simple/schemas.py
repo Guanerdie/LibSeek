@@ -230,6 +230,7 @@ class AutomationJobView(BaseModel):
     attempt_count: int
     next_attempt_at: datetime | None
     decision: dict[str, object]
+    error_code: str | None
     error_message: str | None
     created_at: datetime
     finished_at: datetime | None

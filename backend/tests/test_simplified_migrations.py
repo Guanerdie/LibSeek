@@ -67,6 +67,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     }
     assert automation_job_columns["retry_of_job_id"]["nullable"] is True
     assert automation_job_columns["superseded_at"]["nullable"] is True
+    assert automation_job_columns["error_code"]["nullable"] is True
     assert (
         ("retry_of_job_id",),
         "automation_jobs",
@@ -113,6 +114,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     }
     assert "retry_of_job_id" not in automation_job_columns
     assert "superseded_at" not in automation_job_columns
+    assert "error_code" not in automation_job_columns
     download_checks = {
         constraint["name"] for constraint in inspector.get_check_constraints("downloads")
     }

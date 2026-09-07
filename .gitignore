@@ -22,3 +22,14 @@ secrets/*.properties
 secrets/.setup-staging/
 !secrets/.gitkeep
 output/android/
+
+# 凭据类：私钥、证书、部署环境变量，永远不进版本库
+.ssh_key
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.env.deploy
+.env.*.local

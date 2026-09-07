@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote, urlparse
 
 from sqlalchemy import select
@@ -45,6 +46,9 @@ from app.simple.models import (
 from app.simple.service import complete_search, queue_download
 
 _EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,5})$")
+# qBittorrent does not list a torrent the instant it is accepted, so a download
+# is only declared missing once it has had time to show up.
+_QB_MISSING_GRACE = timedelta(minutes=15)
 _download_submission_lock = asyncio.Lock()
 _nextfind_sync_lock = asyncio.Lock()
 
@@ -882,11 +886,14 @@ async def sync_download_statuses(
         )
     )
     updated = 0
+    now = utc_now()
     for download in downloads:
         if download.info_hash is None:
             continue
         torrent = by_hash.get(download.info_hash.casefold())
         if torrent is None:
+            if await _release_vanished_download(session, download, now=now):
+                updated += 1
             continue
         outcome_was_unknown = download.state == DownloadState.OUTCOME_UNKNOWN
         download.progress = torrent.progress
@@ -919,6 +926,7 @@ async def sync_download_statuses(
             affected_run_ids: set[str] = set()
             for job in jobs:
                 job.state = AutomationJobState.SUCCEEDED
+                job.error_code = None
                 job.error_message = None
                 job.next_attempt_at = None
                 job.finished_at = utc_now()
@@ -942,6 +950,72 @@ async def sync_download_statuses(
         updated += 1
     await session.commit()
     return updated
+
+
+async def _release_vanished_download(
+    session: AsyncSession, download: Download, *, now: datetime
+) -> bool:
+    """Close out a download that qBittorrent no longer knows about.
+
+    Deleting the torrent in qB used to leave the download in ``DOWNLOADING``
+    forever, and the media with it -- a state both ``create_search`` and
+    ``run_automation`` refuse to act on, so the item could only be revived by
+    editing the database.  A grace period keeps a torrent that was just handed
+    to qB from being failed before qB has listed it.
+    """
+
+    reference = download.submitted_at or download.created_at
+    if reference is not None:
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=UTC)
+        if now - reference < _QB_MISSING_GRACE:
+            return False
+
+    finished = download.progress >= 1
+    download.download_speed = 0
+    download.upload_speed = 0
+    if finished:
+        # It completed and was then removed from the client; that is not an error.
+        download.state = DownloadState.COMPLETED
+        download.error_message = None
+    else:
+        download.state = DownloadState.ERROR
+        download.error_message = "下载器中已不存在该任务"
+
+    media = await session.get(LibraryMediaItem, download.media_id)
+    if media is not None and media.state == MediaState.DOWNLOADING:
+        if finished:
+            media.state = MediaState.COMPLETE
+            media.attention_reason = None
+        else:
+            media.state = MediaState.NEEDS_ATTENTION
+            media.attention_reason = "qBittorrent 中已不存在该下载任务"
+
+    if not finished:
+        await _supersede_jobs_for_download(session, download)
+    return True
+
+
+async def _supersede_jobs_for_download(session: AsyncSession, download: Download) -> None:
+    """Free the media from a failed job that points at a now-dead download.
+
+    Releasing the media alone is not enough: ``run_automation`` also skips any
+    media that still owns a live FAILED job, so the item would stay invisible.
+    Superseding leaves the original run's recorded outcome untouched.
+    """
+
+    jobs = list(
+        await session.scalars(
+            select(AutomationJob).where(
+                AutomationJob.download_id == download.id,
+                AutomationJob.state == AutomationJobState.FAILED,
+                AutomationJob.superseded_at.is_(None),
+            )
+        )
+    )
+    stamp = utc_now()
+    for job in jobs:
+        job.superseded_at = stamp
 
 
 def _download_state(qb_state: str, progress: float) -> DownloadState:

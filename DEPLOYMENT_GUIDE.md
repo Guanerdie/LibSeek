@@ -1,21 +1,30 @@
 # LibSeek 部署与维护指南
 
 > 项目GitHub: https://github.com/Guanerdie/LibSeek  
-> 生产服务器: 198.50.120.139  
+> 生产服务器: 见本地 `~/.ssh/config` 的 `libseek-prod` 别名（本仓库公开，不记录真实地址）  
 > 更新日期: 2026-09-02
 
 ---
 
 ## 服务器信息
 
-**服务器地址**: `198.50.120.139`  
-**SSH登录**: 凭证存储在本地 `C:\Users\admin\.ssh`  
+**服务器地址**: 不写在仓库里。本仓库是公开的，公开 SSH 目标会被扫描器直接拿去爆破。
+真实地址放在本地 `~/.ssh/config`（Windows 为 `C:\Users\<用户名>\.ssh\config`）：
+
+```sshconfig
+Host libseek-prod
+    HostName <生产服务器 IP 或域名>
+    User <用户名>
+    IdentityFile ~/.ssh/libseek_deploy
+```
+
+**SSH登录**: 私钥存放在本地 `~/.ssh`，不要放进项目目录。
 **连接方式**:
 ```bash
-ssh user@198.50.120.139
-# 或如果配置了Host别名
 ssh libseek-prod
 ```
+
+> 下文所有 `<PROD_HOST>` 占位符，按需替换为你自己的地址或直接用上面的 Host 别名。
 
 ---
 
@@ -58,7 +67,7 @@ npm run build
 
 ```bash
 # 登录服务器
-ssh user@198.50.120.139
+ssh libseek-prod
 
 # 安装Docker和Docker Compose（如果用方式1）
 sudo apt update
@@ -140,7 +149,7 @@ sudo cp -r dist/* /var/www/libseek/
 # /etc/nginx/sites-available/libseek
 server {
     listen 80;
-    server_name 198.50.120.139;  # 或你的域名
+    server_name <PROD_HOST>;  # 生产服务器 IP 或域名
 
     # 前端
     location / {
@@ -180,7 +189,7 @@ sudo certbot --nginx -d your-domain.com
 
 ```bash
 # 登录服务器
-ssh user@198.50.120.139
+ssh libseek-prod
 cd /opt/libseek
 
 # 拉取最新代码
@@ -298,7 +307,7 @@ exit
 
 ```bash
 # 检查服务状态
-curl http://198.50.120.139/api/health
+curl http://<PROD_HOST>/api/health
 
 # 预期响应
 {"status":"ok","version":"0.9.0"}

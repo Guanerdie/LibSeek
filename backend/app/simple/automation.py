@@ -64,6 +64,33 @@ _SEARCH_MISS_COOLDOWNS = (
 )
 
 
+# Failures that a retry cannot resolve on its own: they need the user to pick a
+# TMDB match, fix credentials, or reconcile a qBittorrent write whose outcome is
+# unknown.  These stay parked until the user clicks retry.  Everything else --
+# site 5xx, rate limits, a downloader that was briefly unreachable -- is
+# transient, and holding the media hostage forever is what this guards against.
+_MANUAL_INTERVENTION_ERROR_CODES = frozenset(
+    {
+        "DOWNLOAD_NOT_SUBMITTED",
+        "DOWNLOAD_SUBMISSION_INCOMPLETE",
+        "DUPLICATE_DOWNLOAD_FAILED",
+        "DUPLICATE_DOWNLOAD_OTHER_MEDIA",
+        "DUPLICATE_DOWNLOAD_SUBMITTING",
+        "MEDIA_IDENTITY_REQUIRED",
+        "MEDIA_NOT_FOUND",
+        "QB_ADD_OUTCOME_UNKNOWN",
+        "TMDB_SELECTION_REQUIRED",
+    }
+)
+
+# How long a recoverable failure is left alone before the media is allowed back
+# into the queue.  Long enough that a site outage has usually passed, short
+# enough that an item is not silently retired for a day.
+_FAILED_JOB_RELEASE_DELAY = timedelta(hours=6)
+
+_UNEXPECTED_ERROR_CODE = "UNEXPECTED_ERROR"
+
+
 def _search_cooldown(miss_count: int) -> timedelta:
     if miss_count <= 0:
         return timedelta(0)
@@ -293,6 +320,41 @@ async def retry_job(session: AsyncSession, job_id: str) -> tuple[AutomationJob, 
         return retry, run
 
 
+async def _release_recoverable_failed_jobs(
+    session: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """Return media stuck behind a transient failure to the automation queue.
+
+    ``run_automation`` excludes any media that owns a live FAILED job, and a
+    FAILED job is never re-scheduled -- only an explicit user retry supersedes
+    it.  So one PT timeout used to retire an item permanently and invisibly.
+    Superseding the job frees the media while leaving the original run's
+    outcome untouched, which is how retries already preserve history.
+    """
+
+    now = now or utc_now()
+    cutoff = now - _FAILED_JOB_RELEASE_DELAY
+    stale = list(
+        await session.scalars(
+            select(AutomationJob).where(
+                AutomationJob.superseded_at.is_(None),
+                AutomationJob.state == AutomationJobState.FAILED,
+                AutomationJob.finished_at.is_not(None),
+                AutomationJob.finished_at <= cutoff,
+                or_(
+                    AutomationJob.error_code.is_(None),
+                    AutomationJob.error_code.not_in(sorted(_MANUAL_INTERVENTION_ERROR_CODES)),
+                ),
+            )
+        )
+    )
+    for job in stale:
+        _supersede_job(job)
+    if stale:
+        await session.commit()
+    return len(stale)
+
+
 def policy_is_due(policy: AutomationPolicy, now: datetime | None = None) -> bool:
     if not policy.enabled:
         return False
@@ -338,6 +400,9 @@ async def run_automation(
             await session.commit()
         if not retry_only:
             policy.last_run_at = now
+            # Before deciding which media are unavailable, hand back the ones
+            # whose only blocker is an old transient failure.
+            await _release_recoverable_failed_jobs(session, now=now)
         queued_statement = select(AutomationJob).where(
             AutomationJob.superseded_at.is_(None),
             (
@@ -490,6 +555,7 @@ async def _execute_job(
         job.state = AutomationJobState.RUNNING
         job.attempt_count += 1
         job.next_attempt_at = None
+        job.error_code = None
         job.error_message = None
         job.finished_at = None
         await session.commit()
@@ -793,6 +859,7 @@ async def _execute_job(
         if stored_policy is None:
             raise
         policy = stored_policy
+        job.error_code = exc.error_code if isinstance(exc, AppError) else _UNEXPECTED_ERROR_CODE
         job.error_message = exc.message if isinstance(exc, AppError) else "自动搜索或下载失败"
         job.finished_at = utc_now()
         will_retry = (

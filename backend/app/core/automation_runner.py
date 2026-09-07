@@ -100,13 +100,18 @@ async def _recover_interrupted_job(
                 job,
                 max_attempts=max_attempts,
                 retry_message=download.error_message,
+                error_code="DOWNLOAD_NOT_SUBMITTED",
             )
         else:
             download.state = DownloadState.OUTCOME_UNKNOWN
             download.error_message = "应用在 qBittorrent 写入期间重启，请等待状态对账"
-            _fail_job(job, download.error_message)
+            _fail_job(job, download.error_message, error_code="QB_ADD_OUTCOME_UNKNOWN")
     elif download is not None and download.state == DownloadState.OUTCOME_UNKNOWN:
-        _fail_job(job, download.error_message or "qBittorrent 写入结果未知")
+        _fail_job(
+            job,
+            download.error_message or "qBittorrent 写入结果未知",
+            error_code="QB_ADD_OUTCOME_UNKNOWN",
+        )
     elif download is not None and download.state in {
         DownloadState.QUEUED,
         DownloadState.DOWNLOADING,
@@ -115,6 +120,7 @@ async def _recover_interrupted_job(
         DownloadState.COMPLETED,
     }:
         job.state = AutomationJobState.SUCCEEDED
+        job.error_code = None
         job.error_message = None
         job.next_attempt_at = None
         job.finished_at = utc_now()
@@ -123,18 +129,24 @@ async def _recover_interrupted_job(
         and download.state == DownloadState.ERROR
         and job.state != AutomationJobState.PENDING
     ):
-        _fail_job(job, download.error_message or "已有下载处于错误状态")
+        _fail_job(
+            job,
+            download.error_message or "已有下载处于错误状态",
+            error_code="DOWNLOAD_IN_ERROR_STATE",
+        )
     else:
         _defer_or_fail_job(
             job,
             max_attempts=max_attempts,
             retry_message=retry_message,
+            error_code="AUTOMATION_INTERRUPTED",
         )
 
 
 def _defer_or_fail_job(
-    job: AutomationJob, *, max_attempts: int, retry_message: str
+    job: AutomationJob, *, max_attempts: int, retry_message: str, error_code: str
 ) -> None:
+    job.error_code = error_code
     job.error_message = retry_message
     job.finished_at = utc_now()
     if job.attempt_count < max_attempts:
@@ -145,8 +157,9 @@ def _defer_or_fail_job(
         job.next_attempt_at = None
 
 
-def _fail_job(job: AutomationJob, message: str) -> None:
+def _fail_job(job: AutomationJob, message: str, *, error_code: str) -> None:
     job.state = AutomationJobState.FAILED
+    job.error_code = error_code
     job.error_message = message
     job.next_attempt_at = None
     job.finished_at = utc_now()
