@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -680,7 +681,7 @@ async def _execute_job(
                         metadata_factory=metadata_factory,
                     )
                 _, candidates = await get_search(session, search.id)
-                complete_seasons, seasons_missing = await _season_context(session, media)
+                season_context = await _season_context(session, media)
                 media_is_variety = is_variety(media.genre_ids)
                 selected, rejected = _choose_candidate(
                     policy,
@@ -689,8 +690,7 @@ async def _execute_job(
                     require_known_size=(
                         not policy.dry_run and policy.daily_download_bytes is not None
                     ),
-                    complete_seasons=complete_seasons,
-                    seasons_with_missing_episodes=seasons_missing,
+                    seasons=season_context,
                     variety=media_is_variety,
                     latest_episode_window=policy.variety_recent_episodes,
                 )
@@ -799,16 +799,13 @@ async def _execute_job(
                             "自动化目标或候选已不存在，已停止下载提交",
                             status_code=409,
                         )
-                    current_complete, current_missing = await _season_context(
-                        session, current_media
-                    )
+                    current_seasons = await _season_context(session, current_media)
                     accepted, rejected = _choose_candidate(
                         current_policy,
                         [current_candidate],
                         media_type=current_media.media_type,
                         require_known_size=current_policy.daily_download_bytes is not None,
-                        complete_seasons=current_complete,
-                        seasons_with_missing_episodes=current_missing,
+                        seasons=current_seasons,
                         variety=is_variety(current_media.genre_ids),
                         latest_episode_window=current_policy.variety_recent_episodes,
                     )
@@ -1033,25 +1030,37 @@ async def _budget_reason(
     return None
 
 
-async def _season_context(
-    session: AsyncSession, media: LibraryMediaItem
-) -> tuple[frozenset[int] | None, frozenset[int] | None]:
-    """Which seasons have finished airing, and which are still missing episodes.
+@dataclass(frozen=True)
+class SeasonContext:
+    """What is known about a series' seasons.
 
-    Returns ``(None, None)`` for anything that is not a series, and ``None``
-    for the completion set when no season data has been recorded -- an older
-    library entry that has not been re-identified since seasons were tracked
-    must not have every season pack rejected out from under it.
+    ``known`` matters as much as ``complete``: a site numbers its releases the
+    way the broadcaster does, and TMDB does not always agree.  SNL Korea is
+    listed on TMDB with nine seasons while the site publishes S01 through S17.
+    Seasons outside ``known`` are unknown, not unfinished, and must not be
+    rejected on the strength of data that never covered them.
+    """
+
+    known: frozenset[int] | None = None
+    complete: frozenset[int] | None = None
+    missing_episodes: frozenset[int] | None = None
+
+
+async def _season_context(session: AsyncSession, media: LibraryMediaItem) -> SeasonContext:
+    """Read what the library knows about this series' seasons.
+
+    Everything is ``None`` when nothing has been recorded -- an older entry
+    that predates season tracking must not have every season pack rejected out
+    from under it.
     """
 
     if media.media_type != MediaType.TV:
-        return None, None
+        return SeasonContext()
     seasons = list(
         await session.scalars(select(MediaSeason).where(MediaSeason.media_id == media.id))
     )
-    complete = (
-        frozenset(row.season_number for row in seasons if row.is_complete) if seasons else None
-    )
+    if not seasons:
+        return SeasonContext()
     missing_rows = await session.scalars(
         select(Episode.season_number).where(
             Episode.media_id == media.id,
@@ -1059,16 +1068,19 @@ async def _season_context(
         )
     )
     missing = frozenset(missing_rows)
-    # No episode rows at all means the library has no per-episode view of this
-    # series; fall back to the existing rules rather than rejecting everything.
-    return complete, (missing or None)
+    return SeasonContext(
+        known=frozenset(row.season_number for row in seasons),
+        complete=frozenset(row.season_number for row in seasons if row.is_complete),
+        # No episode rows at all means the library has no per-episode view of
+        # this series; fall back to the other rules rather than rejecting all.
+        missing_episodes=missing or None,
+    )
 
 
 def _season_pack_reason(
     candidate: ReleaseCandidate,
     *,
-    complete_seasons: frozenset[int] | None,
-    seasons_with_missing_episodes: frozenset[int] | None,
+    seasons: SeasonContext,
 ) -> str | None:
     """Reject a season pack that cannot help, or cannot be trusted.
 
@@ -1089,9 +1101,17 @@ def _season_pack_reason(
         # per-season reasoning only makes sense for a single-season release.
         return None
     season = covered[0]
-    if complete_seasons is not None and season not in complete_seasons:
-        return f"第 {season} 季尚未播完，季包不完整"
-    if seasons_with_missing_episodes is not None and season not in seasons_with_missing_episodes:
+    # A season the provider never listed is unknown, not unfinished: the site
+    # and TMDB disagree about numbering often enough that treating "not in the
+    # list" as "still airing" would reject perfectly good packs.
+    if seasons.known is not None and season in seasons.known:
+        if seasons.complete is not None and season not in seasons.complete:
+            return f"第 {season} 季尚未播完，季包不完整"
+    if (
+        seasons.missing_episodes is not None
+        and season in (seasons.known or frozenset())
+        and season not in seasons.missing_episodes
+    ):
         return f"第 {season} 季本地没有缺集"
     return None
 
@@ -1102,8 +1122,7 @@ def _choose_candidate(
     *,
     media_type: MediaType,
     require_known_size: bool = False,
-    complete_seasons: frozenset[int] | None = None,
-    seasons_with_missing_episodes: frozenset[int] | None = None,
+    seasons: SeasonContext | None = None,
     variety: bool = False,
     latest_episode_window: int = 0,
 ) -> tuple[ReleaseCandidate | None, list[dict[str, object]]]:
@@ -1200,9 +1219,7 @@ def _choose_candidate(
             reasons.append("候选包含风险提示")
         if media_type == MediaType.TV:
             season_reason = _season_pack_reason(
-                candidate,
-                complete_seasons=complete_seasons,
-                seasons_with_missing_episodes=seasons_with_missing_episodes,
+                candidate, seasons=seasons or SeasonContext()
             )
             if season_reason is not None:
                 reasons.append(season_reason)

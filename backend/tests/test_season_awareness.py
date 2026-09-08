@@ -18,7 +18,7 @@ from sqlalchemy import select
 from app.adapters.metadata.tmdb import TmdbEpisode, TmdbProvider
 from app.models.enums import MediaType
 from app.schemas.adapters import SeasonRecord
-from app.simple.automation import _season_context, _season_pack_reason
+from app.simple.automation import SeasonContext, _season_context, _season_pack_reason
 from app.simple.integrations import _sync_media_seasons
 from app.simple.models import (
     Episode,
@@ -52,8 +52,11 @@ def test_a_finished_season_with_missing_episodes_is_accepted() -> None:
     assert (
         _season_pack_reason(
             _candidate([1]),
-            complete_seasons=frozenset({1}),
-            seasons_with_missing_episodes=frozenset({1}),
+            seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=frozenset({1}),
+                missing_episodes=frozenset({1}),
+            ),
         )
         is None
     )
@@ -62,8 +65,11 @@ def test_a_finished_season_with_missing_episodes_is_accepted() -> None:
 def test_a_season_still_airing_is_rejected() -> None:
     reason = _season_pack_reason(
         _candidate([2]),
-        complete_seasons=frozenset({1}),
-        seasons_with_missing_episodes=frozenset({2}),
+        seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=frozenset({1}),
+                missing_episodes=frozenset({2}),
+            ),
     )
 
     assert reason == "第 2 季尚未播完，季包不完整"
@@ -74,8 +80,11 @@ def test_a_season_the_library_already_has_is_rejected() -> None:
 
     reason = _season_pack_reason(
         _candidate([1]),
-        complete_seasons=frozenset({1}),
-        seasons_with_missing_episodes=frozenset({2}),
+        seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=frozenset({1}),
+                missing_episodes=frozenset({2}),
+            ),
     )
 
     assert reason == "第 1 季本地没有缺集"
@@ -85,8 +94,11 @@ def test_a_multi_season_pack_is_left_to_the_existing_rules() -> None:
     assert (
         _season_pack_reason(
             _candidate([1, 2]),
-            complete_seasons=frozenset({1}),
-            seasons_with_missing_episodes=frozenset({1}),
+            seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=frozenset({1}),
+                missing_episodes=frozenset({1}),
+            ),
         )
         is None
     )
@@ -96,8 +108,11 @@ def test_a_pack_with_no_season_label_is_left_to_the_existing_rules() -> None:
     assert (
         _season_pack_reason(
             _candidate([]),
-            complete_seasons=frozenset({1}),
-            seasons_with_missing_episodes=frozenset({1}),
+            seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=frozenset({1}),
+                missing_episodes=frozenset({1}),
+            ),
         )
         is None
     )
@@ -109,8 +124,11 @@ def test_unknown_season_data_never_rejects_a_pack() -> None:
     assert (
         _season_pack_reason(
             _candidate([1]),
-            complete_seasons=None,
-            seasons_with_missing_episodes=None,
+            seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=None,
+                missing_episodes=None,
+            ),
         )
         is None
     )
@@ -120,8 +138,11 @@ def test_season_zero_specials_are_ignored() -> None:
     assert (
         _season_pack_reason(
             _candidate([0]),
-            complete_seasons=frozenset({1}),
-            seasons_with_missing_episodes=frozenset({1}),
+            seasons=SeasonContext(
+                known=frozenset({0, 1, 2}),
+                complete=frozenset({1}),
+                missing_episodes=frozenset({1}),
+            ),
         )
         is None
     )
@@ -172,10 +193,11 @@ async def test_the_context_reports_complete_seasons_and_missing_episodes(
         )
         await session.commit()
 
-        complete, missing = await _season_context(session, media)
+        context = await _season_context(session, media)
 
-        assert complete == frozenset({1})
-        assert missing == frozenset({2})
+        assert context.known == frozenset({1, 2})
+        assert context.complete == frozenset({1})
+        assert context.missing_episodes == frozenset({2})
 
 
 @pytest.mark.asyncio
@@ -192,7 +214,7 @@ async def test_a_movie_has_no_season_context(session_factory) -> None:
         session.add(media)
         await session.commit()
 
-        assert await _season_context(session, media) == (None, None)
+        assert await _season_context(session, media) == SeasonContext()
 
 
 @pytest.mark.asyncio
@@ -201,10 +223,11 @@ async def test_a_series_with_no_season_rows_reports_unknown(session_factory) -> 
         media = await _series(session, tmdb_id=902)
         await session.commit()
 
-        complete, missing = await _season_context(session, media)
+        context = await _season_context(session, media)
 
-        assert complete is None
-        assert missing is None
+        assert context.known is None
+        assert context.complete is None
+        assert context.missing_episodes is None
 
 
 # ---------------------------------------------------------------------------
@@ -373,3 +396,49 @@ def test_a_malformed_air_date_does_not_crash_the_summary() -> None:
     assert summary.is_complete is False
     assert summary.aired_episode_count == 0
 
+
+# ---------------------------------------------------------------------------
+# Regression: the site and TMDB number seasons differently
+# ---------------------------------------------------------------------------
+
+
+def test_a_season_tmdb_never_listed_is_not_treated_as_unfinished() -> None:
+    """SNL Korea: TMDB lists nine seasons, the site publishes seventeen.
+
+    Backfilling season data made S10-S17 look "still airing" and rejected
+    them -- releases that had been perfectly acceptable the day before.
+    """
+
+    context = SeasonContext(
+        known=frozenset(range(1, 10)),
+        complete=frozenset(range(1, 10)),
+        missing_episodes=None,
+    )
+
+    assert _season_pack_reason(_candidate([13]), seasons=context) is None
+    assert _season_pack_reason(_candidate([17]), seasons=context) is None
+
+
+def test_a_known_season_that_is_still_airing_is_still_rejected() -> None:
+    """The guard must keep working for seasons the provider does know."""
+
+    context = SeasonContext(
+        known=frozenset({1, 2}),
+        complete=frozenset({1}),
+        missing_episodes=None,
+    )
+
+    assert _season_pack_reason(_candidate([2]), seasons=context) == "第 2 季尚未播完，季包不完整"
+
+
+def test_the_already_complete_check_also_ignores_unknown_seasons() -> None:
+    context = SeasonContext(
+        known=frozenset({1, 2}),
+        complete=frozenset({1, 2}),
+        missing_episodes=frozenset({2}),
+    )
+
+    # Season 1 is known and has nothing missing -> rejected.
+    assert _season_pack_reason(_candidate([1]), seasons=context) == "第 1 季本地没有缺集"
+    # Season 9 was never listed -> no opinion.
+    assert _season_pack_reason(_candidate([9]), seasons=context) is None
