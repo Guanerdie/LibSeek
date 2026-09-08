@@ -1,0 +1,52 @@
+# 提交前自动检查，重点是别把密码之类的东西提交进公开仓库。
+#
+# 第一次使用（只需一次）：
+#     uv tool install pre-commit
+#     pre-commit install
+# 之后每次 git commit 会自动跑。想手动全量扫一遍：
+#     pre-commit run --all-files
+#
+# 注意：gitleaks 只看 git 认识的文件。未跟踪的文件不会被扫描，所以
+# `pre-commit run --all-files` 对一个还没 git add 的新文件是「通过」——
+# 这一点验证配置时踩过，别被假的绿色骗了。真正的防线是 commit 那一刻，
+# 那时文件已经在暂存区里。
+#
+# 这个项目同时处理 PT 站密码、passkey、qBittorrent 凭据和 cookie，而仓库是
+# 公开的。历史上已经发生过：生产服务器 IP 被写进 DEPLOYMENT_GUIDE.md 提交
+# 上去，只能事后换成占位符。靠人记住是靠不住的。
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      # 扫描密钥、token、私钥等。规则见 .gitleaks.toml。
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # 私钥文件直接拦下，不依赖正则匹配内容。
+      - id: detect-private-key
+      # .env 之类的大文件误提交往往是打包产物或数据库。
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      # 后端的三条检查，和 CI 里跑的是同一套。只在改到 backend 时触发。
+      - id: ruff
+        name: ruff (backend)
+        entry: bash -c 'cd backend && uv run ruff check app tests'
+        language: system
+        files: ^backend/.*\.py$
+        pass_filenames: false
+      - id: mypy
+        name: mypy (backend)
+        entry: bash -c 'cd backend && uv run mypy app'
+        language: system
+        files: ^backend/app/.*\.py$
+        pass_filenames: false
