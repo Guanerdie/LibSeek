@@ -37,6 +37,7 @@ const form = reactive({
   cooldown_tier_1_hours: 24,
   cooldown_tier_2_hours: 72,
   cooldown_tier_3_hours: 168,
+  variety_recent_episodes: 5,
 })
 
 // Presets for the empty-search backoff ladder.  Sites differ in how much
@@ -121,6 +122,7 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.cooldown_tier_1_hours = policy.cooldown_tier_1_hours
   form.cooldown_tier_2_hours = policy.cooldown_tier_2_hours
   form.cooldown_tier_3_hours = policy.cooldown_tier_3_hours
+  form.variety_recent_episodes = policy.variety_recent_episodes
 }
 
 async function loadMediaOptions(page = 1): Promise<void> {
@@ -312,6 +314,7 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     cooldown_tier_1_hours: form.cooldown_tier_1_hours,
     cooldown_tier_2_hours: form.cooldown_tier_2_hours,
     cooldown_tier_3_hours: form.cooldown_tier_3_hours,
+    variety_recent_episodes: form.variety_recent_episodes,
   })
   applyPolicy(policy)
   return policy
@@ -524,6 +527,28 @@ onBeforeUnmount(() => {
             type="number"
             min="1"
             max="720"
+          />
+        </label>
+      </div>
+      <div class="filter-heading">
+        <div>
+          <span class="eyebrow">VARIETY</span>
+          <strong>综艺追更新</strong>
+          <p class="muted">
+            综艺一直在播、按集发布，没有完整季包。这里设置每次只抓最新的几集，
+            避免一口气把几百集老内容全下下来。填 0 表示不抓单集（只要整季包）。
+          </p>
+        </div>
+      </div>
+      <div class="configuration-field-grid">
+        <label>
+          只抓最新几集
+          <input
+            v-model.number="form.variety_recent_episodes"
+            name="variety_recent_episodes"
+            type="number"
+            min="0"
+            max="50"
           />
         </label>
       </div>

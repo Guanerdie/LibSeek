@@ -293,6 +293,7 @@ export interface AutomationPolicy {
   cooldown_tier_1_hours: number
   cooldown_tier_2_hours: number
   cooldown_tier_3_hours: number
+  variety_recent_episodes: number
   updated_at: string
   last_run_at: string | null
 }

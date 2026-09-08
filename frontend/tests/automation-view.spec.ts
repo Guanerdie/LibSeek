@@ -42,6 +42,7 @@ const policy: AutomationPolicy = {
   cooldown_tier_1_hours: 24,
   cooldown_tier_2_hours: 72,
   cooldown_tier_3_hours: 168,
+  variety_recent_episodes: 5,
   updated_at: '2026-08-23T00:00:00Z',
   last_run_at: null,
 }
@@ -143,6 +144,32 @@ describe('automation settings', () => {
         cooldown_tier_2_hours: 48,
         cooldown_tier_3_hours: 96,
       }),
+    )
+  })
+
+  it('saves how many latest variety episodes to chase', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.get('input[name="variety_recent_episodes"]').setValue(3)
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ variety_recent_episodes: 3 }),
+    )
+  })
+
+  it('lets the variety window be switched off entirely', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.get('input[name="variety_recent_episodes"]').setValue(0)
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ variety_recent_episodes: 0 }),
     )
   })
 
