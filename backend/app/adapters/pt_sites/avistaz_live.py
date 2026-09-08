@@ -22,7 +22,13 @@ from pydantic import (
 )
 
 from app.adapters.base import PtSiteAdapter
-from app.core.http import SafeAsyncHttpClient, SafeHttpResult, SerializedRateLimiter
+from app.core.http import (
+    SafeAsyncHttpClient,
+    SafeHttpResult,
+    SerializedRateLimiter,
+    backoff_delay,
+    pick_user_agent,
+)
 from app.core.pt_site_rules import effective_hnr_rule
 from app.core.security import validate_external_url
 from app.errors import AppError
@@ -152,6 +158,7 @@ class AvistaZAdapter(PtSiteAdapter):
         before_request: Callable[[], Awaitable[None]] | None = None,
         enable_torrent_fetch: bool = False,
         limiter: SerializedRateLimiter | None = None,
+        user_agent: str | None = None,
     ) -> None:
         if not username or not password or not pid:
             raise AppError("AVISTAZ_NOT_CONFIGURED", "AvistaZ 运行时凭据未配置", status_code=409)
@@ -167,6 +174,7 @@ class AvistaZAdapter(PtSiteAdapter):
             max_response_bytes=max_response_bytes,
             transport=transport,
             proxy=proxy,
+            user_agent=user_agent or pick_user_agent(base_url),
         )
         self.limiter = limiter or SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.sleep = sleep
@@ -262,7 +270,7 @@ class AvistaZAdapter(PtSiteAdapter):
                             else None
                         ),
                     )
-                await self.sleep(max(float(2**attempt), retry_after or 0.0))
+                await self.sleep(backoff_delay(attempt, retry_after=retry_after))
         raise AppError("AVISTAZ_RATE_LIMITED", "AvistaZ 请求受到限速", retryable=True)
 
     @staticmethod

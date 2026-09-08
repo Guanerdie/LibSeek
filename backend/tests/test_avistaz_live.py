@@ -485,7 +485,10 @@ async def test_429_honors_retry_after_before_retrying() -> None:
     avistaz = adapter(sleep=record_sleep)
     assert await avistaz.search(TorrentSearchRequest(tmdb=123)) == []
     assert route.call_count == 2
-    assert delays == [17.0]
+    # Retry-After is the floor; jitter (< 1s) is added on top so a fleet of
+    # clients does not retry in lockstep.
+    assert len(delays) == 1
+    assert 17.0 <= delays[0] < 18.0
     await avistaz.aclose()
 
 
@@ -515,7 +518,9 @@ async def test_final_429_preserves_bounded_retry_after() -> None:
         await avistaz.aclose()
 
     assert route.call_count == 3
-    assert delays == [17.0, 23.0]
+    assert len(delays) == 2
+    assert 17.0 <= delays[0] < 18.0
+    assert 23.0 <= delays[1] < 24.0
     assert caught.value.error_code == "AVISTAZ_RATE_LIMITED"
     assert caught.value.retryable is True
     assert caught.value.details == {"retry_after_seconds": 29.0}

@@ -23,7 +23,12 @@ from app.adapters.pt_sites.profiles import (
     normalize_public_dns_host,
     url_origin,
 )
-from app.core.http import SafeHttpResult, SerializedRateLimiter
+from app.core.http import (
+    SafeHttpResult,
+    SerializedRateLimiter,
+    backoff_delay,
+    pick_user_agent,
+)
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.schemas.adapters import (
@@ -66,6 +71,7 @@ class SameOriginNexusSession:
         connect_timeout: float = 5.0,
         read_timeout: float = 30.0,
         max_response_bytes: int = 10 * 1024 * 1024,
+        user_agent: str | None = None,
     ) -> None:
         try:
             normalized_allowed_hosts = frozenset(
@@ -96,6 +102,7 @@ class SameOriginNexusSession:
             proxy=proxy,
             follow_redirects=False,
             trust_env=False,
+            headers={"User-Agent": user_agent or pick_user_agent(self.base_url)},
         )
 
     async def aclose(self) -> None:
@@ -729,6 +736,7 @@ class NexusPhpAdapter(PtSiteAdapter):
                 status_code=409,
             )
         self.limiter = limiter or SerializedRateLimiter(min_interval_seconds, sleep=sleep)
+        self.sleep = sleep
         self.request_gate = request_gate
         self.before_request = before_request
         self.parser = NexusPhpHtmlParser(profile)
@@ -940,7 +948,16 @@ class NexusPhpAdapter(PtSiteAdapter):
         operation: str,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        rate_limit_attempts: int = 3,
     ) -> SafeHttpResult:
+        """Send one request, retrying a 429 in place before giving up.
+
+        A 429 used to propagate immediately.  The job-level retry does catch
+        it, but only after the whole job fails and its own backoff elapses --
+        minutes, for a site that asked for seconds.  Retrying here matches what
+        the AvistaZ adapter already does.
+        """
+
         gate = self.request_gate
         if gate is None:
             raise AppError(
@@ -948,15 +965,28 @@ class NexusPhpAdapter(PtSiteAdapter):
                 "NexusPHP 实时请求缺少跨 Worker 站点请求门",
                 status_code=409,
             )
-        async with gate(operation):
-            await self.limiter.acquire(operation)
-            return await self.session.request(
-                method,
-                path,
-                params=params,
-                headers=headers,
-                before_send=self.before_request,
+        attempts = max(1, rate_limit_attempts)
+        for attempt in range(attempts):
+            async with gate(operation):
+                await self.limiter.acquire(operation)
+                response = await self.session.request(
+                    method,
+                    path,
+                    params=params,
+                    headers=headers,
+                    before_send=self.before_request,
+                )
+            if response.status_code != 429 or attempt == attempts - 1:
+                # The final 429 is returned, not raised, so the existing
+                # response validators keep producing their own error codes.
+                return response
+            await self.sleep(
+                backoff_delay(
+                    attempt,
+                    retry_after=self._retry_after_seconds(response.retry_after),
+                )
             )
+        raise AppError("NEXUSPHP_RATE_LIMITED", "NexusPHP 请求受到限速", retryable=True)
 
     def _search_params(self, request: TorrentSearchRequest) -> dict[str, Any] | None:
         query = self.profile.query

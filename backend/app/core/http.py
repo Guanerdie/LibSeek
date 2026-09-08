@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import random
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
@@ -14,6 +16,68 @@ import httpx
 
 from app.core.security import validate_external_url
 from app.errors import AppError
+
+# Real desktop browser strings.  The point is not to impersonate anyone -- it
+# is that httpx's default "python-httpx/0.28.1" is the single most obvious
+# automation signal a PT site can read, and several of them block on it
+# outright.
+BROWSER_USER_AGENTS: tuple[str, ...] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/139.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:141.0) Gecko/20100101 Firefox/141.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/18.6 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+)
+
+
+def pick_user_agent(seed: str | None = None) -> str:
+    """Choose one browser string, stable for a given ``seed``.
+
+    Deliberately *not* rotated per request.  A logged-in session whose
+    User-Agent changes between requests is a stronger bot signal than a boring
+    one that never changes -- real browsers do not do that.  Seeding by site id
+    means one deployment presents one consistent identity per site, while
+    different deployments do not all look identical.
+    """
+
+    if seed is None:
+        return random.choice(BROWSER_USER_AGENTS)
+    digest = hashlib.sha256(seed.encode()).digest()
+    return BROWSER_USER_AGENTS[digest[0] % len(BROWSER_USER_AGENTS)]
+
+
+def backoff_delay(
+    attempt: int,
+    *,
+    retry_after: float | None = None,
+    base_seconds: float = 2.0,
+    jitter_seconds: float = 1.0,
+    random_source: Callable[[], float] = random.random,
+) -> float:
+    """Exponential backoff with jitter, never shorter than ``Retry-After``.
+
+    The jitter matters as much as the growth: a fleet of retries landing on
+    exactly 2s, 4s, 8s is itself a recognisable pattern, and identical delays
+    make every client retry in lockstep after a site-wide blip.
+    """
+
+    # 2.0 rather than 2: mypy types ``int ** int`` as Any, because a negative
+    # exponent would produce a float.
+    delay = base_seconds * (2.0 ** max(0, attempt))
+    if retry_after is not None:
+        delay = max(delay, retry_after)
+    return delay + random_source() * max(0.0, jitter_seconds)
 
 
 @dataclass(frozen=True)
@@ -45,6 +109,7 @@ class SafeAsyncHttpClient:
         max_response_bytes: int,
         transport: httpx.AsyncBaseTransport | None = None,
         proxy: httpx.Proxy | None = None,
+        user_agent: str | None = None,
     ) -> None:
         self.base_url = validate_external_url(base_url.rstrip("/"), allowed_hosts)
         self.allowed_hosts = allowed_hosts
@@ -55,6 +120,7 @@ class SafeAsyncHttpClient:
             proxy=proxy,
             follow_redirects=False,
             trust_env=False,
+            headers={"User-Agent": user_agent} if user_agent else None,
         )
 
     async def aclose(self) -> None:
