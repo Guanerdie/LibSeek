@@ -170,6 +170,15 @@ export const dailyApi = {
     ),
   mediaDetail: (mediaId: string) =>
     request<DailyMediaDetail>(`/api/library/${encodeURIComponent(mediaId)}`),
+  setSubscription: (mediaId: string, subscribed: boolean) =>
+    request<DailyMediaDetail>(
+      `/api/library/${encodeURIComponent(mediaId)}/subscription`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscribed }),
+      },
+    ),
   identify: (mediaId: string, tmdbId?: number) =>
     request<DailyMedia>(`/api/library/${encodeURIComponent(mediaId)}/identify`, {
       method: 'POST',

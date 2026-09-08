@@ -12,6 +12,7 @@ from app.errors import AppError
 from app.models.enums import MediaType
 from app.simple.models import (
     ActivityLog,
+    AutomationJob,
     Download,
     DownloadState,
     Episode,
@@ -96,6 +97,31 @@ async def media_filter_options(
         sorted(states, key=lambda item: item.value),
         sorted(years, reverse=True),
     )
+
+
+async def latest_automation_job(session: AsyncSession, media_id: str) -> AutomationJob | None:
+    """The most recent automation attempt for this media item.
+
+    Its ``decision`` is the only record of *why* nothing was downloaded, and
+    until now it was reachable only from the automation pages -- so a media
+    item sitting at READY looked identical whether the site had nothing, the
+    score threshold rejected everything, or every candidate was a dead torrent.
+    """
+
+    job: AutomationJob | None = await session.scalar(
+        select(AutomationJob)
+        .where(AutomationJob.media_id == media_id)
+        # created_at can tie when two jobs land in the same clock tick, and a
+        # random UUID is a meaningless tie-break; a job that has finished is
+        # the later one in every case that matters.
+        .order_by(
+            AutomationJob.created_at.desc(),
+            AutomationJob.finished_at.desc(),
+            AutomationJob.id.desc(),
+        )
+        .limit(1)
+    )
+    return job
 
 
 async def get_media(

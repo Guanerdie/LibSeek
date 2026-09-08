@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   mediaDetail: vi.fn(),
   identify: vi.fn(),
   createSearch: vi.fn(),
+  setSubscription: vi.fn(),
   search: vi.fn(),
   downloadCandidate: vi.fn(),
   retryDownload: vi.fn(),
@@ -102,6 +103,9 @@ function mediaDetail(overrides: Partial<DailyMediaDetail> = {}): DailyMediaDetai
     ...media,
     episodes: [],
     latest_search: null,
+    latest_automation: null,
+    subscribed: false,
+    subscription_active: false,
     ...overrides,
   }
 }
@@ -552,6 +556,84 @@ describe('simplified daily store', () => {
     await flushPromises()
 
     expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], true)
+  })
+
+  it('explains why the last automation run picked nothing', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(
+      mediaDetail({
+        latest_automation: {
+          job_id: 'j1',
+          state: 'SUCCEEDED',
+          created_at: '2026-09-08T08:00:00Z',
+          finished_at: null,
+          error_code: null,
+          error_message: null,
+          candidate_count: 40,
+          selected_title: null,
+          selected_score: null,
+          search_cooldown_until: null,
+          download_skipped: null,
+          rejected: [
+            { candidate_id: null, title: 'A', reasons: ['评分低于策略门槛', '做种数不足'] },
+            { candidate_id: null, title: 'B', reasons: ['评分低于策略门槛'] },
+          ],
+        },
+      }),
+    )
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const panel = wrapper.get('.outcome-panel')
+    expect(panel.text()).toContain('40')
+    // Reasons are counted and ordered by how often they bit.
+    const reasons = wrapper.findAll('.outcome-reasons li').map((li) => li.text())
+    expect(reasons[0]).toContain('评分低于策略门槛')
+    expect(reasons[0]).toContain('2')
+    expect(reasons[1]).toContain('做种数不足')
+  })
+
+  it('warns when a subscription cannot take effect', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(
+      mediaDetail({ subscribed: true, subscription_active: false }),
+    )
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.get('.outcome-warning').text()).toContain('不会生效')
+  })
+
+  it('subscribes to a show from its own page', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ subscribed: false }))
+    mocks.setSubscription.mockResolvedValueOnce(
+      mediaDetail({ subscribed: true, subscription_active: true }),
+    )
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const button = wrapper.findAll('button').find((item) => item.text() === '追这部')
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setSubscription).toHaveBeenCalledWith(media.id, true)
+    expect(
+      wrapper.findAll('button').some((item) => item.text() === '取消追更'),
+    ).toBe(true)
   })
 
   it('refreshes qBittorrent state before displaying downloads', async () => {

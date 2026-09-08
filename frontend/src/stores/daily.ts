@@ -122,6 +122,16 @@ export const useDailyStore = defineStore('daily', {
         this.mediaDetailLoading = false
       }
     },
+    async setSubscription(mediaId: string, subscribed: boolean): Promise<boolean> {
+      this.resourceError = null
+      try {
+        this.selectedMedia = await dailyApi.setSubscription(mediaId, subscribed)
+        return true
+      } catch (error) {
+        this.resourceError = error instanceof ApiError ? error.message : '无法更新订阅'
+        return false
+      }
+    },
     async identify(mediaId: string, tmdbId?: number): Promise<boolean> {
       this.resourceError = null
       try {

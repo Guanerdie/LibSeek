@@ -49,6 +49,36 @@ async function startSearch(force = false): Promise<void> {
   }
 }
 
+const outcome = computed(() => daily.selectedMedia?.latest_automation ?? null)
+
+/** The rejection reasons that actually mattered, most common first. */
+const outcomeReasons = computed(() => {
+  const counts = new Map<string, number>()
+  for (const item of outcome.value?.rejected ?? []) {
+    for (const reason of item.reasons) {
+      counts.set(reason, (counts.get(reason) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+})
+
+const subscribing = ref(false)
+
+async function toggleSubscription(): Promise<void> {
+  if (subscribing.value || !daily.selectedMedia) return
+  subscribing.value = true
+  try {
+    await daily.setSubscription(mediaId.value, !daily.selectedMedia.subscribed)
+  } finally {
+    subscribing.value = false
+  }
+}
+
+function outcomeTime(iso: string): string {
+  const parsed = new Date(iso)
+  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString()
+}
+
 async function identify(): Promise<void> {
   const parsed = Number(tmdbId.value)
   await daily.identify(mediaId.value, Number.isInteger(parsed) && parsed > 0 ? parsed : undefined)
@@ -106,6 +136,15 @@ onMounted(async () => {
       >
         强制刷新
       </button>
+      <button
+        v-if="daily.selectedMedia"
+        class="button"
+        :class="{ primary: !daily.selectedMedia.subscribed }"
+        :disabled="subscribing"
+        @click="toggleSubscription"
+      >
+        {{ daily.selectedMedia.subscribed ? '取消追更' : '追这部' }}
+      </button>
     </PageHeader>
 
     <PageState :loading="daily.mediaDetailLoading" :error="daily.resourceError" />
@@ -117,6 +156,51 @@ onMounted(async () => {
       </div>
       <input v-model="tmdbId" inputmode="numeric" placeholder="可选：TMDB ID" />
       <button class="button primary" @click="identify">确认影视信息</button>
+    </div>
+
+    <div
+      v-if="daily.selectedMedia?.subscribed && !daily.selectedMedia?.subscription_active"
+      class="panel compact-panel outcome-warning"
+    >
+      <strong>已加入追更清单，但当前不会生效</strong>
+      <span class="muted">
+        自动化的范围模式是「按筛选条件」，不读这份清单。去自动化设置页改成「手动选择」才会生效。
+      </span>
+    </div>
+
+    <div v-if="outcome" class="panel outcome-panel">
+      <div class="outcome-head">
+        <strong>最近一次自动化</strong>
+        <span class="muted">{{ outcomeTime(outcome.created_at) }}</span>
+      </div>
+      <p v-if="outcome.selected_title" class="outcome-line">
+        选中了
+        <strong>{{ outcome.selected_title }}</strong>
+        <span v-if="outcome.selected_score !== null" class="muted">
+          （评分 {{ outcome.selected_score.toFixed(3) }}）
+        </span>
+      </p>
+      <p v-else-if="outcome.candidate_count === 0" class="outcome-line">
+        站点没有搜到任何候选资源。
+      </p>
+      <p v-else class="outcome-line">
+        搜到 <strong>{{ outcome.candidate_count }}</strong> 个候选，但一个都不符合当前策略：
+      </p>
+      <ul v-if="!outcome.selected_title && outcomeReasons.length" class="outcome-reasons">
+        <li v-for="[reason, count] in outcomeReasons" :key="reason">
+          <span class="outcome-count">{{ count }}</span> {{ reason }}
+        </li>
+      </ul>
+      <p v-if="outcome.download_skipped" class="outcome-line muted">
+        没有提交下载：{{ outcome.download_skipped }}
+      </p>
+      <p v-if="outcome.error_message" class="outcome-line muted">
+        错误：{{ outcome.error_message }}
+        <span v-if="outcome.error_code">（{{ outcome.error_code }}）</span>
+      </p>
+      <p v-if="outcome.search_cooldown_until" class="outcome-line muted">
+        下次搜索时间：{{ outcomeTime(outcome.search_cooldown_until) }}
+      </p>
     </div>
 
     <div v-if="daily.selectedMedia?.episodes.length" class="panel compact-panel">

@@ -26,11 +26,18 @@ from app.simple.integrations import (
     sync_download_statuses,
     sync_nextfind,
 )
-from app.simple.models import DownloadState, LibraryMediaItem, MediaState, ReleaseCandidate
+from app.simple.models import (
+    AutomationJob,
+    DownloadState,
+    LibraryMediaItem,
+    MediaState,
+    ReleaseCandidate,
+)
 from app.simple.regions import NextFindRegion
 from app.simple.schemas import (
     AutomationJobPage,
     AutomationJobView,
+    AutomationOutcomeView,
     AutomationPolicyUpdate,
     AutomationPolicyView,
     AutomationRunPage,
@@ -47,6 +54,7 @@ from app.simple.schemas import (
     SearchCreate,
     SearchDetail,
     SearchView,
+    SubscriptionUpdate,
     SyncResult,
 )
 
@@ -111,16 +119,86 @@ async def sync_library(session: Session, principal: OperatorPrincipal) -> SyncRe
     return SyncResult(created=created, updated=updated)
 
 
+def _automation_outcome(job: AutomationJob | None) -> AutomationOutcomeView | None:
+    """Flatten a job's stored decision into something the UI can render."""
+
+    if job is None:
+        return None
+    decision = job.decision or {}
+    rejected = decision.get("rejected")
+    return AutomationOutcomeView.model_validate(
+        {
+            "job_id": job.id,
+            "state": job.state,
+            "created_at": job.created_at,
+            "finished_at": job.finished_at,
+            "error_code": job.error_code,
+            "error_message": job.error_message,
+            "candidate_count": decision.get("candidate_count") or 0,
+            "selected_title": decision.get("selected_title"),
+            "selected_score": decision.get("selected_score"),
+            "search_cooldown_until": decision.get("search_cooldown_until"),
+            "download_skipped": decision.get("download_skipped"),
+            "rejected": rejected if isinstance(rejected, list) else [],
+        }
+    )
+
+
 @router.get("/library/{media_id}", response_model=MediaDetail)
 async def media_detail(media_id: str, session: Session, principal: ViewerPrincipal) -> MediaDetail:
     del principal
     media, episodes, latest_search = await service.get_media(session, media_id)
+    job = await service.latest_automation_job(session, media_id)
+    policy = await automation.get_policy(session)
     return MediaDetail.model_validate(
         {
             **MediaSummary.model_validate(media).model_dump(),
             "episodes": episodes,
             "latest_search": (
                 SearchView.model_validate(latest_search) if latest_search is not None else None
+            ),
+            "latest_automation": _automation_outcome(job),
+            "subscribed": media.id in set(policy.selected_media_ids),
+            "subscription_active": (
+                media.id in set(policy.selected_media_ids) and policy.scope_mode == "selected"
+            ),
+        }
+    )
+
+
+@router.put("/library/{media_id}/subscription", response_model=MediaDetail)
+async def set_subscription(
+    media_id: str,
+    payload: SubscriptionUpdate,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> MediaDetail:
+    """Add or remove one media item from the automation scope.
+
+    The scope already existed as ``selected_media_ids`` on the policy, but the
+    only way to edit it was a multi-select box holding the whole library --
+    which is why it ended up with three entries and was never revisited.
+    Toggling it from the media itself is the same data, reached the way people
+    actually think about it: "follow this show".
+    """
+
+    del principal
+    media, episodes, latest_search = await service.get_media(session, media_id)
+    policy = await automation.set_media_subscription(
+        session, media_id=media.id, subscribed=payload.subscribed
+    )
+    job = await service.latest_automation_job(session, media_id)
+    return MediaDetail.model_validate(
+        {
+            **MediaSummary.model_validate(media).model_dump(),
+            "episodes": episodes,
+            "latest_search": (
+                SearchView.model_validate(latest_search) if latest_search is not None else None
+            ),
+            "latest_automation": _automation_outcome(job),
+            "subscribed": media.id in set(policy.selected_media_ids),
+            "subscription_active": (
+                media.id in set(policy.selected_media_ids) and policy.scope_mode == "selected"
             ),
         }
     )

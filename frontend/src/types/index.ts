@@ -220,9 +220,33 @@ export interface DailyMediaPage extends Page<DailyMedia> {
   filter_options: DailyMediaFilterOptions
 }
 
+export interface DailyRejectedCandidate {
+  candidate_id: string | null
+  title: string | null
+  reasons: string[]
+}
+
+export interface DailyAutomationOutcome {
+  job_id: string
+  state: AutomationJobState
+  created_at: string
+  finished_at: string | null
+  error_code: string | null
+  error_message: string | null
+  candidate_count: number
+  selected_title: string | null
+  selected_score: number | null
+  search_cooldown_until: string | null
+  download_skipped: string | null
+  rejected: DailyRejectedCandidate[]
+}
+
 export interface DailyMediaDetail extends DailyMedia {
   episodes: DailyEpisode[]
   latest_search: DailySearch | null
+  latest_automation: DailyAutomationOutcome | null
+  subscribed: boolean
+  subscription_active: boolean
 }
 
 export interface DailyCandidate {

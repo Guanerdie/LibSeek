@@ -183,6 +183,30 @@ async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) 
     return policy
 
 
+async def set_media_subscription(
+    session: AsyncSession, *, media_id: str, subscribed: bool
+) -> AutomationPolicy:
+    """Add or remove one media item from the manual automation scope.
+
+    ``scope_mode`` is deliberately left alone.  Flipping a policy-wide switch
+    from a per-item action could silently drop every other item out of
+    automation; the caller surfaces whether the subscription is currently in
+    effect instead, so the choice stays the operator's.
+    """
+
+    policy = await get_policy(session)
+    current = list(policy.selected_media_ids)
+    if subscribed:
+        if media_id not in current:
+            current.append(media_id)
+    else:
+        current = [item for item in current if item != media_id]
+    policy.selected_media_ids = current
+    await session.commit()
+    await session.refresh(policy)
+    return policy
+
+
 async def list_jobs(
     session: AsyncSession,
     *,

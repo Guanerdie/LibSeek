@@ -125,9 +125,41 @@ class SearchDetail(SearchView):
     candidates: list[CandidateView] = Field(default_factory=list)
 
 
+class RejectedCandidateView(BaseModel):
+    candidate_id: str | None = None
+    title: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class AutomationOutcomeView(BaseModel):
+    """Why the last automation attempt did or did not download anything."""
+
+    job_id: str
+    state: AutomationJobState
+    created_at: datetime
+    finished_at: datetime | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    candidate_count: int = 0
+    selected_title: str | None = None
+    selected_score: float | None = None
+    search_cooldown_until: str | None = None
+    download_skipped: str | None = None
+    rejected: list[RejectedCandidateView] = Field(default_factory=list)
+
+
 class MediaDetail(MediaSummary):
     episodes: list[EpisodeView] = Field(default_factory=list)
     latest_search: SearchView | None = None
+    latest_automation: AutomationOutcomeView | None = None
+    subscribed: bool = False
+    # False when subscribed but the policy scope is still "filters", i.e. the
+    # subscription list is not what automation is reading.
+    subscription_active: bool = False
+
+
+class SubscriptionUpdate(BaseModel):
+    subscribed: bool
 
 
 class DownloadCreate(BaseModel):
