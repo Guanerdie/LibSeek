@@ -27,6 +27,7 @@ dev = [
   "mypy>=1.14,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<8",
   "respx>=0.22,<1",
   "ruff>=0.9,<1",
 ]
@@ -56,3 +57,17 @@ exclude = ["alembic"]
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+[tool.coverage.run]
+source = ["app"]
+# 行覆盖，与计划里 80% 这个口径一致（分支覆盖当前是 77%）。
+branch = false
+omit = ["app/__init__.py"]
+
+[tool.coverage.report]
+# NEXT_OPTIMIZATION_PLAN.md 优化6 的目标。不放进 pytest 的默认 addopts，
+# 免得日常 `uv run pytest` 每次都背上覆盖率统计的开销；跑
+# `uv run pytest --cov=app` 时这个阈值才生效。
+fail_under = 80
+show_missing = true
+skip_covered = true

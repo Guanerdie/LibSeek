@@ -37,3 +37,5 @@ id_ed25519*
 # 本地开发产物
 backend/unin.db
 frontend/dist/
+backend/.coverage
+backend/htmlcov/
