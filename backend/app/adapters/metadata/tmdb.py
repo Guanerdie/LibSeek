@@ -113,6 +113,7 @@ class TmdbProvider(MetadataProvider):
         allow_future_episodes: bool = False,
         today: Callable[[], date] = lambda: datetime.now(UTC).date(),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        limiter: SerializedRateLimiter | None = None,
     ) -> None:
         if not access_token:
             raise AppError("TMDB_NOT_CONFIGURED", "TMDB Access Token 未配置", status_code=409)
@@ -126,7 +127,7 @@ class TmdbProvider(MetadataProvider):
             transport=transport,
             proxy=proxy,
         )
-        self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
+        self.limiter = limiter or SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.cache: AsyncTtlCache[Any] = AsyncTtlCache(
             ttl_seconds=cache_ttl_seconds, max_entries=cache_max_entries
         )

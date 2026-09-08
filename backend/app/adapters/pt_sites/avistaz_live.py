@@ -151,6 +151,7 @@ class AvistaZAdapter(PtSiteAdapter):
         request_gate: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
         before_request: Callable[[], Awaitable[None]] | None = None,
         enable_torrent_fetch: bool = False,
+        limiter: SerializedRateLimiter | None = None,
     ) -> None:
         if not username or not password or not pid:
             raise AppError("AVISTAZ_NOT_CONFIGURED", "AvistaZ 运行时凭据未配置", status_code=409)
@@ -167,7 +168,7 @@ class AvistaZAdapter(PtSiteAdapter):
             transport=transport,
             proxy=proxy,
         )
-        self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
+        self.limiter = limiter or SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.sleep = sleep
         self.request_gate = request_gate
         self.before_request = before_request

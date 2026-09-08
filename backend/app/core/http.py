@@ -4,10 +4,11 @@ import asyncio
 import json
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlparse
+from weakref import WeakKeyDictionary
 
 import httpx
 
@@ -204,6 +205,44 @@ class SerializedRateLimiter:
                 if wait > 0:
                     await self.sleep(wait)
             self._last_request_at = self.monotonic()
+
+
+_shared_rate_limiters: MutableMapping[
+    asyncio.AbstractEventLoop, dict[tuple[str, float], SerializedRateLimiter]
+] = WeakKeyDictionary()
+
+
+def shared_rate_limiter(key: str, min_interval_seconds: float) -> SerializedRateLimiter:
+    """Return the process-wide limiter for ``key``, creating it on first use.
+
+    Adapters are built per search and closed immediately afterwards, so a
+    limiter owned by the adapter starts over on every job: its
+    ``_last_request_at`` is ``None`` again and the very first request of the
+    next job goes out with no delay.  A run of twenty jobs therefore hit the
+    site at full speed even though ``min_interval_seconds`` was configured, and
+    the setting only ever throttled requests *within* a single search.  Sharing
+    the limiter across instances is what makes the interval hold end to end.
+
+    The registry is keyed by event loop because ``asyncio.Lock`` binds to the
+    loop that first awaits it; a limiter leaking across loops would raise
+    "bound to a different event loop" in the next test.  It is also keyed by
+    the interval so that changing the setting at runtime yields a fresh
+    limiter rather than silently keeping the old pace.
+    """
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop yet: sharing would be meaningless, and caching under a loop
+        # we cannot name would strand the entry.
+        return SerializedRateLimiter(min_interval_seconds)
+    interval = max(0.0, min_interval_seconds)
+    limiters = _shared_rate_limiters.setdefault(loop, {})
+    limiter = limiters.get((key, interval))
+    if limiter is None:
+        limiter = SerializedRateLimiter(interval)
+        limiters[(key, interval)] = limiter
+    return limiter
 
 
 class AsyncTtlCache[T]:

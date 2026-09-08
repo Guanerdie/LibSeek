@@ -16,6 +16,7 @@ from app.adapters.media_sources import NextFindAdapter
 from app.adapters.metadata import TmdbProvider
 from app.adapters.pt_sites import AvistaZAdapter
 from app.core.config import Settings, get_settings
+from app.core.http import shared_rate_limiter
 from app.core.security import validate_external_url
 from app.core.time import utc_now
 from app.errors import AppError
@@ -91,6 +92,7 @@ def build_tmdb(settings: Settings | None = None) -> TmdbProvider:
         cache_max_entries=settings.tmdb_cache_max_entries,
         allow_future_episodes=settings.tmdb_allow_future_episodes,
         proxy=settings.outbound_proxy(),
+        limiter=shared_rate_limiter("tmdb", settings.tmdb_min_interval_seconds),
     )
 
 
@@ -123,6 +125,9 @@ def build_pt_site(
         min_interval_seconds=settings.avistaz_min_interval_seconds,
         enable_torrent_fetch=allow_torrent_fetch,
         proxy=settings.outbound_proxy(),
+        limiter=shared_rate_limiter(
+            f"pt:{site_id}", settings.avistaz_min_interval_seconds
+        ),
     )
 
 

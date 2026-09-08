@@ -715,6 +715,7 @@ class NexusPhpAdapter(PtSiteAdapter):
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         request_gate: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
         before_request: Callable[[], Awaitable[None]] | None = None,
+        limiter: SerializedRateLimiter | None = None,
     ) -> None:
         self.profile = profile
         self._cookie_header = self._validate_memory_secret(cookie_header, "cookie")
@@ -727,7 +728,7 @@ class NexusPhpAdapter(PtSiteAdapter):
                 "启用 NexusPHP 实时能力必须配置跨 Worker 站点请求门",
                 status_code=409,
             )
-        self.limiter = SerializedRateLimiter(min_interval_seconds, sleep=sleep)
+        self.limiter = limiter or SerializedRateLimiter(min_interval_seconds, sleep=sleep)
         self.request_gate = request_gate
         self.before_request = before_request
         self.parser = NexusPhpHtmlParser(profile)
