@@ -15,6 +15,7 @@ from app.core.automation_runner import (
     recover_interrupted_jobs,
 )
 from app.core.config import get_settings
+from app.core.logging import configure_logging
 from app.core.security import sanitize_details
 from app.db.session import SessionFactory
 from app.errors import AppError
@@ -26,6 +27,7 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    configure_logging()
     async with SessionFactory() as session:
         await recover_interrupted_jobs(session)
 

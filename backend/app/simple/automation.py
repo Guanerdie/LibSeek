@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import MetadataProvider, PtSiteAdapter
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.core.logging import bind_job_context, clear_job_context, get_logger
 from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import MediaType
@@ -44,6 +45,7 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _run_lock = asyncio.Lock()
 _run_creation_lock = asyncio.Lock()
 _logger = logging.getLogger(__name__)
+_events = get_logger(__name__)
 _HARD_CORRECTNESS_WARNINGS = {
     "ID_MISMATCH",
     "ID_UNVERIFIED",
@@ -551,6 +553,13 @@ async def _execute_job(
 ) -> bool | None:
     job_id = job.id
     policy_id = policy.id
+    bind_job_context(
+        run_id=job.run_id,
+        job_id=job.id,
+        media_id=job.media_id,
+        trigger=job.trigger,
+        mode="dry-run" if policy.dry_run else "live",
+    )
     try:
         job.state = AutomationJobState.RUNNING
         job.attempt_count += 1
@@ -878,8 +887,19 @@ async def _execute_job(
             job.next_attempt_at = None
             if not isinstance(exc, AppError):
                 _logger.exception("Unexpected automation job failure", exc_info=exc)
+        _events.warning(
+            "job_failed",
+            error_code=job.error_code,
+            error_message=job.error_message,
+            attempt_count=job.attempt_count,
+            will_retry=will_retry,
+        )
         await session.commit()
         return None if will_retry else False
+    finally:
+        # Context is per job; leaving it bound would tag the next job's events
+        # with the previous job's ids.
+        clear_job_context()
 
 
 def _copy_job_for_run(
@@ -1040,10 +1060,24 @@ def _choose_candidate(
             rejected.append(
                 {"candidate_id": candidate.id, "title": candidate.title, "reasons": reasons}
             )
+            _events.info(
+                "candidate_rejected",
+                candidate_id=candidate.id,
+                title=candidate.title,
+                reasons=reasons,
+                score=candidate.score,
+                seeders=candidate.seeders,
+                size_bytes=candidate.size_bytes,
+            )
         else:
             eligible.append(candidate)
 
     if not eligible:
+        _events.info(
+            "no_candidate_selected",
+            total_candidates=len(candidates),
+            rejected_count=len(rejected),
+        )
         return None, rejected
 
     ranked = sorted(
@@ -1052,6 +1086,16 @@ def _choose_candidate(
         reverse=True,
     )
     selected = ranked[0]
+    _events.info(
+        "candidate_accepted",
+        candidate_id=selected.id,
+        title=selected.title,
+        score=selected.score,
+        seeders=selected.seeders,
+        size_bytes=selected.size_bytes,
+        eligible_count=len(eligible),
+        total_candidates=len(candidates),
+    )
     rejected.extend(
         {
             "candidate_id": candidate.id,
