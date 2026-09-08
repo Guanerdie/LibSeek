@@ -296,6 +296,11 @@ class AutomationPolicy(Base):
         CheckConstraint("max_attempts >= 1", name="ck_automation_attempts"),
         CheckConstraint("daily_download_limit >= 1", name="ck_automation_daily_limit"),
         CheckConstraint(
+            "cooldown_tier_1_hours >= 1 AND cooldown_tier_2_hours >= 1 "
+            "AND cooldown_tier_3_hours >= 1",
+            name="ck_automation_cooldown_tiers",
+        ),
+        CheckConstraint(
             "daily_download_bytes IS NULL OR daily_download_bytes > 0",
             name="ck_automation_daily_bytes",
         ),
@@ -321,6 +326,11 @@ class AutomationPolicy(Base):
     max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     daily_download_limit: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     daily_download_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    # Empty-search backoff, in hours.  Hard-coded as 1/3/7 days until sites
+    # with stricter (or laxer) rules made a per-deployment answer necessary.
+    cooldown_tier_1_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
+    cooldown_tier_2_hours: Mapped[int] = mapped_column(Integer, default=72, nullable=False)
+    cooldown_tier_3_hours: Mapped[int] = mapped_column(Integer, default=168, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

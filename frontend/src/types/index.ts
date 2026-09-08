@@ -290,6 +290,9 @@ export interface AutomationPolicy {
   max_attempts: number
   daily_download_limit: number
   daily_download_bytes: number | null
+  cooldown_tier_1_hours: number
+  cooldown_tier_2_hours: number
+  cooldown_tier_3_hours: number
   updated_at: string
   last_run_at: string | null
 }

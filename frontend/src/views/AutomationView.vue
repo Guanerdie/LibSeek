@@ -34,7 +34,24 @@ const form = reactive({
   max_attempts: 3,
   daily_download_limit: 3,
   daily_download_gib: '',
+  cooldown_tier_1_hours: 24,
+  cooldown_tier_2_hours: 72,
+  cooldown_tier_3_hours: 168,
 })
+
+// Presets for the empty-search backoff ladder.  Sites differ in how much
+// repeated searching they tolerate, so the sensible answer is per deployment.
+const cooldownPresets = [
+  { id: 'aggressive', label: '激进', hours: [6, 24, 72] },
+  { id: 'balanced', label: '平衡', hours: [24, 72, 168] },
+  { id: 'conservative', label: '保守', hours: [72, 168, 336] },
+] as const
+
+function applyCooldownPreset(hours: readonly number[]): void {
+  form.cooldown_tier_1_hours = hours[0]
+  form.cooldown_tier_2_hours = hours[1]
+  form.cooldown_tier_3_hours = hours[2]
+}
 const jobs = ref<AutomationJob[]>([])
 const runs = ref<AutomationRun[]>([])
 const runsTotal = ref(0)
@@ -101,6 +118,9 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.daily_download_gib = policy.daily_download_bytes
     ? String(Math.round((policy.daily_download_bytes / 1024 ** 3) * 10) / 10)
     : ''
+  form.cooldown_tier_1_hours = policy.cooldown_tier_1_hours
+  form.cooldown_tier_2_hours = policy.cooldown_tier_2_hours
+  form.cooldown_tier_3_hours = policy.cooldown_tier_3_hours
 }
 
 async function loadMediaOptions(page = 1): Promise<void> {
@@ -289,6 +309,9 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     max_attempts: form.max_attempts,
     daily_download_limit: form.daily_download_limit,
     daily_download_bytes: dailyBytes ? Math.round(dailyBytes) : null,
+    cooldown_tier_1_hours: form.cooldown_tier_1_hours,
+    cooldown_tier_2_hours: form.cooldown_tier_2_hours,
+    cooldown_tier_3_hours: form.cooldown_tier_3_hours,
   })
   applyPolicy(policy)
   return policy
@@ -449,6 +472,59 @@ onBeforeUnmount(() => {
         <label>
           每日自动下载体积（GiB，留空不限）
           <input v-model="form.daily_download_gib" type="number" min="0.1" step="0.1" />
+        </label>
+      </div>
+      <div class="filter-heading">
+        <div>
+          <span class="eyebrow">COOLDOWN</span>
+          <strong>空搜索退避</strong>
+          <p class="muted">
+            连续搜不到资源时，等待多久再搜同一条影视。过短会浪费站点配额，
+            过长会让新上架的资源迟迟发现不了。
+          </p>
+        </div>
+        <div class="cooldown-presets">
+          <button
+            v-for="preset in cooldownPresets"
+            :key="preset.id"
+            type="button"
+            class="button"
+            @click="applyCooldownPreset(preset.hours)"
+          >
+            {{ preset.label }}（{{ preset.hours.join(' / ') }} 小时）
+          </button>
+        </div>
+      </div>
+      <div class="configuration-field-grid">
+        <label>
+          第一次搜不到后等待（小时）
+          <input
+            v-model.number="form.cooldown_tier_1_hours"
+            name="cooldown_tier_1_hours"
+            type="number"
+            min="1"
+            max="720"
+          />
+        </label>
+        <label>
+          第二次搜不到后等待（小时）
+          <input
+            v-model.number="form.cooldown_tier_2_hours"
+            name="cooldown_tier_2_hours"
+            type="number"
+            min="1"
+            max="720"
+          />
+        </label>
+        <label>
+          第三次及以后等待（小时）
+          <input
+            v-model.number="form.cooldown_tier_3_hours"
+            name="cooldown_tier_3_hours"
+            type="number"
+            min="1"
+            max="720"
+          />
         </label>
       </div>
       <div v-if="form.scope_mode === 'filters'" class="filter-heading">

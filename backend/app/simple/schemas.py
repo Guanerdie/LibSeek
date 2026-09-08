@@ -188,6 +188,11 @@ class AutomationPolicyUpdate(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=10)
     daily_download_limit: int = Field(default=3, ge=1, le=100)
     daily_download_bytes: int | None = Field(default=None, gt=0)
+    # Backoff after an empty search, in hours.  Presets in the UI: 激进
+    # 6/24/72, 平衡 24/72/168 (default), 保守 72/168/336.
+    cooldown_tier_1_hours: int = Field(default=24, ge=1, le=24 * 30)
+    cooldown_tier_2_hours: int = Field(default=72, ge=1, le=24 * 30)
+    cooldown_tier_3_hours: int = Field(default=168, ge=1, le=24 * 30)
 
     @field_validator("site_ids")
     @classmethod
@@ -206,6 +211,18 @@ class AutomationPolicyUpdate(BaseModel):
     def require_manual_selection(self) -> AutomationPolicyUpdate:
         if self.scope_mode == "selected" and not self.selected_media_ids:
             raise ValueError("manual selection requires at least one media item")
+        return self
+
+    @model_validator(mode="after")
+    def require_increasing_cooldowns(self) -> AutomationPolicyUpdate:
+        # A tier that is shorter than the one before it would make the second
+        # miss retry sooner than the first -- backoff running backwards.
+        if not (
+            self.cooldown_tier_1_hours
+            <= self.cooldown_tier_2_hours
+            <= self.cooldown_tier_3_hours
+        ):
+            raise ValueError("cooldown tiers must not decrease")
         return self
 
 

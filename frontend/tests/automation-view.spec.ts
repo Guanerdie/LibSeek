@@ -39,6 +39,9 @@ const policy: AutomationPolicy = {
   max_attempts: 3,
   daily_download_limit: 3,
   daily_download_bytes: null,
+  cooldown_tier_1_hours: 24,
+  cooldown_tier_2_hours: 72,
+  cooldown_tier_3_hours: 168,
   updated_at: '2026-08-23T00:00:00Z',
   last_run_at: null,
 }
@@ -122,6 +125,43 @@ describe('automation settings', () => {
       }),
     )
     expect(wrapper.text()).toContain('ENABLE_QB_WRITE')
+  })
+
+  it('saves the cooldown ladder the operator typed', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.get('input[name="cooldown_tier_1_hours"]').setValue(12)
+    await wrapper.get('input[name="cooldown_tier_2_hours"]').setValue(48)
+    await wrapper.get('input[name="cooldown_tier_3_hours"]').setValue(96)
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cooldown_tier_1_hours: 12,
+        cooldown_tier_2_hours: 48,
+        cooldown_tier_3_hours: 96,
+      }),
+    )
+  })
+
+  it('fills the cooldown ladder from a preset', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    const aggressive = wrapper
+      .findAll('.cooldown-presets .button')
+      .find((button) => button.text().startsWith('激进'))
+    expect(aggressive).toBeDefined()
+    await aggressive!.trigger('click')
+
+    expect(
+      (wrapper.get('input[name="cooldown_tier_1_hours"]').element as HTMLInputElement).value,
+    ).toBe('6')
+    expect(
+      (wrapper.get('input[name="cooldown_tier_3_hours"]').element as HTMLInputElement).value,
+    ).toBe('72')
   })
 
   it('starts a background run, polls it, and refreshes jobs after completion', async () => {

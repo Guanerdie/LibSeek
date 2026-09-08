@@ -93,15 +93,31 @@ _FAILED_JOB_RELEASE_DELAY = timedelta(hours=6)
 _UNEXPECTED_ERROR_CODE = "UNEXPECTED_ERROR"
 
 
-def _search_cooldown(miss_count: int) -> timedelta:
+def _search_cooldown(miss_count: int, policy: AutomationPolicy | None = None) -> timedelta:
+    """How long to leave a media item alone after ``miss_count`` empty searches.
+
+    ``policy`` is optional so the ladder still has an answer in contexts that
+    have no policy loaded; its defaults are the original 1/3/7 days.
+    """
+
     if miss_count <= 0:
         return timedelta(0)
-    index = min(miss_count, len(_SEARCH_MISS_COOLDOWNS)) - 1
-    return _SEARCH_MISS_COOLDOWNS[index]
+    if policy is None:
+        index = min(miss_count, len(_SEARCH_MISS_COOLDOWNS)) - 1
+        return _SEARCH_MISS_COOLDOWNS[index]
+    tiers = (
+        policy.cooldown_tier_1_hours,
+        policy.cooldown_tier_2_hours,
+        policy.cooldown_tier_3_hours,
+    )
+    return timedelta(hours=tiers[min(miss_count, len(tiers)) - 1])
 
 
 def _record_search_outcome(
-    media: LibraryMediaItem, *, found_candidate: bool
+    media: LibraryMediaItem,
+    *,
+    found_candidate: bool,
+    policy: AutomationPolicy | None = None,
 ) -> None:
     now = utc_now()
     media.last_searched_at = now
@@ -110,7 +126,7 @@ def _record_search_outcome(
         media.next_search_at = None
     else:
         media.search_miss_count += 1
-        media.next_search_at = now + _search_cooldown(media.search_miss_count)
+        media.next_search_at = now + _search_cooldown(media.search_miss_count, policy)
 
 
 async def get_policy(session: AsyncSession) -> AutomationPolicy:
@@ -148,6 +164,9 @@ async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) 
     policy.max_attempts = payload.max_attempts
     policy.daily_download_limit = payload.daily_download_limit
     policy.daily_download_bytes = payload.daily_download_bytes
+    policy.cooldown_tier_1_hours = payload.cooldown_tier_1_hours
+    policy.cooldown_tier_2_hours = payload.cooldown_tier_2_hours
+    policy.cooldown_tier_3_hours = payload.cooldown_tier_3_hours
     await session.commit()
     await session.refresh(policy)
     return policy
@@ -677,7 +696,9 @@ async def _execute_job(
                     "selected_score": selected.score if selected else None,
                     "rejected": rejected,
                 }
-                _record_search_outcome(media, found_candidate=selected is not None)
+                _record_search_outcome(
+                    media, found_candidate=selected is not None, policy=policy
+                )
                 if selected is None and media.next_search_at is not None:
                     job.decision = {
                         **job.decision,
