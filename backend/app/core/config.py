@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./unin.db"
     automation_scheduler_enabled: bool = False
     automation_scheduler_poll_seconds: int = Field(default=60, ge=5, le=3600)
+    # RSS reverse matching, off by default: it needs a site profile with an
+    # rss_path and a runtime passkey, and polling a site on a schedule is the
+    # operator's call to make, not a default.
+    rss_matcher_enabled: bool = False
+    rss_matcher_poll_seconds: int = Field(default=600, ge=60, le=3600)
+    rss_matcher_window_hours: int = Field(default=1, ge=1, le=24)
     runtime_config_dir: Path = Field(
         default=Path("/var/lib/unin"),
         validation_alias=AliasChoices("UNIN_RUNTIME_CONFIG_DIR", "runtime_config_dir"),

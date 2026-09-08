@@ -113,6 +113,8 @@ class NexusPhpSiteProfile(BaseModel):
     base_url: str
     search_path: str = "/torrents.php"
     download_path: str = "/download.php?id={torrent_id}"
+    # Optional: only NexusPHP sites that expose a passkey feed can be polled.
+    rss_path: str | None = Field(default=None, min_length=1, max_length=240)
     category_mapping: dict[MediaType, tuple[str, ...]]
     category_media_types: dict[str, MediaType] = Field(default_factory=dict)
     selectors: NexusPhpSelectors

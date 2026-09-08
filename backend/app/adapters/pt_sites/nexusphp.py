@@ -8,7 +8,7 @@ import re
 import socket
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, NoReturn
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
@@ -34,10 +34,12 @@ from app.models.enums import MediaType
 from app.schemas.adapters import (
     AdapterManifest,
     ProbeResult,
+    RssEntry,
     TorrentCandidate,
     TorrentDetails,
     TorrentSearchRequest,
 )
+from app.services.rss_matcher import parse_rss
 
 _TORRENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$")
 _RESOLUTION = re.compile(r"(?i)\b(2160p|1080p|1080i|720p|576p|480p)\b")
@@ -915,6 +917,51 @@ class NexusPhpAdapter(PtSiteAdapter):
                 status_code=502,
             )
         return response.content
+
+    async def fetch_rss(self, *, hours: int = 1) -> list[RssEntry]:
+        """Read the site's recent-torrents feed.
+
+        One request replaces N searches: instead of asking the site about each
+        missing item in turn, take everything it published recently and match
+        it against the library locally.
+        """
+
+        self._require_live_search()
+        if not self.profile.rss_path:
+            raise AppError(
+                "NEXUSPHP_RSS_NOT_CONFIGURED",
+                "该 Profile 未配置 RSS 路径",
+                status_code=409,
+            )
+        if "{passkey}" in self.profile.rss_path and self._passkey is None:
+            raise AppError(
+                "NEXUSPHP_PASSKEY_NOT_CONFIGURED",
+                "该 Profile 的 RSS 路径需要运行时 passkey",
+                status_code=409,
+            )
+        path = self.profile.rss_path.format(passkey=quote(self._passkey or "", safe=""))
+        response = await self._request(
+            "GET",
+            path,
+            operation="rss_fetch",
+            headers=self._headers("application/rss+xml,application/xml,text/xml"),
+        )
+        if not 200 <= response.status_code < 300:
+            raise AppError(
+                "NEXUSPHP_RSS_FETCH_FAILED",
+                "NexusPHP RSS 获取失败",
+                status_code=502,
+                retryable=True,
+            )
+        cutoff = datetime.now(UTC) - timedelta(hours=max(1, hours))
+        return [
+            entry
+            for entry in parse_rss(
+                response.content,
+                torrent_id_parameter=self.profile.torrent_id_query_parameter,
+            )
+            if entry.published_at is None or entry.published_at >= cutoff
+        ]
 
     def _require_live_search(self) -> None:
         if not self.profile.enabled or not self.enable_live_search:

@@ -13,6 +13,7 @@ from app.core.automation_runner import (
     automation_scheduler_loop,
     cancel_manual_automation_runs,
     recover_interrupted_jobs,
+    rss_matcher_loop,
 )
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -21,6 +22,7 @@ from app.db.session import SessionFactory
 from app.errors import AppError
 from app.schemas.common import ErrorResponse
 from app.simple import routes as daily
+from app.simple.integrations import build_pt_site
 
 settings = get_settings()
 
@@ -32,16 +34,25 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await recover_interrupted_jobs(session)
 
     stop = asyncio.Event()
-    task: asyncio.Task[None] | None = None
+    tasks: list[asyncio.Task[None]] = []
     if settings.automation_scheduler_enabled:
-        task = asyncio.create_task(automation_scheduler_loop(stop))
+        tasks.append(asyncio.create_task(automation_scheduler_loop(stop)))
+    if settings.rss_matcher_enabled:
+        tasks.append(
+            asyncio.create_task(
+                rss_matcher_loop(
+                    stop,
+                    lambda: build_pt_site("avistaz", allow_torrent_fetch=False),
+                )
+            )
+        )
     try:
         yield
     finally:
         await cancel_manual_automation_runs()
-        if task is not None:
+        if tasks:
             stop.set()
-            await task
+            await asyncio.gather(*tasks)
 
 
 app = FastAPI(

@@ -7,10 +7,12 @@ from collections.abc import Callable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters.base import PtSiteAdapter
 from app.core.config import get_settings
 from app.core.time import utc_now
 from app.db.session import SessionFactory
 from app.errors import AppError
+from app.services.rss_matcher import RssMatch, match_rss_to_library
 from app.simple import automation
 from app.simple.automation_state import refresh_automation_run_summary
 from app.simple.integrations import (
@@ -31,6 +33,7 @@ from app.simple.models import (
     AutomationRunState,
     Download,
     DownloadState,
+    LibraryMediaItem,
 )
 
 _logger = logging.getLogger(__name__)
@@ -358,5 +361,72 @@ async def automation_scheduler_loop(
             _logger.exception("Automation scheduler cycle failed")
         try:
             await asyncio.wait_for(stop.wait(), timeout=settings.automation_scheduler_poll_seconds)
+        except TimeoutError:
+            continue
+
+
+async def run_rss_match_cycle(
+    session: AsyncSession,
+    adapter: PtSiteAdapter,
+    *,
+    window_hours: int,
+) -> list[RssMatch]:
+    """Read the feed once and mark everything it matches as due for a search.
+
+    The feed only produces leads, so a match does not download anything: it
+    clears the media's search cooldown, which is what actually keeps a
+    just-published release from sitting unnoticed until the next cooldown tier
+    elapses.  The normal automation cycle then searches it properly.
+    """
+
+    fetch = getattr(adapter, "fetch_rss", None)
+    if fetch is None:
+        raise AppError(
+            "PT_SITE_RSS_UNSUPPORTED",
+            "该站点适配器不支持 RSS",
+            status_code=409,
+        )
+    entries = await fetch(hours=window_hours)
+    matches = await match_rss_to_library(session, entries)
+    if not matches:
+        return []
+    now = utc_now()
+    for match in matches:
+        media = await session.get(LibraryMediaItem, match.media_id)
+        if media is None:
+            continue
+        if media.next_search_at is not None and media.next_search_at > now:
+            # The site says something new exists; the cooldown was a guess that
+            # nothing would appear, and it has just been proven wrong.
+            media.next_search_at = None
+            media.search_miss_count = 0
+    await session.commit()
+    _logger.info("RSS matched %d library items", len(matches))
+    return matches
+
+
+async def rss_matcher_loop(
+    stop: asyncio.Event,
+    adapter_factory: Callable[[], PtSiteAdapter],
+    *,
+    session_factory: async_sessionmaker[AsyncSession] = SessionFactory,
+) -> None:
+    settings = get_settings()
+    while not stop.is_set():
+        adapter = None
+        try:
+            adapter = adapter_factory()
+            async with session_factory() as session:
+                await run_rss_match_cycle(
+                    session, adapter, window_hours=settings.rss_matcher_window_hours
+                )
+        except Exception:
+            # One bad cycle must not kill the loop; the next poll retries.
+            _logger.exception("RSS match cycle failed")
+        finally:
+            if adapter is not None:
+                await close_adapter(adapter)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.rss_matcher_poll_seconds)
         except TimeoutError:
             continue

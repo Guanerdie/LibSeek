@@ -180,6 +180,24 @@ class LibraryDetails(BaseModel):
         return normalize_episode_codes(value)
 
 
+class RssEntry(BaseModel):
+    """One item off a site's RSS feed.
+
+    RSS gives a title and little else, so an entry is a *lead*, not a
+    candidate: it says "this release exists right now" and nothing about
+    whether it matches anything the library wants.  Identity is settled
+    afterwards, against TMDB, exactly as a search result would be.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    torrent_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=500)
+    published_at: datetime | None = None
+    size_bytes: int | None = Field(default=None, ge=0)
+    details_ref: str | None = Field(default=None, max_length=1000)
+
+
 class SeasonRecord(BaseModel):
     """One season's airing status, as the metadata provider reports it.
 
