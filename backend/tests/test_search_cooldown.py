@@ -2,8 +2,6 @@
 
 from datetime import timedelta
 
-import pytest
-
 from app.simple.automation import _record_search_outcome, _search_cooldown
 from app.simple.models import LibraryMediaItem, MediaType
 
