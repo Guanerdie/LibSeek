@@ -207,8 +207,9 @@ onMounted(() => daily.loadMedia())
           <StatusPill :status="item.state" :label="mediaStateLabel(item.state)" />
         </div>
         <p v-if="item.attention_reason" class="inline-warning">{{ item.attention_reason }}</p>
-        <RouterLink class="button primary" :to="`/library/${item.id}/resources`">
+        <RouterLink class="card-action" :to="`/library/${item.id}/resources`">
           {{ item.tmdb_id ? '查找资源' : '确认影视信息' }}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
         </RouterLink>
       </article>
     </div>
