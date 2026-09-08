@@ -39,3 +39,6 @@ backend/unin.db
 frontend/dist/
 backend/.coverage
 backend/htmlcov/
+
+# 设计画布的成品是生成物（约 2.5MB），源文件是 design/*.dc.html 和 canvas.json
+design/unin-library-redesign.html

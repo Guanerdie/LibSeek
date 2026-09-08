@@ -54,6 +54,8 @@ from app.simple.schemas import (
     MediaPage,
     MediaSummary,
     MinimumScoreOverrideUpdate,
+    QuickFillRequest,
+    QuickFillResult,
     SearchCreate,
     SearchDetail,
     SearchView,
@@ -281,6 +283,46 @@ async def search_media(
         {
             **SearchView.model_validate(completed).model_dump(),
             "candidates": [_candidate_view(item) for item in candidates],
+        }
+    )
+
+
+@router.post("/library/{media_id}/quick-fill", response_model=QuickFillResult)
+async def quick_fill(
+    media_id: str,
+    payload: QuickFillRequest,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> QuickFillResult:
+    """One click: search, pick the best candidate, submit it.
+
+    A shortcut over the manual path, not a replacement for it -- the search it
+    runs is an ordinary one, so every candidate stays listed for the operator
+    to override the pick by hand.
+    """
+
+    del principal
+    search, selected, rejected, download = await automation.quick_fill_media(
+        session,
+        media_id=media_id,
+        adapter_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
+        pt_factory=lambda site_id: build_pt_site(site_id, allow_torrent_fetch=True),
+        qb_factory=build_qb,
+        metadata_factory=build_tmdb,
+        force=payload.force,
+    )
+    completed, candidates = await service.get_search(session, search.id)
+    return QuickFillResult.model_validate(
+        {
+            "search": {
+                **SearchView.model_validate(completed).model_dump(),
+                "candidates": [_candidate_view(item) for item in candidates],
+            },
+            "selected_candidate_id": selected.id if selected is not None else None,
+            "download": (
+                DownloadView.model_validate(download) if download is not None else None
+            ),
+            "rejected": rejected,
         }
     )
 

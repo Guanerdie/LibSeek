@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    .c { font-family: "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+    a { color: #4f46e5; } a:hover { color: #4338ca; }
+    .r { display: grid; grid-template-columns: 22px 1fr 108px 62px 168px 74px 54px; align-items: center; gap: 16px; padding: 0 18px; height: 46px; border-bottom: 1px solid #eceef2; }
+    .r:hover { background: #fafbfc; }
+  </style>
+</helmet>
+
+<div class="c" style="width: 1040px; height: 820px; background: #fff; color: #16181d; overflow: hidden; display: flex; flex-direction: column;">
+
+  <div style="display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 22px; border-bottom: 1px solid #eceef2;">
+    <div style="display: flex; align-items: center; gap: 13px;">
+      <h1 style="margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em;">缺失影视</h1>
+      <span class="mono" style="padding: 2px 7px; border-radius: 4px; background: #f3f4f6; color: #6b7280; font-size: 11px;">44,075</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border: 1px solid #e3e5ea; border-radius: 6px; color: #383c45; font-size: 12px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 3v5h-5"></path></svg>
+        同步
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 6px; background: #16181d; color: #fff; font-size: 12px; font-weight: 500;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        加入追更
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: center; gap: 8px; padding: 11px 22px; border-bottom: 1px solid #eceef2;">
+    <div style="flex: 1; display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border: 1px solid #e3e5ea; border-radius: 6px;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+      <span style="color: #9ca3af; font-size: 12px;">搜索中文名或原名…</span>
+    </div>
+    <div style="height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid #e3e5ea; border-radius: 6px; font-size: 12px; color: #383c45;">电视剧 <span style="color: #9ca3af;">▾</span></div>
+    <div style="height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid #e3e5ea; border-radius: 6px; font-size: 12px; color: #383c45;">韩国 <span style="color: #9ca3af;">▾</span></div>
+    <div style="height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 6px; background: #eef0fe; color: #4f46e5; font-size: 12px; font-weight: 500;">待搜索 <span style="opacity: .55;">✕</span></div>
+  </div>
+
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 22px; background: #fafbfc; border-bottom: 1px solid #eceef2;">
+    <span class="mono" style="color: #6b7280; font-size: 11px;">已选 3 / 128</span>
+    <div style="display: flex; gap: 7px;">
+      <span style="font-size: 11.5px; color: #383c45;">加入追更</span>
+      <span style="color: #d5d8de;">·</span>
+      <span style="font-size: 11.5px; color: #383c45;">移出追更</span>
+      <span style="color: #d5d8de;">·</span>
+      <span style="font-size: 11.5px; color: #383c45;">立即搜索</span>
+    </div>
+  </div>
+
+  <div class="r" style="height: 34px; background: #fafbfc; color: #9ca3af; font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; border-bottom: 1px solid #e3e5ea;">
+    <span></span><span>影视</span><span>状态</span><span>年份</span><span>最近自动化</span><span>候选</span><span style="text-align: right;">追更</span>
+  </div>
+
+  <div style="flex: 1; overflow: hidden;">
+
+    <div class="r">
+      <div style="width: 14px; height: 14px; border-radius: 3px; background: #4f46e5; display: grid; place-items: center;"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></div>
+      <div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">苦尽柑来遇见你</span><span style="color: #9ca3af; font-size: 11.5px;">When Life Gives You Tangerines</span></div>
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #16a34a;"></span>待搜索</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">2025</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">1h 前 · 无候选</span>
+      <span class="mono" style="color: #9ca3af; font-size: 11.5px;">0</span>
+      <div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #4f46e5; display: flex; align-items: center; justify-content: flex-end; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div>
+    </div>
+
+    <div class="r">
+      <div style="width: 14px; height: 14px; border-radius: 3px; background: #4f46e5; display: grid; place-items: center;"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></div>
+      <div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">善意的竞争</span><span style="color: #9ca3af; font-size: 11.5px;">Study Group</span></div>
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #16a34a;"></span>有候选</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">2025</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">2h 前 · 已选中</span>
+      <span class="mono" style="color: #16181d; font-size: 11.5px;">12</span>
+      <div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #4f46e5; display: flex; align-items: center; justify-content: flex-end; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div>
+    </div>
+
+    <div class="r">
+      <div style="width: 14px; height: 14px; border-radius: 3px; background: #4f46e5; display: grid; place-items: center;"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></div>
+      <div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">爱情有别</span><span style="color: #9ca3af; font-size: 11.5px;">Love Scout</span></div>
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #2563eb;"></span>下载 62%</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">2025</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">3h 前 · 已提交 qB</span>
+      <span class="mono" style="color: #16181d; font-size: 11.5px;">8</span>
+      <div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #4f46e5; display: flex; align-items: center; justify-content: flex-end; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div>
+    </div>
+
+    <div class="r">
+      <div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div>
+      <div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500; color: #6b7280;">背着善宰跑</span><span style="color: #b7bcc5; font-size: 11.5px;">Lovely Runner</span></div>
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #9ca3af;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #d5d8de;"></span>已完成</span>
+      <span class="mono" style="color: #9ca3af; font-size: 11.5px;">2024</span>
+      <span class="mono" style="color: #b7bcc5; font-size: 11.5px;">—</span>
+      <span class="mono" style="color: #b7bcc5; font-size: 11.5px;">—</span>
+      <div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div>
+    </div>
+
+    <div class="r" style="background: #fffbf5; border-left: 2px solid #f59e0b; padding-left: 16px;">
+      <div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div>
+      <div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">寄生兽：灰色部队</span><span style="color: #b45309; font-size: 11.5px;">40 个候选全被拒 · 38 个评分低于门槛</span></div>
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #b45309;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #f59e0b;"></span>需要处理</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">2024</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">40m 前 · 全部被拒</span>
+      <span class="mono" style="color: #16181d; font-size: 11.5px;">40</span>
+      <div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div>
+    </div>
+
+    <div class="r">
+      <div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div>
+      <div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">破墓</span><span style="color: #9ca3af; font-size: 11.5px;">Exhuma · 电影</span></div>
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #16a34a;"></span>待搜索</span>
+      <span class="mono" style="color: #6b7280; font-size: 11.5px;">2024</span>
+      <span class="mono" style="color: #b7bcc5; font-size: 11.5px;">从未搜索</span>
+      <span class="mono" style="color: #b7bcc5; font-size: 11.5px;">—</span>
+      <div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div>
+    </div>
+
+    <div class="r"><div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div><div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">现在不是出轨的问题</span><span style="color: #9ca3af; font-size: 11.5px;">Doubt</span></div><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #9ca3af;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #d5d8de;"></span>已完成</span><span class="mono" style="color: #9ca3af; font-size: 11.5px;">2026</span><span class="mono" style="color: #b7bcc5; font-size: 11.5px;">—</span><span class="mono" style="color: #b7bcc5; font-size: 11.5px;">—</span><div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div></div>
+
+    <div class="r"><div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div><div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">西西弗斯的神话</span><span style="color: #9ca3af; font-size: 11.5px;">Sisyphus: The Myth</span></div><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #2563eb;"></span>下载 13%</span><span class="mono" style="color: #6b7280; font-size: 11.5px;">2021</span><span class="mono" style="color: #6b7280; font-size: 11.5px;">1h 前 · 已提交 qB</span><span class="mono" style="color: #16181d; font-size: 11.5px;">14</span><div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #4f46e5; display: flex; align-items: center; justify-content: flex-end; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div></div>
+
+    <div class="r"><div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div><div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">非常律师禹英禑</span><span style="color: #9ca3af; font-size: 11.5px;">Extraordinary Attorney Woo</span></div><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #16a34a;"></span>待搜索</span><span class="mono" style="color: #6b7280; font-size: 11.5px;">2022</span><span class="mono" style="color: #6b7280; font-size: 11.5px;">4d 前 · 冷却中</span><span class="mono" style="color: #b7bcc5; font-size: 11.5px;">0</span><div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div></div>
+
+    <div class="r"><div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div><div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">还魂</span><span style="color: #9ca3af; font-size: 11.5px;">Alchemy of Souls</span></div><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #383c45;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #16a34a;"></span>待搜索</span><span class="mono" style="color: #6b7280; font-size: 11.5px;">2022</span><span class="mono" style="color: #6b7280; font-size: 11.5px;">6d 前 · 冷却中</span><span class="mono" style="color: #b7bcc5; font-size: 11.5px;">0</span><div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div></div>
+
+    <div class="r"><div style="width: 14px; height: 14px; border: 1.4px solid #d5d8de; border-radius: 3px;"></div><div style="min-width: 0; display: flex; align-items: baseline; gap: 9px;"><span style="font-size: 13px; font-weight: 500;">黑白大厨：料理阶级大战</span><span style="color: #9ca3af; font-size: 11.5px;">Culinary Class Wars</span></div><span style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #9ca3af;"><span style="width: 6px; height: 6px; border-radius: 999px; background: #d5d8de;"></span>综艺 · 已屏蔽</span><span class="mono" style="color: #9ca3af; font-size: 11.5px;">2024</span><span class="mono" style="color: #b7bcc5; font-size: 11.5px;">不参与自动化</span><span class="mono" style="color: #b7bcc5; font-size: 11.5px;">—</span><div style="justify-self: end; width: 30px; height: 17px; border-radius: 999px; background: #e3e5ea; display: flex; align-items: center; padding: 0 2px;"><div style="width: 13px; height: 13px; border-radius: 999px; background: #fff;"></div></div></div>
+
+  </div>
+
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 11px 22px; border-top: 1px solid #eceef2;">
+    <span class="mono" style="color: #9ca3af; font-size: 11px;">1–11 / 44,075</span>
+    <div style="display: flex; align-items: center; gap: 5px;">
+      <div class="mono" style="height: 26px; min-width: 26px; display: grid; place-items: center; padding: 0 8px; border-radius: 5px; background: #16181d; color: #fff; font-size: 11px;">1</div>
+      <div class="mono" style="height: 26px; min-width: 26px; display: grid; place-items: center; padding: 0 8px; border-radius: 5px; border: 1px solid #e3e5ea; color: #383c45; font-size: 11px;">2</div>
+      <div class="mono" style="height: 26px; min-width: 26px; display: grid; place-items: center; padding: 0 8px; border-radius: 5px; border: 1px solid #e3e5ea; color: #383c45; font-size: 11px;">3</div>
+      <div style="height: 26px; display: grid; place-items: center; padding: 0 10px; border-radius: 5px; border: 1px solid #e3e5ea; color: #383c45; font-size: 11px;">下一页</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

@@ -8,6 +8,7 @@ import type {
   DailyMediaFilterOptions,
   DailyMediaQuery,
   DailySearch,
+  QuickFillResult,
 } from '../types'
 
 interface DailyState {
@@ -169,6 +170,18 @@ export const useDailyStore = defineStore('daily', {
         this.search = await dailyApi.createSearch(mediaId, siteIds, force)
       } catch (error) {
         this.resourceError = error instanceof ApiError ? error.message : '无法开始搜索'
+      }
+    },
+    async quickFill(mediaId: string, force = false): Promise<QuickFillResult | null> {
+      this.resourceError = null
+      try {
+        const result = await dailyApi.quickFill(mediaId, force)
+        this.search = result.search
+        this.selectedMedia = await dailyApi.mediaDetail(mediaId)
+        return result
+      } catch (error) {
+        this.resourceError = error instanceof ApiError ? error.message : '一键补片失败'
+        return null
       }
     },
     async loadSearch(searchId: string): Promise<void> {

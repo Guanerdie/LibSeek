@@ -1,0 +1,134 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    .u { font-family: Inter, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    a { color: #6875fa; } a:hover { color: #5058d8; }
+  </style>
+</helmet>
+
+<div class="u" style="width: 1040px; padding: 26px; background: #edf2fa; color: #102448;">
+
+  <div style="border: 1px solid rgba(255,255,255,.78); border-radius: 24px; background: rgba(239,244,251,.74); box-shadow: 10px 10px 24px rgba(166,177,198,.35), -10px -10px 24px rgba(255,255,255,.92); padding: 26px;">
+
+    <div style="display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px;">
+      <div>
+        <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">DAILY WORKFLOW</span>
+        <h1 style="margin: 8px 0 7px; font-size: 38px; line-height: 1; letter-spacing: -.04em;">缺失影视</h1>
+        <p style="margin: 0; color: #71809e; font-size: 12px;">从缺失列表选择一项，确认资源后直接进入下载。</p>
+      </div>
+      <div style="min-height: 38px; padding: 9px 15px; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">同步缺失影视</div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 17px; margin-bottom: 24px;">
+      <div style="display: flex; align-items: center; gap: 14px; min-height: 104px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 46px; height: 46px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.78); border-radius: 15px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 21px; color: #71809e;">▤</div>
+        <div><div style="color: #71809e; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">缺失条目</div><strong style="font-size: 24px;">44075</strong></div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 14px; min-height: 104px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 46px; height: 46px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.78); border-radius: 15px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 21px; color: #71809e;">○</div>
+        <div><div style="color: #71809e; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">待识别</div><strong style="font-size: 24px;">0</strong></div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 14px; min-height: 104px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 46px; height: 46px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.78); border-radius: 15px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 21px; color: #71809e;">◇</div>
+        <div><div style="color: #71809e; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">可用资源</div><strong style="font-size: 24px;">1</strong></div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 14px; min-height: 104px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 46px; height: 46px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.78); border-radius: 15px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 21px; color: #71809e;">!</div>
+        <div><div style="color: #71809e; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">需要关注</div><strong style="font-size: 24px;">1</strong></div>
+      </div>
+    </div>
+
+    <div style="padding: 19px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); margin-bottom: 24px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px;">
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">FILTERS</span>
+          <div style="font-size: 14px; font-weight: 600; margin-top: 5px;">筛选缺失影视</div>
+        </div>
+        <span style="color: #71809e; font-size: 10px;">44075 项结果</span>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(180px,2fr) repeat(4, minmax(110px,1fr)); gap: 13px;">
+        <div style="display: grid; gap: 7px;"><span style="color: #71809e; font-size: 9px;">关键词</span><div style="height: 41px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9); display: flex; align-items: center; padding: 0 12px; color: #9ba8be; font-size: 11px;">中文名、原名</div></div>
+        <div style="display: grid; gap: 7px;"><span style="color: #71809e; font-size: 9px;">影视类型</span><div style="height: 41px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9); display: flex; align-items: center; padding: 0 12px; font-size: 11px;">全部类型</div></div>
+        <div style="display: grid; gap: 7px;"><span style="color: #71809e; font-size: 9px;">地区</span><div style="height: 41px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9); display: flex; align-items: center; padding: 0 12px; font-size: 11px;">全部地区</div></div>
+        <div style="display: grid; gap: 7px;"><span style="color: #71809e; font-size: 9px;">状态</span><div style="height: 41px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9); display: flex; align-items: center; padding: 0 12px; font-size: 11px;">全部状态</div></div>
+        <div style="display: grid; gap: 7px;"><span style="color: #71809e; font-size: 9px;">年份</span><div style="height: 41px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9); display: flex; align-items: center; padding: 0 12px; font-size: 11px;">全部年份</div></div>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px;">
+
+      <div style="position: relative; min-height: 196px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 10px;">
+        <span style="position: absolute; right: 16px; top: 16px; padding: 5px 8px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font: 600 8px Inter, sans-serif;">待搜索</span>
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">电视剧</span>
+          <h2 style="margin: 7px 0; font-size: 18px;">苦尽柑来遇见你</h2>
+          <p style="margin: 0; color: #71809e; font-size: 10px; line-height: 1.6;">2025 · 韩国 · TMDB 100000</p>
+        </div>
+        <div style="margin-top: auto; min-height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">查找资源</div>
+      </div>
+
+      <div style="position: relative; min-height: 196px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 10px;">
+        <span style="position: absolute; right: 16px; top: 16px; padding: 5px 8px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font: 600 8px Inter, sans-serif;">有候选待确认</span>
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">电视剧</span>
+          <h2 style="margin: 7px 0; font-size: 18px;">善意的竞争</h2>
+          <p style="margin: 0; color: #71809e; font-size: 10px; line-height: 1.6;">2025 · 韩国 · TMDB 100001</p>
+        </div>
+        <div style="margin-top: auto; min-height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">查找资源</div>
+      </div>
+
+      <div style="position: relative; min-height: 196px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 10px;">
+        <span style="position: absolute; right: 16px; top: 16px; padding: 5px 8px; border-radius: 999px; color: #398ee4; background: rgba(57,142,228,.1); font: 600 8px Inter, sans-serif;">下载中</span>
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">电视剧</span>
+          <h2 style="margin: 7px 0; font-size: 18px;">爱情有别</h2>
+          <p style="margin: 0; color: #71809e; font-size: 10px; line-height: 1.6;">2025 · 韩国 · TMDB 100002</p>
+        </div>
+        <div style="margin-top: auto; min-height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">查找资源</div>
+      </div>
+
+      <div style="position: relative; min-height: 196px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 10px;">
+        <span style="position: absolute; right: 16px; top: 16px; padding: 5px 8px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font: 600 8px Inter, sans-serif;">已完成</span>
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">电视剧</span>
+          <h2 style="margin: 7px 0; font-size: 18px;">背着善宰跑</h2>
+          <p style="margin: 0; color: #71809e; font-size: 10px; line-height: 1.6;">2024 · 韩国 · TMDB 100003</p>
+        </div>
+        <div style="margin-top: auto; min-height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">查找资源</div>
+      </div>
+
+      <div style="position: relative; min-height: 196px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 10px;">
+        <span style="position: absolute; right: 16px; top: 16px; padding: 5px 8px; border-radius: 999px; color: #e89d45; background: rgba(232,157,69,.11); font: 600 8px Inter, sans-serif;">需要处理</span>
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">电视剧</span>
+          <h2 style="margin: 7px 0; font-size: 18px;">寄生兽：灰色部队</h2>
+          <p style="margin: 0; color: #71809e; font-size: 10px; line-height: 1.6;">2024 · 韩国 · TMDB 100004</p>
+        </div>
+        <p style="margin: 0; padding: 8px 11px; border-radius: 11px; background: rgba(232,157,69,.11); color: #e89d45; font-size: 10px;">站点暂时没有可用资源</p>
+        <div style="margin-top: auto; min-height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">查找资源</div>
+      </div>
+
+      <div style="position: relative; min-height: 196px; padding: 17px; border: 1px solid rgba(255,255,255,.78); border-radius: 18px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); display: flex; flex-direction: column; gap: 10px;">
+        <span style="position: absolute; right: 16px; top: 16px; padding: 5px 8px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font: 600 8px Inter, sans-serif;">待搜索</span>
+        <div>
+          <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">电影</span>
+          <h2 style="margin: 7px 0; font-size: 18px;">破墓</h2>
+          <p style="margin: 0; color: #71809e; font-size: 10px; line-height: 1.6;">2024 · 韩国 · TMDB 100005</p>
+        </div>
+        <div style="margin-top: auto; min-height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 12px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">查找资源</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

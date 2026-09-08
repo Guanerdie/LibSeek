@@ -435,3 +435,10 @@ export interface BulkSubscriptionResult {
   subscribed_total: number
   changed: number
 }
+
+export interface QuickFillResult {
+  search: DailySearch
+  selected_candidate_id: string | null
+  download: DailyDownload | null
+  rejected: DailyRejectedCandidate[]
+}

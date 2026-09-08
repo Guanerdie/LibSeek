@@ -21,6 +21,7 @@ import type {
   LoginResponse,
   Page,
   Principal,
+  QuickFillResult,
   ScoreDistribution,
 } from '../types'
 
@@ -207,6 +208,12 @@ export const dailyApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ site_ids: siteIds, force }),
+    }),
+  quickFill: (mediaId: string, force = false) =>
+    request<QuickFillResult>(`/api/library/${encodeURIComponent(mediaId)}/quick-fill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
     }),
   search: (searchId: string) =>
     request<DailySearch>(`/api/searches/${encodeURIComponent(searchId)}`),

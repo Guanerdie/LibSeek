@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   setSubscription: vi.fn(),
   setSubscriptions: vi.fn(),
   setMinimumScore: vi.fn(),
+  quickFill: vi.fn(),
   search: vi.fn(),
   downloadCandidate: vi.fn(),
   retryDownload: vi.fn(),
@@ -98,6 +99,31 @@ const successfulSearch: DailySearch = {
   id: 'search-succeeded',
   state: 'SUCCEEDED',
   error_message: null,
+}
+
+const searchWithOneCandidate: DailySearch = {
+  ...successfulSearch,
+  candidates: [
+    {
+      id: 'c1',
+      search_id: successfulSearch.id,
+      site_id: 'avistaz',
+      torrent_id: '900001',
+      title: 'Quick.Fill.2026.1080p.WEB-DL',
+      details_url: 'https://avistaz.to/torrents/900001',
+      size_bytes: 10_000,
+      seeders: 9,
+      resolution: '1080p',
+      source: 'WEB-DL',
+      codec: 'H.264',
+      download_factor: 0,
+      season_coverage: [1],
+      episode_coverage: [],
+      score: 0.72,
+      reasons: [],
+      warnings: [],
+    },
+  ],
 }
 
 function mediaDetail(overrides: Partial<DailyMediaDetail> = {}): DailyMediaDetail {
@@ -553,7 +579,7 @@ describe('simplified daily store', () => {
 
     const refresh = wrapper
       .findAll('button')
-      .find((button) => button.text() === '强制刷新')
+      .find((button) => button.text() === '重新搜索')
     expect(refresh).toBeDefined()
     await refresh!.trigger('click')
     await flushPromises()
@@ -654,6 +680,85 @@ describe('simplified daily store', () => {
 
     const pills = wrapper.findAll('.status-pill').map((pill) => pill.text())
     expect(pills).toEqual(['待搜索', '有候选待确认', '需要处理'])
+  })
+
+  it('searches automatically when a media has never been searched', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ latest_search: null }))
+    mocks.createSearch.mockResolvedValueOnce(successfulSearch)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], false)
+  })
+
+  it('leaves a previously failed search on screen instead of silently retrying', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ latest_search: failedSearch }))
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(mocks.createSearch).not.toHaveBeenCalled()
+    expect(wrapper.get('.error-state').text()).toBe('PT 站点连接超时')
+  })
+
+  it('quick fill submits in one click and still lists every candidate', async () => {
+    mocks.mediaDetail.mockResolvedValue(mediaDetail({ latest_search: successfulSearch }))
+    mocks.search.mockResolvedValue(searchWithOneCandidate)
+    mocks.quickFill.mockResolvedValueOnce({
+      search: searchWithOneCandidate,
+      selected_candidate_id: 'c1',
+      download: { id: 'd1' },
+      rejected: [],
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const button = wrapper.findAll('button').find((item) => item.text() === '一键补片')
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.quickFill).toHaveBeenCalledWith(media.id, false)
+    expect(wrapper.get('.quick-fill-note').text()).toContain('已选中并提交下载')
+    // The manual path survives: candidates are still on screen to choose from.
+    expect(wrapper.findAll('.candidate-card').length).toBeGreaterThan(0)
+  })
+
+  it('says so when quick fill finds candidates but none are acceptable', async () => {
+    mocks.mediaDetail.mockResolvedValue(mediaDetail({ latest_search: successfulSearch }))
+    mocks.search.mockResolvedValue(searchWithOneCandidate)
+    mocks.quickFill.mockResolvedValueOnce({
+      search: searchWithOneCandidate,
+      selected_candidate_id: null,
+      download: null,
+      rejected: [{ candidate_id: null, title: 'x', reasons: ['评分低于策略门槛'] }],
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.findAll('button').find((item) => item.text() === '一键补片')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.quick-fill-note').text()).toContain('自己挑一个')
   })
 
   it('adds the whole filtered page to the follow list', async () => {

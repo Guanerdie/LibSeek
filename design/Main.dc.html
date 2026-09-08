@@ -1,0 +1,248 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    .u { font-family: Inter, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    a { color: #6875fa; } a:hover { color: #5058d8; }
+  </style>
+</helmet>
+
+<div class="u" style="width: 1040px; padding: 26px; background: #edf2fa; color: #102448;">
+  <div style="border: 1px solid rgba(255,255,255,.78); border-radius: 24px; background: rgba(239,244,251,.74); box-shadow: 10px 10px 24px rgba(166,177,198,.35), -10px -10px 24px rgba(255,255,255,.92); padding: 26px;">
+
+    <div style="display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 22px;">
+      <div>
+        <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">DAILY WORKFLOW</span>
+        <h1 style="margin: 8px 0 7px; font-size: 38px; line-height: 1; letter-spacing: -.04em;">缺失影视</h1>
+        <p style="margin: 0; color: #71809e; font-size: 12px;">从缺失列表选择一项，确认资源后直接进入下载。</p>
+      </div>
+      <div style="display: flex; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 7px; min-height: 38px; padding: 9px 15px; border: 1px solid rgba(255,255,255,.78); border-radius: 12px; color: #51607c; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 11px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 3v5h-5"></path></svg>
+          同步缺失影视
+        </div>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px;">
+
+      <div style="display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 auto; border-radius: 13px; background: rgba(104,117,250,.1);">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6875fa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 10h18M9 4v16"></path></svg>
+        </div>
+        <div style="display: grid; gap: 2px;">
+          <span style="color: #71809e; font-size: 11px;">缺失条目</span>
+          <strong style="font-size: 22px; letter-spacing: -.02em;">44,075</strong>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 auto; border-radius: 13px; background: rgba(139,98,245,.1);">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#8b62f5" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        </div>
+        <div style="display: grid; gap: 2px;">
+          <span style="color: #71809e; font-size: 11px;">追更中</span>
+          <strong style="font-size: 22px; letter-spacing: -.02em;">3</strong>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 auto; border-radius: 13px; background: rgba(34,173,122,.11);">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#22ad7a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"></path><path d="m7 12 5 5 5-5"></path><path d="M4 21h16"></path></svg>
+        </div>
+        <div style="display: grid; gap: 2px;">
+          <span style="color: #71809e; font-size: 11px;">下载中</span>
+          <strong style="font-size: 22px; letter-spacing: -.02em;">4</strong>
+        </div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 13px; padding: 15px 16px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 auto; border-radius: 13px; background: rgba(232,157,69,.13);">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#e89d45" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"></path><circle cx="12" cy="16.5" r=".6" fill="#e89d45"></circle><path d="M10.3 3.9 2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path></svg>
+        </div>
+        <div style="display: grid; gap: 2px;">
+          <span style="color: #71809e; font-size: 11px;">需要处理</span>
+          <strong style="font-size: 22px; letter-spacing: -.02em;">1</strong>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 18px;">
+      <div style="flex: 1; display: flex; align-items: center; gap: 9px; height: 42px; padding: 0 14px; border: 1px solid rgba(255,255,255,.7); border-radius: 13px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9);">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ba8be" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <span style="color: #9ba8be; font-size: 12px;">搜索中文名或原名…</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 42px; padding: 0 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 13px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 12px; color: #51607c;">
+        电视剧
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#71809e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 42px; padding: 0 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 13px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 12px; color: #51607c;">
+        韩国
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#71809e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 42px; padding: 0 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 13px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 12px; color: #51607c;">
+        待搜索
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#71809e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </div>
+      <div style="height: 42px; display: grid; place-items: center; padding: 0 17px; border-radius: 13px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 12px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">筛选</div>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px;">
+      <span style="color: #71809e; font-size: 12px;">共 <strong style="color: #102448;">44,075</strong> 项 · 当前筛选 <strong style="color: #102448;">128</strong> 项</span>
+      <div style="display: flex; align-items: center; gap: 9px;">
+        <div style="display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border: 1px solid rgba(255,255,255,.78); border-radius: 11px; color: #51607c; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 11px;">本页移出追更</div>
+        <div style="display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 11px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+          本页加入追更（6）
+        </div>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;">
+
+      <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="width: 74px; height: 111px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(150deg, #cfd8ee, #b9c4e6); display: grid; place-items: center; color: rgba(16,36,72,.32); font-size: 26px; font-weight: 700;">苦</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+            <h2 style="margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: -.01em;">苦尽柑来遇见你</h2>
+            <span style="flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">待搜索</span>
+          </div>
+          <p style="margin: 0; color: #71809e; font-size: 11px; line-height: 1.5;">When Life Gives You Tangerines</p>
+          <p style="margin: 0; color: #9ba8be; font-size: 11px;">2025 · 韩国 · 电视剧</p>
+          <div style="margin-top: auto; display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #6875fa; background: rgba(104,117,250,.1); font-size: 11px; font-weight: 600;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6875fa" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+              追这部
+            </div>
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; font-size: 11px;">
+              查找资源
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="width: 74px; height: 111px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(150deg, #d3d0ec, #beb8e4); display: grid; place-items: center; color: rgba(16,36,72,.32); font-size: 26px; font-weight: 700;">善</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+            <h2 style="margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: -.01em;">善意的竞争</h2>
+            <span style="flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">有候选待确认</span>
+          </div>
+          <p style="margin: 0; color: #71809e; font-size: 11px; line-height: 1.5;">Study Group</p>
+          <p style="margin: 0; color: #9ba8be; font-size: 11px;">2025 · 韩国 · 电视剧</p>
+          <div style="margin-top: auto; display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #6875fa; background: rgba(104,117,250,.1); font-size: 11px; font-weight: 600;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6875fa" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+              追这部
+            </div>
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; font-size: 11px;">
+              查看候选
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="width: 74px; height: 111px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(150deg, #c9dced, #b2c9e2); display: grid; place-items: center; color: rgba(16,36,72,.32); font-size: 26px; font-weight: 700;">爱</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+            <h2 style="margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: -.01em;">爱情有别</h2>
+            <span style="flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: #398ee4; background: rgba(57,142,228,.1); font-size: 10px; font-weight: 600;">下载中</span>
+          </div>
+          <p style="margin: 0; color: #71809e; font-size: 11px; line-height: 1.5;">Love Scout</p>
+          <p style="margin: 0; color: #9ba8be; font-size: 11px;">2025 · 韩国 · 电视剧</p>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <div style="flex: 1; height: 5px; border-radius: 999px; background: rgba(113,128,158,.16); overflow: hidden;">
+              <div style="width: 62%; height: 100%; border-radius: 999px; background: #398ee4;"></div>
+            </div>
+            <span style="color: #398ee4; font-size: 10px; font-weight: 600;">62%</span>
+          </div>
+          <div style="margin-top: auto; display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; background: rgba(113,128,158,.1); font-size: 11px; font-weight: 600;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round"><path d="M20 6 9 17l-5-5"></path></svg>
+              追更中
+            </div>
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; font-size: 11px;">
+              查看下载
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="width: 74px; height: 111px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(150deg, #cbe0d8, #b4d0c6); display: grid; place-items: center; color: rgba(16,36,72,.32); font-size: 26px; font-weight: 700;">背</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+            <h2 style="margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: -.01em;">背着善宰跑</h2>
+            <span style="flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">已完成</span>
+          </div>
+          <p style="margin: 0; color: #71809e; font-size: 11px; line-height: 1.5;">Lovely Runner</p>
+          <p style="margin: 0; color: #9ba8be; font-size: 11px;">2024 · 韩国 · 电视剧</p>
+          <div style="margin-top: auto; display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; font-size: 11px;">
+              查看下载
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid rgba(232,157,69,.3); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="width: 74px; height: 111px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(150deg, #e3d5cd, #d5c0b4); display: grid; place-items: center; color: rgba(16,36,72,.32); font-size: 26px; font-weight: 700;">寄</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+            <h2 style="margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: -.01em;">寄生兽：灰色部队</h2>
+            <span style="flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: #e89d45; background: rgba(232,157,69,.13); font-size: 10px; font-weight: 600;">需要处理</span>
+          </div>
+          <p style="margin: 0; color: #71809e; font-size: 11px; line-height: 1.5;">Parasyte: The Grey</p>
+          <div style="display: flex; align-items: center; gap: 7px; padding: 7px 10px; border-radius: 10px; background: rgba(232,157,69,.11);">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#e89d45" stroke-width="2" stroke-linecap="round" style="flex: 0 0 auto;"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v4.5"></path><circle cx="12" cy="16" r=".6" fill="#e89d45"></circle></svg>
+            <span style="color: #b4762c; font-size: 10.5px; line-height: 1.45;">40 个候选全部被拒：38 个评分低于门槛</span>
+          </div>
+          <div style="margin-top: auto; display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; font-size: 11px;">
+              查看原因
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 14px; padding: 14px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+        <div style="width: 74px; height: 111px; flex: 0 0 auto; border-radius: 11px; background: linear-gradient(150deg, #d7cfe2, #c2b6d6); display: grid; place-items: center; color: rgba(16,36,72,.32); font-size: 26px; font-weight: 700;">破</div>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px;">
+          <div style="display: flex; align-items: start; justify-content: space-between; gap: 10px;">
+            <h2 style="margin: 0; font-size: 16px; line-height: 1.35; letter-spacing: -.01em;">破墓</h2>
+            <span style="flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">待搜索</span>
+          </div>
+          <p style="margin: 0; color: #71809e; font-size: 11px; line-height: 1.5;">Exhuma</p>
+          <p style="margin: 0; color: #9ba8be; font-size: 11px;">2024 · 韩国 · 电影</p>
+          <div style="margin-top: auto; display: flex; align-items: center; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #6875fa; background: rgba(104,117,250,.1); font-size: 11px; font-weight: 600;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6875fa" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+              追这部
+            </div>
+            <div style="display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border-radius: 9px; color: #51607c; font-size: 11px;">
+              查找资源
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

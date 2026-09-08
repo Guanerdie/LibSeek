@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; }
+    .u { font-family: Inter, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    a { color: #6875fa; } a:hover { color: #5058d8; }
+    .row { display: grid; grid-template-columns: 26px 1fr 132px 92px 108px 96px; align-items: center; gap: 14px; padding: 11px 16px; border-radius: 12px; }
+    .row + .row { border-top: 1px solid rgba(113,128,158,.11); }
+    .cell-muted { color: #71809e; font-size: 11px; }
+  </style>
+</helmet>
+
+<div class="u" style="width: 1040px; padding: 26px; background: #edf2fa; color: #102448;">
+  <div style="border: 1px solid rgba(255,255,255,.78); border-radius: 24px; background: rgba(239,244,251,.74); box-shadow: 10px 10px 24px rgba(166,177,198,.35), -10px -10px 24px rgba(255,255,255,.92); padding: 26px;">
+
+    <div style="display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 20px;">
+      <div>
+        <span style="color: #8b62f5; font: 700 9px Inter, sans-serif; letter-spacing: .16em; text-transform: uppercase;">DAILY WORKFLOW</span>
+        <h1 style="margin: 8px 0 7px; font-size: 38px; line-height: 1; letter-spacing: -.04em;">缺失影视</h1>
+        <p style="margin: 0; color: #71809e; font-size: 12px;">按条件筛选后批量加入追更，或逐条查看被拒原因。</p>
+      </div>
+      <div style="display: flex; align-items: center; gap: 7px; min-height: 38px; padding: 9px 15px; border: 1px solid rgba(255,255,255,.78); border-radius: 12px; color: #51607c; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 11px;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#51607c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 3v5h-5"></path></svg>
+        同步缺失影视
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px;">
+      <div style="flex: 1; display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 14px; border: 1px solid rgba(255,255,255,.7); border-radius: 12px; background: #eef3fb; box-shadow: inset 4px 4px 10px rgba(166,177,198,.25), inset -4px -4px 10px rgba(255,255,255,.9);">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9ba8be" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <span style="color: #9ba8be; font-size: 12px;">搜索中文名或原名…</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 13px; border: 1px solid rgba(255,255,255,.78); border-radius: 12px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 12px; color: #51607c;">电视剧
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#71809e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 13px; border: 1px solid rgba(255,255,255,.78); border-radius: 12px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 12px; color: #51607c;">韩国
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#71809e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </div>
+      <div style="display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 13px; border: 1px solid rgba(255,255,255,.78); border-radius: 12px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 12px; color: #51607c;">待搜索
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#71809e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; margin-bottom: 4px; border-radius: 12px; background: rgba(104,117,250,.07);">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <div style="width: 15px; height: 15px; border-radius: 4px; background: #6875fa; display: grid; place-items: center;">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
+        </div>
+        <span style="font-size: 12px; font-weight: 600;">已选 6 项</span>
+        <span class="cell-muted">共 44,075 项 · 当前筛选 128 项</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div style="height: 30px; display: flex; align-items: center; padding: 0 12px; border-radius: 10px; color: #51607c; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9); font-size: 11px;">移出追更</div>
+        <div style="height: 30px; display: flex; align-items: center; gap: 5px; padding: 0 12px; border-radius: 10px; color: #fff; background: linear-gradient(135deg,#5799f8,#696bf4 55%,#a15be8); font-size: 11px; font-weight: 600; box-shadow: 0 8px 18px rgba(97,105,240,.28);">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+          加入追更
+        </div>
+      </div>
+    </div>
+
+    <div style="padding: 6px; border: 1px solid rgba(255,255,255,.78); border-radius: 16px; background: rgba(239,244,251,.84); box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">
+
+      <div class="row" style="padding-top: 9px; padding-bottom: 9px; color: #9ba8be; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; font-weight: 700;">
+        <span></span><span>影视</span><span>状态</span><span>年份</span><span>最近自动化</span><span style="text-align: right;">追更</span>
+      </div>
+
+      <div class="row">
+        <div style="width: 15px; height: 15px; border-radius: 4px; background: #6875fa; display: grid; place-items: center;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></div>
+        <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 600;">苦尽柑来遇见你</div><div class="cell-muted" style="margin-top: 2px;">When Life Gives You Tangerines</div></div>
+        <span style="justify-self: start; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">待搜索</span>
+        <span class="cell-muted">2025</span>
+        <span class="cell-muted">1 小时前 · 无候选</span>
+        <div style="justify-self: end; width: 38px; height: 21px; border-radius: 999px; background: #6875fa; display: flex; align-items: center; justify-content: flex-end; padding: 0 3px;"><div style="width: 15px; height: 15px; border-radius: 999px; background: #fff;"></div></div>
+      </div>
+
+      <div class="row">
+        <div style="width: 15px; height: 15px; border-radius: 4px; background: #6875fa; display: grid; place-items: center;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></div>
+        <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 600;">善意的竞争</div><div class="cell-muted" style="margin-top: 2px;">Study Group</div></div>
+        <span style="justify-self: start; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">有候选待确认</span>
+        <span class="cell-muted">2025</span>
+        <span class="cell-muted">2 小时前 · 12 个候选</span>
+        <div style="justify-self: end; width: 38px; height: 21px; border-radius: 999px; background: #6875fa; display: flex; align-items: center; justify-content: flex-end; padding: 0 3px;"><div style="width: 15px; height: 15px; border-radius: 999px; background: #fff;"></div></div>
+      </div>
+
+      <div class="row">
+        <div style="width: 15px; height: 15px; border-radius: 4px; background: #6875fa; display: grid; place-items: center;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></div>
+        <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 600;">爱情有别</div><div class="cell-muted" style="margin-top: 2px;">Love Scout · 下载 62%</div></div>
+        <span style="justify-self: start; padding: 4px 9px; border-radius: 999px; color: #398ee4; background: rgba(57,142,228,.1); font-size: 10px; font-weight: 600;">下载中</span>
+        <span class="cell-muted">2025</span>
+        <span class="cell-muted">3 小时前 · 已提交</span>
+        <div style="justify-self: end; width: 38px; height: 21px; border-radius: 999px; background: #6875fa; display: flex; align-items: center; justify-content: flex-end; padding: 0 3px;"><div style="width: 15px; height: 15px; border-radius: 999px; background: #fff;"></div></div>
+      </div>
+
+      <div class="row">
+        <div style="width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid rgba(113,128,158,.4);"></div>
+        <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 600;">背着善宰跑</div><div class="cell-muted" style="margin-top: 2px;">Lovely Runner</div></div>
+        <span style="justify-self: start; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">已完成</span>
+        <span class="cell-muted">2024</span>
+        <span class="cell-muted">—</span>
+        <div style="justify-self: end; width: 38px; height: 21px; border-radius: 999px; background: rgba(113,128,158,.22); display: flex; align-items: center; padding: 0 3px;"><div style="width: 15px; height: 15px; border-radius: 999px; background: #fff;"></div></div>
+      </div>
+
+      <div class="row" style="background: rgba(232,157,69,.06);">
+        <div style="width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid rgba(113,128,158,.4);"></div>
+        <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 600;">寄生兽：灰色部队</div><div style="margin-top: 2px; color: #b4762c; font-size: 11px;">40 个候选全部被拒：38 个评分低于门槛</div></div>
+        <span style="justify-self: start; padding: 4px 9px; border-radius: 999px; color: #e89d45; background: rgba(232,157,69,.13); font-size: 10px; font-weight: 600;">需要处理</span>
+        <span class="cell-muted">2024</span>
+        <span class="cell-muted">40 分钟前</span>
+        <div style="justify-self: end; width: 38px; height: 21px; border-radius: 999px; background: rgba(113,128,158,.22); display: flex; align-items: center; padding: 0 3px;"><div style="width: 15px; height: 15px; border-radius: 999px; background: #fff;"></div></div>
+      </div>
+
+      <div class="row">
+        <div style="width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid rgba(113,128,158,.4);"></div>
+        <div style="min-width: 0;"><div style="font-size: 13px; font-weight: 600;">破墓</div><div class="cell-muted" style="margin-top: 2px;">Exhuma · 电影</div></div>
+        <span style="justify-self: start; padding: 4px 9px; border-radius: 999px; color: #22ad7a; background: rgba(34,173,122,.11); font-size: 10px; font-weight: 600;">待搜索</span>
+        <span class="cell-muted">2024</span>
+        <span class="cell-muted">从未搜索</span>
+        <div style="justify-self: end; width: 38px; height: 21px; border-radius: 999px; background: rgba(113,128,158,.22); display: flex; align-items: center; padding: 0 3px;"><div style="width: 15px; height: 15px; border-radius: 999px; background: #fff;"></div></div>
+      </div>
+
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px; color: #71809e; font-size: 11px;">
+      <span>共 44,075 项 · 第 1 / 1470 页</span>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <div style="height: 30px; min-width: 30px; display: grid; place-items: center; padding: 0 10px; border-radius: 9px; color: #fff; background: #6875fa; font-weight: 600;">1</div>
+        <div style="height: 30px; min-width: 30px; display: grid; place-items: center; padding: 0 10px; border-radius: 9px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">2</div>
+        <div style="height: 30px; min-width: 30px; display: grid; place-items: center; padding: 0 10px; border-radius: 9px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">3</div>
+        <div style="height: 30px; display: grid; place-items: center; padding: 0 12px; border-radius: 9px; background: #eef3fb; box-shadow: 5px 5px 13px rgba(166,177,198,.32), -5px -5px 13px rgba(255,255,255,.9);">下一页</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

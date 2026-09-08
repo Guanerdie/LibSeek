@@ -159,6 +159,18 @@ class MediaDetail(MediaSummary):
     subscription_active: bool = False
 
 
+class QuickFillRequest(BaseModel):
+    # Skip the five-minute result cache and ask the site again.
+    force: bool = False
+
+
+class QuickFillResult(BaseModel):
+    search: SearchDetail
+    selected_candidate_id: str | None = None
+    download: DownloadView | None = None
+    rejected: list[RejectedCandidateView] = Field(default_factory=list)
+
+
 class SubscriptionUpdate(BaseModel):
     subscribed: bool
 

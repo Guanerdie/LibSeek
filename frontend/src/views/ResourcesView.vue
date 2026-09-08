@@ -101,6 +101,31 @@ async function saveScoreOverride(): Promise<void> {
   }
 }
 
+const quickFilling = ref(false)
+const quickFillNote = ref<string | null>(null)
+
+/** Search, pick and submit in one go -- the manual path below is untouched. */
+async function quickFill(): Promise<void> {
+  if (quickFilling.value) return
+  quickFilling.value = true
+  quickFillNote.value = null
+  try {
+    const result = await daily.quickFill(mediaId.value)
+    if (!result) return
+    if (daily.search) await router.replace({ query: { search: daily.search.id } })
+    const found = result.search.candidates?.length ?? 0
+    if (result.download) {
+      quickFillNote.value = '已选中并提交下载，可在下载页查看进度。'
+    } else if (found === 0) {
+      quickFillNote.value = '站点没有搜到候选资源。'
+    } else {
+      quickFillNote.value = `搜到 ${found} 个候选，但按当前策略没有能自动下载的；可以在下面自己挑一个。`
+    }
+  } finally {
+    quickFilling.value = false
+  }
+}
+
 function outcomeTime(iso: string): string {
   const parsed = new Date(iso)
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString()
@@ -137,7 +162,16 @@ onMounted(async () => {
   const querySearchId = typeof route.query.search === 'string' ? route.query.search : null
   const searchId =
     querySearchId ?? (daily.search?.state === 'SUCCEEDED' ? daily.search.id : null)
-  if (searchId) await daily.loadSearch(searchId)
+  if (searchId) {
+    await daily.loadSearch(searchId)
+    return
+  }
+  // Only when there is no previous search at all: search straight away rather
+  // than making the operator press a button whose only possible answer is yes.
+  // A result from the last five minutes is reused, so this is usually free.
+  // A previous search that FAILED is left on screen instead -- silently
+  // re-running it would hide the failure the operator needs to see.
+  if (!daily.search && daily.selectedMedia?.tmdb_id) await startSearch(false)
 })
 </script>
 
@@ -150,10 +184,11 @@ onMounted(async () => {
     >
       <button
         class="button primary"
-        :disabled="daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id"
-        @click="startSearch(false)"
+        :disabled="quickFilling || daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id"
+        title="搜索、按策略挑最佳、直接提交下载"
+        @click="quickFill"
       >
-        搜索 PT 资源
+        {{ quickFilling ? '处理中…' : '一键补片' }}
       </button>
       <button
         class="button"
@@ -161,7 +196,7 @@ onMounted(async () => {
         title="跳过 5 分钟内的缓存结果，重新向站点发起搜索"
         @click="startSearch(true)"
       >
-        强制刷新
+        重新搜索
       </button>
       <button
         v-if="daily.selectedMedia"
@@ -175,6 +210,8 @@ onMounted(async () => {
     </PageHeader>
 
     <PageState :loading="daily.mediaDetailLoading" :error="daily.resourceError" />
+
+    <p v-if="quickFillNote" class="panel compact-panel quick-fill-note">{{ quickFillNote }}</p>
 
     <div v-if="daily.selectedMedia && !daily.selectedMedia.tmdb_id" class="panel identity-prompt">
       <div>

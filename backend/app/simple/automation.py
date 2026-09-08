@@ -45,6 +45,7 @@ from app.simple.models import (
     MediaSeason,
     MediaState,
     ReleaseCandidate,
+    ReleaseSearch,
 )
 from app.simple.regions import NextFindRegion, nextfind_regions
 from app.simple.schemas import AutomationPolicyUpdate
@@ -205,6 +206,81 @@ async def set_media_subscription(
     await session.commit()
     await session.refresh(policy)
     return policy
+
+
+async def quick_fill_media(
+    session: AsyncSession,
+    *,
+    media_id: str,
+    adapter_factory: Callable[[str], PtSiteAdapter],
+    pt_factory: Callable[[str], PtSiteAdapter],
+    qb_factory: Callable[[], QbittorrentAdapter],
+    metadata_factory: Callable[[], MetadataProvider] | None = None,
+    force: bool = False,
+) -> tuple[ReleaseSearch, ReleaseCandidate | None, list[dict[str, object]], Download | None]:
+    """Search, pick the best candidate and submit it -- in one call.
+
+    The picking logic already existed but only the scheduler could reach it, so
+    filling one item by hand meant search, read, choose, download, confirm.
+    This runs the same ``_choose_candidate`` the scheduler uses, against the
+    same policy, and stops at the same gates (duplicate downloads, the qB write
+    switch, the daily budget is deliberately NOT applied here -- an explicit
+    click is not the scheduler running unattended).
+
+    It does not replace choosing by hand: the search it runs is an ordinary
+    one, so its candidates stay listed for the operator to pick from instead.
+    """
+
+    policy = await get_policy(session)
+    media = await session.get(LibraryMediaItem, media_id)
+    if media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    if media.tmdb_id is None:
+        if metadata_factory is None:
+            raise AppError(
+                "MEDIA_IDENTITY_REQUIRED", "请先确认 TMDB 影视信息", status_code=409
+            )
+        provider = metadata_factory()
+        try:
+            media = await identify_media(session, media.id, provider)
+        finally:
+            await close_adapter(provider)
+
+    search, created = await get_or_create_search(
+        session, media_id=media.id, site_ids=policy.site_ids, force=force
+    )
+    if created:
+        await run_release_search(
+            session, search.id, adapter_factory, metadata_factory=metadata_factory
+        )
+    _, candidates = await get_search(session, search.id)
+
+    season_context = await _season_context(session, media)
+    selected, rejected = _choose_candidate(
+        policy,
+        candidates,
+        media_type=media.media_type,
+        require_known_size=policy.daily_download_bytes is not None,
+        seasons=season_context,
+        variety=is_variety(media.genre_ids),
+        latest_episode_window=policy.variety_recent_episodes,
+        minimum_score=media.minimum_score_override,
+    )
+    _record_search_outcome(media, found_candidate=selected is not None, policy=policy)
+    await session.commit()
+    if selected is None:
+        return search, None, rejected, None
+
+    download = await submit_download(
+        session,
+        candidate_id=selected.id,
+        # The operator asked for this specific item; the soft-warning
+        # confirmation is the policy's call, exactly as for the scheduler.
+        confirm_warnings=policy.allow_warnings,
+        pt_factory=pt_factory,
+        qb_factory=qb_factory,
+    )
+    return search, selected, rejected, download
 
 
 async def set_media_subscriptions(
