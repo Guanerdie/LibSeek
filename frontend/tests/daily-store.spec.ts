@@ -639,6 +639,23 @@ describe('simplified daily store', () => {
     ).toBe(true)
   })
 
+  it('shows library states in Chinese, not the raw enum', async () => {
+    mocks.media.mockResolvedValueOnce(
+      mediaPage([
+        { ...media, id: 'a', state: 'READY' },
+        { ...media, id: 'b', state: 'CANDIDATES' },
+        { ...media, id: 'c', state: 'NEEDS_ATTENTION' },
+      ]),
+    )
+    const wrapper = mount(LibraryView, {
+      global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } },
+    })
+    await flushPromises()
+
+    const pills = wrapper.findAll('.status-pill').map((pill) => pill.text())
+    expect(pills).toEqual(['待搜索', '有候选待确认', '需要处理'])
+  })
+
   it('adds the whole filtered page to the follow list', async () => {
     mocks.media.mockResolvedValueOnce(mediaPage([media]))
     mocks.setSubscriptions.mockResolvedValueOnce({ subscribed_total: 1, changed: 1 })
