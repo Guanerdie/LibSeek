@@ -20,6 +20,10 @@ export default tseslint.config(
       },
     },
     rules: {
+      // TypeScript already resolves every identifier, and no-undef cannot see
+      // DOM lib types used in type position (PointerEvent, SVGRectElement).
+      // Disabling it for TS/Vue files is what typescript-eslint recommends.
+      'no-undef': 'off',
       'vue/multi-word-component-names': 'off',
       'vue/max-attributes-per-line': 'off',
       'vue/html-self-closing': 'off',

@@ -1,10 +1,11 @@
 import type {
   AuthSetupStatus,
   AutomationJob,
-  AutomationPolicy,
   AutomationJobPage,
+  AutomationPolicy,
   AutomationRun,
   AutomationRunPage,
+  AutomationStats,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
@@ -251,4 +252,8 @@ export const automationApi = {
     request<AutomationJob>(`/api/automation/jobs/${encodeURIComponent(jobId)}/retry`, {
       method: 'POST',
     }),
+}
+
+export const statsApi = {
+  overview: () => request<AutomationStats>('/api/stats'),
 }

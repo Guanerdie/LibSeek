@@ -46,6 +46,7 @@ describe('authenticated navigation', () => {
       { href: '/library', text: '▦缺失' },
       { href: '/downloads', text: '↓下载' },
       { href: '/automation', text: '⟳自动化' },
+      { href: '/monitoring', text: '◔监控' },
       { href: '/configuration', text: '⚙设置' },
     ])
     expect(wrapper.find('.nav-disclosure').exists()).toBe(false)

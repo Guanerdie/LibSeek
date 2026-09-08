@@ -10,7 +10,7 @@ from app.core.automation_runner import queue_manual_automation_run
 from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.simple import automation, service
+from app.simple import automation, service, stats
 from app.simple.integrations import (
     build_nextfind,
     build_pt_site,
@@ -391,3 +391,17 @@ async def retry_automation_job(
     if media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
     return AutomationJobView.model_validate({**job.__dict__, "media_title": media.title})
+
+
+@router.get("/stats")
+async def automation_stats(
+    session: Session, principal: ViewerPrincipal
+) -> dict[str, object]:
+    """Aggregates for the monitoring page.
+
+    Read-only and viewer-visible: it exposes counts and durations the operator
+    can already see one page at a time, nothing new.
+    """
+
+    del principal
+    return await stats.collect_stats(session)

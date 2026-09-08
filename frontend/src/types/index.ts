@@ -346,3 +346,48 @@ export interface AutomationRun {
 export type AutomationRunPage = Page<AutomationRun>
 
 export type AutomationJobPage = Page<AutomationJob>
+
+export interface StatsTrendPoint {
+  date: string
+  total: number
+  succeeded: number
+  success_rate: number | null
+}
+
+export interface StatsSiteLatency {
+  site_id: string
+  searches: number
+  average_seconds: number
+  slowest_seconds: number
+}
+
+export interface StatsRun {
+  id: string
+  trigger: string
+  state: AutomationRunState
+  created_count: number
+  succeeded_count: number
+  failed_count: number
+  deferred_count: number
+  created_at: string
+  duration_seconds: number | null
+}
+
+export interface AutomationStats {
+  window_days: number
+  generated_at: string
+  search_trend: StatsTrendPoint[]
+  site_latency: StatsSiteLatency[]
+  recent_runs: StatsRun[]
+  library_coverage: {
+    total: number
+    covered: number
+    coverage_rate: number | null
+    by_state: Record<string, number>
+  }
+  download_health: {
+    total: number
+    errored: number
+    by_state: Record<string, number>
+  }
+}
