@@ -16,6 +16,7 @@ from app.schemas.adapters import (
     AdapterManifest,
     MetadataRecord,
     ProbeResult,
+    SeasonRecord,
     normalize_country_codes,
 )
 
@@ -249,8 +250,9 @@ class TmdbProvider(MetadataProvider):
         year = self._year(chinese.release_date or chinese.first_air_date)
         external_ids = self._external_id_dict(chinese.external_ids)
         matrix: dict[int, list[int]] | None = None
+        seasons: list[SeasonRecord] = []
         if media_type == MediaType.TV and (chinese.number_of_seasons or 0) > 0:
-            matrix = await self._episode_matrix(tmdb_id, chinese.number_of_seasons or 0)
+            matrix, seasons = await self._episode_matrix(tmdb_id, chinese.number_of_seasons or 0)
         return MetadataRecord(
             tmdb_id=chinese.id,
             imdb_id=external_ids.get("imdb_id"),
@@ -266,6 +268,7 @@ class TmdbProvider(MetadataProvider):
             number_of_seasons=chinese.number_of_seasons,
             number_of_episodes=chinese.number_of_episodes,
             episode_matrix=matrix,
+            seasons=seasons,
             poster_path=chinese.poster_path,
             backdrop_path=chinese.backdrop_path,
             status=chinese.status,
@@ -313,7 +316,8 @@ class TmdbProvider(MetadataProvider):
         details = await self._details(MediaType.TV, tmdb_id, "zh-CN", append=False)
         if (details.number_of_seasons or 0) <= 0:
             return None
-        return await self._episode_matrix(tmdb_id, details.number_of_seasons or 0)
+        matrix, _ = await self._episode_matrix(tmdb_id, details.number_of_seasons or 0)
+        return matrix
 
     @staticmethod
     def _country_codes(
@@ -325,8 +329,17 @@ class TmdbProvider(MetadataProvider):
         values.extend(country.iso_3166_1 for country in details.production_countries)
         return normalize_country_codes(values)
 
-    async def _episode_matrix(self, tmdb_id: int, season_count: int) -> dict[int, list[int]]:
+    async def _episode_matrix(
+        self, tmdb_id: int, season_count: int
+    ) -> tuple[dict[int, list[int]], list[SeasonRecord]]:
+        """Return the aired-episode matrix and one summary per season.
+
+        Both come out of the same season payloads, so they are built together
+        rather than paying for the requests twice.
+        """
+
         matrix: dict[int, list[int]] = {}
+        summaries: list[SeasonRecord] = []
         for season_number in range(1, season_count + 1):
             try:
                 payload = await self._get_json(
@@ -335,14 +348,46 @@ class TmdbProvider(MetadataProvider):
                 season = TmdbSeason.model_validate(payload)
             except ValidationError as exc:
                 raise AppError("TMDB_VALIDATION_ERROR", "TMDB 季集字段校验失败") from exc
+            numbered = [episode for episode in season.episodes if episode.episode_number > 0]
             episodes = [
                 episode.episode_number
-                for episode in season.episodes
-                if episode.episode_number > 0 and self._episode_is_allowed(episode.air_date)
+                for episode in numbered
+                if self._episode_is_allowed(episode.air_date)
             ]
             if episodes:
                 matrix[season.season_number] = episodes
-        return matrix
+            summaries.append(self._season_summary(season.season_number, numbered))
+        return matrix, summaries
+
+    def _season_summary(self, season_number: int, episodes: list[TmdbEpisode]) -> SeasonRecord:
+        today = self.today()
+        aired: list[date] = []
+        unaired = 0
+        for episode in episodes:
+            parsed = self._air_date(episode.air_date)
+            if parsed is not None and parsed <= today:
+                aired.append(parsed)
+            else:
+                # No air date at all counts as not yet aired: TMDB leaves it
+                # blank for episodes that have not been scheduled.
+                unaired += 1
+        return SeasonRecord(
+            season_number=season_number,
+            episode_count=len(episodes),
+            aired_episode_count=len(aired),
+            last_air_date=max(aired) if aired else None,
+            # A season with no episodes listed is not "complete", it is unknown.
+            is_complete=bool(episodes) and unaired == 0,
+        )
+
+    @staticmethod
+    def _air_date(value: str | None) -> date | None:
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
 
     def _episode_is_allowed(self, air_date: str | None) -> bool:
         if self.allow_future_episodes:

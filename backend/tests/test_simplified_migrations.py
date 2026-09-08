@@ -37,6 +37,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         "downloads",
         "episodes",
         "library_media",
+        "media_seasons",
         "release_candidates",
         "searches",
     }
@@ -71,6 +72,22 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     search_columns = {column["name"]: column for column in inspector.get_columns("searches")}
     assert search_columns["cache_key"]["nullable"] is True
     assert search_columns["cache_expires_at"]["nullable"] is True
+    season_columns = {column["name"] for column in inspector.get_columns("media_seasons")}
+    assert {"season_number", "episode_count", "aired_episode_count", "is_complete"} <= (
+        season_columns
+    )
+    assert (
+        ("media_id",),
+        "library_media",
+        "CASCADE",
+    ) in {
+        (
+            tuple(item["constrained_columns"]),
+            item["referred_table"],
+            item["options"].get("ondelete"),
+        )
+        for item in inspector.get_foreign_keys("media_seasons")
+    }
     assert (
         ("retry_of_job_id",),
         "automation_jobs",
@@ -121,6 +138,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     search_columns = {column["name"] for column in inspector.get_columns("searches")}
     assert "cache_key" not in search_columns
     assert "cache_expires_at" not in search_columns
+    assert "media_seasons" not in set(inspector.get_table_names())
     download_checks = {
         constraint["name"] for constraint in inspector.get_check_constraints("downloads")
     }

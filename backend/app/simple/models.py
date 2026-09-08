@@ -162,6 +162,36 @@ class Episode(Base):
     )
 
 
+class MediaSeason(Base):
+    """One season of a series, and whether it has finished airing.
+
+    Kept separate from ``Episode`` because episode rows only exist for episodes
+    the library has seen; a season's total and its airing status come from the
+    metadata provider and must survive even when no episode row exists yet.
+    """
+
+    __tablename__ = "media_seasons"
+    __table_args__ = (
+        Index("uq_media_season_number", "media_id", "season_number", unique=True),
+        CheckConstraint("season_number >= 0", name="ck_media_season_nonnegative"),
+        CheckConstraint("episode_count >= 0", name="ck_media_season_episode_count"),
+        CheckConstraint("aired_episode_count >= 0", name="ck_media_season_aired_count"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    media_id: Mapped[str] = mapped_column(
+        ForeignKey("library_media.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    season_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    episode_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    aired_episode_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_air_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_complete: Mapped[bool] = mapped_column(default=False, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class ReleaseSearch(Base):
     __tablename__ = "searches"
 

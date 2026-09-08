@@ -33,7 +33,10 @@ from app.simple.models import (
     AutomationRunState,
     Download,
     DownloadState,
+    Episode,
+    EpisodeState,
     LibraryMediaItem,
+    MediaSeason,
     MediaState,
     ReleaseCandidate,
 )
@@ -671,6 +674,7 @@ async def _execute_job(
                         metadata_factory=metadata_factory,
                     )
                 _, candidates = await get_search(session, search.id)
+                complete_seasons, seasons_missing = await _season_context(session, media)
                 selected, rejected = _choose_candidate(
                     policy,
                     candidates,
@@ -678,6 +682,8 @@ async def _execute_job(
                     require_known_size=(
                         not policy.dry_run and policy.daily_download_bytes is not None
                     ),
+                    complete_seasons=complete_seasons,
+                    seasons_with_missing_episodes=seasons_missing,
                 )
                 if (
                     selected is not None
@@ -784,11 +790,16 @@ async def _execute_job(
                             "自动化目标或候选已不存在，已停止下载提交",
                             status_code=409,
                         )
+                    current_complete, current_missing = await _season_context(
+                        session, current_media
+                    )
                     accepted, rejected = _choose_candidate(
                         current_policy,
                         [current_candidate],
                         media_type=current_media.media_type,
                         require_known_size=current_policy.daily_download_bytes is not None,
+                        complete_seasons=current_complete,
+                        seasons_with_missing_episodes=current_missing,
                     )
                     if current_media.media_type.value not in current_policy.media_types:
                         accepted = None
@@ -1011,12 +1022,77 @@ async def _budget_reason(
     return None
 
 
+async def _season_context(
+    session: AsyncSession, media: LibraryMediaItem
+) -> tuple[frozenset[int] | None, frozenset[int] | None]:
+    """Which seasons have finished airing, and which are still missing episodes.
+
+    Returns ``(None, None)`` for anything that is not a series, and ``None``
+    for the completion set when no season data has been recorded -- an older
+    library entry that has not been re-identified since seasons were tracked
+    must not have every season pack rejected out from under it.
+    """
+
+    if media.media_type != MediaType.TV:
+        return None, None
+    seasons = list(
+        await session.scalars(select(MediaSeason).where(MediaSeason.media_id == media.id))
+    )
+    complete = (
+        frozenset(row.season_number for row in seasons if row.is_complete) if seasons else None
+    )
+    missing_rows = await session.scalars(
+        select(Episode.season_number).where(
+            Episode.media_id == media.id,
+            Episode.state == EpisodeState.MISSING,
+        )
+    )
+    missing = frozenset(missing_rows)
+    # No episode rows at all means the library has no per-episode view of this
+    # series; fall back to the existing rules rather than rejecting everything.
+    return complete, (missing or None)
+
+
+def _season_pack_reason(
+    candidate: ReleaseCandidate,
+    *,
+    complete_seasons: frozenset[int] | None,
+    seasons_with_missing_episodes: frozenset[int] | None,
+) -> str | None:
+    """Reject a season pack that cannot help, or cannot be trusted.
+
+    A series that is still going out has no complete-series pack and no pack
+    for the season currently airing, so automation used to find nothing for it
+    at all.  Judging each season on its own is what makes such a series
+    automatable: its finished seasons are ordinary season packs, and the one
+    still airing is skipped instead of blocking the whole item.
+
+    ``None`` for either set means "we do not know" -- no season data has been
+    recorded yet -- and the pack is left to the other checks rather than being
+    rejected on missing information.
+    """
+
+    covered = [season for season in (candidate.season_coverage or []) if season > 0]
+    if len(covered) != 1:
+        # A multi-season or unlabelled pack is judged by the existing rules;
+        # per-season reasoning only makes sense for a single-season release.
+        return None
+    season = covered[0]
+    if complete_seasons is not None and season not in complete_seasons:
+        return f"第 {season} 季尚未播完，季包不完整"
+    if seasons_with_missing_episodes is not None and season not in seasons_with_missing_episodes:
+        return f"第 {season} 季本地没有缺集"
+    return None
+
+
 def _choose_candidate(
     policy: AutomationPolicy,
     candidates: list[ReleaseCandidate],
     *,
     media_type: MediaType,
     require_known_size: bool = False,
+    complete_seasons: frozenset[int] | None = None,
+    seasons_with_missing_episodes: frozenset[int] | None = None,
 ) -> tuple[ReleaseCandidate | None, list[dict[str, object]]]:
     rejected: list[dict[str, object]] = []
     eligible: list[ReleaseCandidate] = []
@@ -1077,6 +1153,14 @@ def _choose_candidate(
             soft_warnings.discard("EPISODE_OVERLAP")
         if soft_warnings and not policy.allow_warnings:
             reasons.append("候选包含风险提示")
+        if media_type == MediaType.TV:
+            season_reason = _season_pack_reason(
+                candidate,
+                complete_seasons=complete_seasons,
+                seasons_with_missing_episodes=seasons_with_missing_episodes,
+            )
+            if season_reason is not None:
+                reasons.append(season_reason)
         if reasons:
             rejected.append(
                 {"candidate_id": candidate.id, "title": candidate.title, "reasons": reasons}

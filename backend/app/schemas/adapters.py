@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -180,6 +180,24 @@ class LibraryDetails(BaseModel):
         return normalize_episode_codes(value)
 
 
+class SeasonRecord(BaseModel):
+    """One season's airing status, as the metadata provider reports it.
+
+    ``is_complete`` is what makes an airing series automatable: a season whose
+    every episode has already aired can be replaced by a season pack, while the
+    season currently going out cannot -- a "complete" pack for it would be
+    either mislabelled or short.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    season_number: int = Field(ge=0)
+    episode_count: int = Field(default=0, ge=0)
+    aired_episode_count: int = Field(default=0, ge=0)
+    last_air_date: date | None = None
+    is_complete: bool = False
+
+
 class MetadataRecord(BaseModel):
     tmdb_id: int
     imdb_id: str | None = None
@@ -195,6 +213,7 @@ class MetadataRecord(BaseModel):
     number_of_seasons: int | None = Field(default=None, ge=0)
     number_of_episodes: int | None = Field(default=None, ge=0)
     episode_matrix: dict[int, list[int]] | None = None
+    seasons: list[SeasonRecord] = Field(default_factory=list)
     poster_path: str | None = None
     backdrop_path: str | None = None
     status: str | None = None

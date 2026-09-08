@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime, time, timedelta
 from urllib.parse import quote, urlparse
 
 from sqlalchemy import select
@@ -23,6 +23,7 @@ from app.errors import AppError
 from app.schemas.adapters import (
     MediaItemData,
     MetadataRecord,
+    SeasonRecord,
     TorrentCandidate,
     TorrentSearchRequest,
 )
@@ -39,6 +40,7 @@ from app.simple.models import (
     Episode,
     EpisodeState,
     LibraryMediaItem,
+    MediaSeason,
     MediaState,
     ReleaseCandidate,
     ReleaseSearch,
@@ -401,12 +403,61 @@ async def identify_media(
     media.poster_path = record.poster_path
     media.state = MediaState.READY
     media.attention_reason = None
+    await _sync_media_seasons(session, media.id, record.seasons)
     session.add(
         ActivityLog(media_id=media.id, event="TMDB_IDENTIFIED", message="TMDB 影视信息已确认")
     )
     await session.commit()
     await session.refresh(media)
     return media
+
+
+async def _sync_media_seasons(
+    session: AsyncSession, media_id: str, seasons: Sequence[SeasonRecord]
+) -> None:
+    """Mirror the provider's season list onto ``media_seasons``.
+
+    Seasons the provider no longer reports are dropped rather than left behind:
+    a stale "complete" row would keep authorising season packs for a season
+    that has been renumbered or removed.
+    """
+
+    if not seasons:
+        return
+    existing = {
+        row.season_number: row
+        for row in await session.scalars(
+            select(MediaSeason).where(MediaSeason.media_id == media_id)
+        )
+    }
+    seen: set[int] = set()
+    for record in seasons:
+        seen.add(record.season_number)
+        last_air_date = (
+            datetime.combine(record.last_air_date, time.min, tzinfo=UTC)
+            if record.last_air_date is not None
+            else None
+        )
+        row = existing.get(record.season_number)
+        if row is None:
+            session.add(
+                MediaSeason(
+                    media_id=media_id,
+                    season_number=record.season_number,
+                    episode_count=record.episode_count,
+                    aired_episode_count=record.aired_episode_count,
+                    last_air_date=last_air_date,
+                    is_complete=record.is_complete,
+                )
+            )
+            continue
+        row.episode_count = record.episode_count
+        row.aired_episode_count = record.aired_episode_count
+        row.last_air_date = last_air_date
+        row.is_complete = record.is_complete
+    for season_number, row in existing.items():
+        if season_number not in seen:
+            await session.delete(row)
 
 
 def _unique_search_titles(*values: str | None) -> list[str]:
