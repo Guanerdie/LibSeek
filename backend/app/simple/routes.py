@@ -150,13 +150,19 @@ async def search_media(
     principal: OperatorPrincipal,
 ) -> SearchDetail:
     del principal
-    search = await service.create_search(session, media_id=media_id, site_ids=payload.site_ids)
-    await run_release_search(
+    search, created = await service.get_or_create_search(
         session,
-        search.id,
-        lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
-        metadata_factory=build_tmdb,
+        media_id=media_id,
+        site_ids=payload.site_ids,
+        force=payload.force,
     )
+    if created:
+        await run_release_search(
+            session,
+            search.id,
+            lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
+            metadata_factory=build_tmdb,
+        )
     completed, candidates = await service.get_search(session, search.id)
     return SearchDetail.model_validate(
         {

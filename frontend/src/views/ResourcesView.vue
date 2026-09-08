@@ -42,8 +42,8 @@ function freeStatusClass(downloadFactor: number | null): string {
   return downloadFactor === 0 ? 'is-free' : 'is-paid'
 }
 
-async function startSearch(): Promise<void> {
-  await daily.startSearch(mediaId.value, ['avistaz'])
+async function startSearch(force = false): Promise<void> {
+  await daily.startSearch(mediaId.value, ['avistaz'], force)
   if (daily.search) {
     await router.replace({ query: { search: daily.search.id } })
   }
@@ -94,9 +94,17 @@ onMounted(async () => {
       <button
         class="button primary"
         :disabled="daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id"
-        @click="startSearch"
+        @click="startSearch(false)"
       >
         搜索 PT 资源
+      </button>
+      <button
+        class="button"
+        :disabled="daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id"
+        title="跳过 5 分钟内的缓存结果，重新向站点发起搜索"
+        @click="startSearch(true)"
+      >
+        强制刷新
       </button>
     </PageHeader>
 

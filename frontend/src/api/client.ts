@@ -175,11 +175,11 @@ export const dailyApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tmdb_id: tmdbId }),
     }),
-  createSearch: (mediaId: string, siteIds: string[]) =>
+  createSearch: (mediaId: string, siteIds: string[], force = false) =>
     request<DailySearch>(`/api/library/${encodeURIComponent(mediaId)}/searches`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ site_ids: siteIds }),
+      body: JSON.stringify({ site_ids: siteIds, force }),
     }),
   search: (searchId: string) =>
     request<DailySearch>(`/api/searches/${encodeURIComponent(searchId)}`),

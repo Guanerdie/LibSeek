@@ -516,6 +516,44 @@ describe('simplified daily store', () => {
     wrapper.unmount()
   })
 
+  it('searches through the result cache by default', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail())
+    mocks.createSearch.mockResolvedValueOnce(successfulSearch)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.get('.button.primary').trigger('click')
+    await flushPromises()
+
+    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], false)
+  })
+
+  it('lets the refresh button skip a cached result', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail())
+    mocks.createSearch.mockResolvedValueOnce(successfulSearch)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const refresh = wrapper
+      .findAll('button')
+      .find((button) => button.text() === '强制刷新')
+    expect(refresh).toBeDefined()
+    await refresh!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], true)
+  })
+
   it('refreshes qBittorrent state before displaying downloads', async () => {
     mocks.syncDownloads.mockResolvedValueOnce({ created: 0, updated: 1 })
     mocks.downloads.mockResolvedValueOnce({

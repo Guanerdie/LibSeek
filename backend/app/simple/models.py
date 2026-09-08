@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from enum import StrEnum
 from uuid import uuid4
@@ -173,10 +174,24 @@ class ReleaseSearch(Base):
         enum_column(SearchState, 16), default=SearchState.PENDING, nullable=False, index=True
     )
     error_message: Mapped[str | None] = mapped_column(Text)
+    cache_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    cache_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @staticmethod
+    def make_cache_key(media_id: str, site_ids: list[str]) -> str:
+        """Identify "the same search" -- one media item against one set of sites.
+
+        Sorted so that ``["a", "b"]`` and ``["b", "a"]`` share a cache entry;
+        the site list is already de-duplicated and lower-cased by the request
+        schema before it reaches here.
+        """
+
+        content = f"{media_id}:{':'.join(sorted(site_ids))}"
+        return hashlib.sha256(content.encode()).hexdigest()
 
 
 class ReleaseCandidate(Base):

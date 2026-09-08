@@ -73,6 +73,8 @@ class MediaPage(BaseModel):
 
 class SearchCreate(BaseModel):
     site_ids: list[str] = Field(min_length=1, max_length=10)
+    # Skip the short-lived result cache; the UI's refresh button sets this.
+    force: bool = False
 
     @field_validator("site_ids")
     @classmethod

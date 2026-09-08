@@ -33,3 +33,7 @@ id_rsa*
 id_ed25519*
 .env.deploy
 .env.*.local
+
+# 本地开发产物
+backend/unin.db
+frontend/dist/

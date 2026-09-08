@@ -133,10 +133,10 @@ export const useDailyStore = defineStore('daily', {
         return false
       }
     },
-    async startSearch(mediaId: string, siteIds: string[]): Promise<void> {
+    async startSearch(mediaId: string, siteIds: string[], force = false): Promise<void> {
       this.resourceError = null
       try {
-        this.search = await dailyApi.createSearch(mediaId, siteIds)
+        this.search = await dailyApi.createSearch(mediaId, siteIds, force)
       } catch (error) {
         this.resourceError = error instanceof ApiError ? error.message : '无法开始搜索'
       }

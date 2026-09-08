@@ -38,7 +38,7 @@ from app.simple.models import (
 )
 from app.simple.regions import NextFindRegion, nextfind_regions
 from app.simple.schemas import AutomationPolicyUpdate
-from app.simple.service import create_search, get_search
+from app.simple.service import get_or_create_search, get_search
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _run_lock = asyncio.Lock()
@@ -630,17 +630,18 @@ async def _execute_job(
                 }
                 await session.commit()
             else:
-                search = await create_search(
+                search, created = await get_or_create_search(
                     session, media_id=job.media_id, site_ids=policy.site_ids
                 )
                 job.search_id = search.id
                 await session.commit()
-                await run_release_search(
-                    session,
-                    search.id,
-                    adapter_factory,
-                    metadata_factory=metadata_factory,
-                )
+                if created:
+                    await run_release_search(
+                        session,
+                        search.id,
+                        adapter_factory,
+                        metadata_factory=metadata_factory,
+                    )
                 _, candidates = await get_search(session, search.id)
                 selected, rejected = _choose_candidate(
                     policy,

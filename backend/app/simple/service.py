@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,12 +118,30 @@ async def get_media(
     return media, list(episodes), latest_search
 
 
-async def create_search(
+# How long a completed search stands in for the next identical one.  Long
+# enough to absorb a manual search immediately followed by an automation run,
+# short enough that a user pressing search twice on purpose still sees the
+# site's current state.
+SEARCH_CACHE_TTL = timedelta(minutes=5)
+
+
+async def get_or_create_search(
     session: AsyncSession,
     *,
     media_id: str,
     site_ids: list[str],
-) -> ReleaseSearch:
+    force: bool = False,
+) -> tuple[ReleaseSearch, bool]:
+    """Return a search for this media/site pair and whether it must still run.
+
+    A user who searches by hand and an automation cycle that starts a minute
+    later used to send the PT site the same query twice, spending quota to
+    learn the same thing -- and occasionally disagreeing, because the two
+    result sets were fetched seconds apart.  Reusing a recent completed search
+    removes both problems.  ``force`` is the escape hatch behind the UI's
+    refresh button, for when the user knows the site has changed.
+    """
+
     media = await session.get(LibraryMediaItem, media_id, with_for_update=True)
     if media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
@@ -131,7 +150,31 @@ async def create_search(
     if media.state == MediaState.DOWNLOADING:
         raise AppError("MEDIA_ALREADY_DOWNLOADING", "该影视已有下载任务", status_code=409)
 
-    search = ReleaseSearch(media_id=media.id, site_ids=site_ids)
+    cache_key = ReleaseSearch.make_cache_key(media.id, site_ids)
+    if not force:
+        cached = await session.scalar(
+            select(ReleaseSearch)
+            .where(
+                ReleaseSearch.cache_key == cache_key,
+                ReleaseSearch.cache_expires_at.is_not(None),
+                ReleaseSearch.cache_expires_at > utc_now(),
+                # Only a finished, successful search stands for a result.  A
+                # PENDING or FAILED one carries no candidates, and handing it
+                # back would look like an instant empty search.
+                ReleaseSearch.state == SearchState.SUCCEEDED,
+            )
+            .order_by(ReleaseSearch.created_at.desc(), ReleaseSearch.id.desc())
+            .limit(1)
+        )
+        if cached is not None:
+            return cached, False
+
+    search = ReleaseSearch(
+        media_id=media.id,
+        site_ids=site_ids,
+        cache_key=cache_key,
+        cache_expires_at=utc_now() + SEARCH_CACHE_TTL,
+    )
     media.state = MediaState.SEARCHING
     media.attention_reason = None
     session.add_all(
@@ -142,6 +185,20 @@ async def create_search(
     )
     await session.commit()
     await session.refresh(search)
+    return search, True
+
+
+async def create_search(
+    session: AsyncSession,
+    *,
+    media_id: str,
+    site_ids: list[str],
+) -> ReleaseSearch:
+    """Always start a new search, bypassing the cache."""
+
+    search, _ = await get_or_create_search(
+        session, media_id=media_id, site_ids=site_ids, force=True
+    )
     return search
 
 
