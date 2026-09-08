@@ -8,6 +8,7 @@ from typing import Protocol
 from app.core.pt_site_rules import effective_hnr_rule
 from app.models.enums import MediaType
 from app.schemas.adapters import MetadataRecord, TorrentCandidate
+from app.services.quality import QualityWeights, score_release_quality
 from app.services.tv_pack import classify_tv_pack
 
 _RELEASE_BOUNDARY_TOKENS = {
@@ -45,6 +46,8 @@ class MatchPreferences:
     subtitles: tuple[str, ...] = ()
     max_size_bytes: int | None = None
     possible_duplicate: bool = False
+    # How this deployment weighs release quality.  None uses the defaults.
+    quality_weights: QualityWeights | None = None
 
 
 @dataclass(frozen=True)
@@ -147,37 +150,53 @@ def score_torrent_candidate(
 
     if candidate.year is not None and metadata.year is not None:
         if candidate.year == metadata.year:
-            score += 0.1
             reasons.append("YEAR_MATCH")
         else:
             warnings.append("YEAR_MISMATCH")
 
-    if _preferred(candidate.resolution, preferences.resolutions):
-        score += 0.07
+    # Everything above establishes IDENTITY -- whether this release is the
+    # thing that was asked for.  It produces reasons and warnings, which the
+    # selection rules treat as gates, and deliberately no longer contributes to
+    # the number: when it did, identity was worth more than half the score and
+    # every candidate for one media item came out within a hair of the others.
+    del score
+
+    preferred_resolution = _preferred(candidate.resolution, preferences.resolutions)
+    preferred_source = _preferred(candidate.source, preferences.sources)
+    preferred_audio = _list_preferred(candidate.audio, preferences.audio)
+    preferred_subtitle = _list_preferred(candidate.subtitles, preferences.subtitles)
+    if preferred_resolution:
         reasons.append("PREFERRED_RESOLUTION")
-    if _preferred(candidate.source, preferences.sources):
-        score += 0.04
+    if preferred_source:
         reasons.append("PREFERRED_SOURCE")
-    if _list_preferred(candidate.audio, preferences.audio):
-        score += 0.03
+    if preferred_audio:
         reasons.append("PREFERRED_AUDIO")
-    if _list_preferred(candidate.subtitles, preferences.subtitles):
-        score += 0.04
+    if preferred_subtitle:
         reasons.append("PREFERRED_SUBTITLE")
     if candidate.seeders is not None and candidate.seeders > 0:
-        score += min(0.04, 0.01 + candidate.seeders / 1000)
         reasons.append("ACTIVE_SEEDERS")
     else:
         warnings.append("NO_SEEDERS")
     if candidate.download_factor is not None and candidate.download_factor < 1:
-        score += 0.03
         reasons.append("PROMOTION_ACTIVE")
     if preferences.max_size_bytes is not None and candidate.size_bytes is not None:
         if candidate.size_bytes > preferences.max_size_bytes:
             warnings.append("OVERSIZED")
         else:
-            score += 0.02
             reasons.append("SIZE_WITHIN_LIMIT")
+
+    quality = score_release_quality(
+        resolution=candidate.resolution,
+        source=candidate.source,
+        size_bytes=candidate.size_bytes,
+        seeders=candidate.seeders,
+        download_factor=candidate.download_factor,
+        preferred_resolution=preferred_resolution,
+        preferred_source=preferred_source,
+        preferred_audio=preferred_audio,
+        preferred_subtitle=preferred_subtitle,
+        weights=preferences.quality_weights,
+    )
     if not effective_hnr_rule(candidate.site_id, candidate.hit_and_run).known:
         warnings.append("HNR_UNKNOWN")
     if preferences.possible_duplicate:
@@ -185,7 +204,7 @@ def score_torrent_candidate(
 
     return candidate.model_copy(
         update={
-            "match_score": min(1.0, round(score, 4)),
+            "match_score": quality.score,
             "match_reasons": list(dict.fromkeys(reasons)),
             "warnings": list(dict.fromkeys(warnings)),
         }

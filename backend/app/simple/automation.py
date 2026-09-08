@@ -179,6 +179,12 @@ async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) 
     policy.cooldown_tier_3_hours = payload.cooldown_tier_3_hours
     policy.variety_recent_episodes = payload.variety_recent_episodes
     policy.automate_variety = payload.automate_variety
+    policy.weight_resolution = payload.weight_resolution
+    policy.weight_size = payload.weight_size
+    policy.weight_source = payload.weight_source
+    policy.weight_seeders = payload.weight_seeders
+    policy.weight_promotion = payload.weight_promotion
+    policy.seeder_floor = payload.seeder_floor
     await session.commit()
     await session.refresh(policy)
     return policy

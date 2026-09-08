@@ -320,6 +320,12 @@ export interface AutomationPolicy {
   cooldown_tier_3_hours: number
   variety_recent_episodes: number
   automate_variety: boolean
+  weight_resolution: number
+  weight_size: number
+  weight_source: number
+  weight_seeders: number
+  weight_promotion: number
+  seeder_floor: number
   updated_at: string
   last_run_at: string | null
 }

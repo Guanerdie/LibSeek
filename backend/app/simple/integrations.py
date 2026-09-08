@@ -28,6 +28,7 @@ from app.schemas.adapters import (
     TorrentSearchRequest,
 )
 from app.services.matching import MatchPreferences, score_torrent_candidate
+from app.services.quality import QualityWeights
 from app.services.torrent_validation import validate_torrent
 from app.services.variety import is_ongoing, is_variety
 from app.simple.automation_state import refresh_automation_run_summary
@@ -35,6 +36,7 @@ from app.simple.models import (
     ActivityLog,
     AutomationJob,
     AutomationJobState,
+    AutomationPolicy,
     AutomationRunState,
     Download,
     DownloadState,
@@ -610,6 +612,21 @@ async def run_release_search(
         aliases=media.search_titles,
         year=media.year,
     )
+    # Quality weights live on the policy: "best" is a preference, so the
+    # operator sets it once and every search uses it.
+    policy = await session.get(AutomationPolicy, "default")
+    quality_weights = (
+        QualityWeights(
+            resolution=policy.weight_resolution,
+            size=policy.weight_size,
+            source=policy.weight_source,
+            seeders=policy.weight_seeders,
+            promotion=policy.weight_promotion,
+            seeder_floor=policy.seeder_floor,
+        )
+        if policy is not None
+        else None
+    )
     stored: list[ReleaseCandidate] = []
     try:
         for site_id in search.site_ids:
@@ -624,6 +641,7 @@ async def run_release_search(
                     raw,
                     missing_episodes=None,
                     preferences=MatchPreferences(
+                        quality_weights=quality_weights,
                         resolutions=settings.preferred_resolutions,
                         sources=settings.preferred_sources,
                         audio=settings.preferred_audio,

@@ -40,6 +40,12 @@ const form = reactive({
   cooldown_tier_3_hours: 168,
   variety_recent_episodes: 5,
   automate_variety: false,
+  weight_resolution: 44,
+  weight_size: 24,
+  weight_source: 12,
+  weight_seeders: 13,
+  weight_promotion: 3,
+  seeder_floor: 3,
 })
 
 // Presets for the empty-search backoff ladder.  Sites differ in how much
@@ -142,6 +148,12 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.cooldown_tier_3_hours = policy.cooldown_tier_3_hours
   form.variety_recent_episodes = policy.variety_recent_episodes
   form.automate_variety = policy.automate_variety
+  form.weight_resolution = policy.weight_resolution
+  form.weight_size = policy.weight_size
+  form.weight_source = policy.weight_source
+  form.weight_seeders = policy.weight_seeders
+  form.weight_promotion = policy.weight_promotion
+  form.seeder_floor = policy.seeder_floor
 }
 
 async function loadMediaOptions(page = 1): Promise<void> {
@@ -335,6 +347,12 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     cooldown_tier_3_hours: form.cooldown_tier_3_hours,
     variety_recent_episodes: form.variety_recent_episodes,
     automate_variety: form.automate_variety,
+    weight_resolution: form.weight_resolution,
+    weight_size: form.weight_size,
+    weight_source: form.weight_source,
+    weight_seeders: form.weight_seeders,
+    weight_promotion: form.weight_promotion,
+    seeder_floor: form.seeder_floor,
   })
   applyPolicy(policy)
   return policy
@@ -549,6 +567,46 @@ onBeforeUnmount(() => {
           </label>
         </div>
       </details>
+      <div class="filter-heading">
+        <div>
+          <span class="eyebrow">QUALITY</span>
+          <strong>怎么算「好资源」</strong>
+          <p class="muted">
+            这些数字只看相对大小，不用加到 100。评分只衡量资源本身好不好——
+            是不是这部片由匹配规则单独把关，不再混进分数里。
+          </p>
+        </div>
+      </div>
+      <div class="configuration-field-grid">
+        <label>
+          画质（分辨率）
+          <input v-model.number="form.weight_resolution" name="weight_resolution" type="number" min="0" max="100" />
+        </label>
+        <label>
+          体积（越大越好）
+          <input v-model.number="form.weight_size" name="weight_size" type="number" min="0" max="100" />
+        </label>
+        <label>
+          片源（Remux &gt; 蓝光 &gt; WEB-DL）
+          <input v-model.number="form.weight_source" name="weight_source" type="number" min="0" max="100" />
+        </label>
+        <label>
+          做种数
+          <input v-model.number="form.weight_seeders" name="weight_seeders" type="number" min="0" max="100" />
+        </label>
+        <label>
+          免费 / 促销
+          <input v-model.number="form.weight_promotion" name="weight_promotion" type="number" min="0" max="100" />
+        </label>
+        <label>
+          做种数够用线
+          <input v-model.number="form.seeder_floor" name="seeder_floor" type="number" min="1" max="100" />
+          <span class="field-hint">
+            低于这个数算有风险；到了就够，再多加分很少。
+          </span>
+        </label>
+      </div>
+
       <details class="advanced-settings">
         <summary>空搜索退避与综艺</summary>
         <div class="filter-heading">

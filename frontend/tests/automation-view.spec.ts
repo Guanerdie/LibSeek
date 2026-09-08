@@ -46,6 +46,12 @@ const policy: AutomationPolicy = {
   cooldown_tier_3_hours: 168,
   variety_recent_episodes: 5,
   automate_variety: false,
+  weight_resolution: 44,
+  weight_size: 24,
+  weight_source: 12,
+  weight_seeders: 13,
+  weight_promotion: 3,
+  seeder_floor: 3,
   updated_at: '2026-08-23T00:00:00Z',
   last_run_at: null,
 }
@@ -204,6 +210,25 @@ describe('automation settings', () => {
 
     expect(mocks.updatePolicy).toHaveBeenCalledWith(
       expect.objectContaining({ variety_recent_episodes: 0 }),
+    )
+  })
+
+  it('saves the quality weights the operator set', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.get('input[name="weight_resolution"]').setValue(60)
+    await wrapper.get('input[name="weight_seeders"]').setValue(5)
+    await wrapper.get('input[name="seeder_floor"]').setValue(8)
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        weight_resolution: 60,
+        weight_seeders: 5,
+        seeder_floor: 8,
+      }),
     )
   })
 

@@ -380,6 +380,15 @@ class AutomationPolicy(Base):
     # their newest episodes are often unseeded, so they burn search quota for
     # little return until an operator decides to take them on.
     automate_variety: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # Release-quality weights.  Relative, normalised at scoring time, so
+    # they read as "how much does this matter to me" rather than as a
+    # budget that has to add up.
+    weight_resolution: Mapped[int] = mapped_column(Integer, default=44, nullable=False)
+    weight_size: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
+    weight_source: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
+    weight_seeders: Mapped[int] = mapped_column(Integer, default=13, nullable=False)
+    weight_promotion: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    seeder_floor: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

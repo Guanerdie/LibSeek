@@ -258,6 +258,14 @@ class AutomationPolicyUpdate(BaseModel):
     variety_recent_episodes: int = Field(default=5, ge=0, le=50)
     # Variety shows are excluded from automation unless this is turned on.
     automate_variety: bool = False
+    # Release-quality weights (relative; normalised when scoring).
+    weight_resolution: int = Field(default=44, ge=0, le=100)
+    weight_size: int = Field(default=24, ge=0, le=100)
+    weight_source: int = Field(default=12, ge=0, le=100)
+    weight_seeders: int = Field(default=13, ge=0, le=100)
+    weight_promotion: int = Field(default=3, ge=0, le=100)
+    # Seeders below this count as a risk; above it, merely fine.
+    seeder_floor: int = Field(default=3, ge=1, le=100)
 
     @field_validator("site_ids")
     @classmethod
