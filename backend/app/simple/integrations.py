@@ -29,6 +29,7 @@ from app.schemas.adapters import (
 )
 from app.services.matching import MatchPreferences, score_torrent_candidate
 from app.services.torrent_validation import validate_torrent
+from app.services.variety import is_ongoing, is_variety
 from app.simple.automation_state import refresh_automation_run_summary
 from app.simple.models import (
     ActivityLog,
@@ -96,6 +97,20 @@ def build_tmdb(settings: Settings | None = None) -> TmdbProvider:
         proxy=settings.outbound_proxy(),
         limiter=shared_rate_limiter("tmdb", settings.tmdb_min_interval_seconds),
     )
+
+
+def settled_media_state(media: LibraryMediaItem) -> MediaState:
+    """Where a media item lands once its download finishes.
+
+    A film or a finished series is COMPLETE and needs nothing more.  A variety
+    show that is still on air is never finished: parking it at COMPLETE would
+    take it out of automation for good, so it goes back to READY and keeps
+    chasing next week's episode.
+    """
+
+    if is_variety(media.genre_ids) and is_ongoing(media.tmdb_status):
+        return MediaState.READY
+    return MediaState.COMPLETE
 
 
 def build_pt_site(
@@ -400,6 +415,8 @@ async def identify_media(
     media.country_codes = record.country_codes or media.country_codes
     media.original_language = record.original_language or media.original_language
     media.year = record.year
+    media.genre_ids = record.genre_ids
+    media.tmdb_status = record.status
     media.poster_path = record.poster_path
     media.state = MediaState.READY
     media.attention_reason = None
@@ -738,7 +755,7 @@ async def _submit_download_unlocked(
             )
         if target_media is not None:
             if existing.state in {DownloadState.COMPLETED, DownloadState.SEEDING}:
-                target_media.state = MediaState.COMPLETE
+                target_media.state = settled_media_state(target_media)
                 target_media.attention_reason = None
             elif existing.state in {DownloadState.ERROR, DownloadState.SUBMITTING}:
                 target_media.state = MediaState.NEEDS_ATTENTION
@@ -961,7 +978,7 @@ async def sync_download_statuses(
         media = await session.get(LibraryMediaItem, download.media_id)
         if media is not None:
             if torrent.progress >= 1:
-                media.state = MediaState.COMPLETE
+                media.state = settled_media_state(media)
                 media.attention_reason = None
             elif download.state == DownloadState.ERROR:
                 media.state = MediaState.NEEDS_ATTENTION
@@ -1041,7 +1058,7 @@ async def _release_vanished_download(
     media = await session.get(LibraryMediaItem, download.media_id)
     if media is not None and media.state == MediaState.DOWNLOADING:
         if finished:
-            media.state = MediaState.COMPLETE
+            media.state = settled_media_state(media)
             media.attention_reason = None
         else:
             media.state = MediaState.NEEDS_ATTENTION

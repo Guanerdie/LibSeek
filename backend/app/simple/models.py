@@ -113,6 +113,12 @@ class LibraryMediaItem(Base):
     country_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     original_language: Mapped[str | None] = mapped_column(String(16))
     year: Mapped[int | None] = mapped_column(Integer)
+    # TMDB genre ids and airing status.  Needed to tell a weekly variety show
+    # (never ends, one episode at a time) from a drama series, because the
+    # "complete season pack only" and "release year must match" rules are
+    # wrong for the former.
+    genre_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    tmdb_status: Mapped[str | None] = mapped_column(String(40))
     poster_path: Mapped[str | None] = mapped_column(Text)
     state: Mapped[MediaState] = mapped_column(
         enum_column(MediaState, 24), default=MediaState.MISSING, nullable=False, index=True
@@ -361,6 +367,9 @@ class AutomationPolicy(Base):
     cooldown_tier_1_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
     cooldown_tier_2_hours: Mapped[int] = mapped_column(Integer, default=72, nullable=False)
     cooldown_tier_3_hours: Mapped[int] = mapped_column(Integer, default=168, nullable=False)
+    # How many of the newest episodes of a variety show to chase.  Zero
+    # keeps the old behaviour: single episodes are never accepted.
+    variety_recent_episodes: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

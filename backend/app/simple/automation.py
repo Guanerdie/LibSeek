@@ -19,6 +19,11 @@ from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.services.tv_pack import classify_tv_pack, tv_pack_rank
+from app.services.variety import (
+    is_variety,
+    is_within_latest_window,
+    single_episode_number,
+)
 from app.simple.integrations import (
     close_adapter,
     identify_media,
@@ -170,6 +175,7 @@ async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) 
     policy.cooldown_tier_1_hours = payload.cooldown_tier_1_hours
     policy.cooldown_tier_2_hours = payload.cooldown_tier_2_hours
     policy.cooldown_tier_3_hours = payload.cooldown_tier_3_hours
+    policy.variety_recent_episodes = payload.variety_recent_episodes
     await session.commit()
     await session.refresh(policy)
     return policy
@@ -675,6 +681,7 @@ async def _execute_job(
                     )
                 _, candidates = await get_search(session, search.id)
                 complete_seasons, seasons_missing = await _season_context(session, media)
+                media_is_variety = is_variety(media.genre_ids)
                 selected, rejected = _choose_candidate(
                     policy,
                     candidates,
@@ -684,6 +691,8 @@ async def _execute_job(
                     ),
                     complete_seasons=complete_seasons,
                     seasons_with_missing_episodes=seasons_missing,
+                    variety=media_is_variety,
+                    latest_episode_window=policy.variety_recent_episodes,
                 )
                 if (
                     selected is not None
@@ -800,6 +809,8 @@ async def _execute_job(
                         require_known_size=current_policy.daily_download_bytes is not None,
                         complete_seasons=current_complete,
                         seasons_with_missing_episodes=current_missing,
+                        variety=is_variety(current_media.genre_ids),
+                        latest_episode_window=current_policy.variety_recent_episodes,
                     )
                     if current_media.media_type.value not in current_policy.media_types:
                         accepted = None
@@ -1093,9 +1104,26 @@ def _choose_candidate(
     require_known_size: bool = False,
     complete_seasons: frozenset[int] | None = None,
     seasons_with_missing_episodes: frozenset[int] | None = None,
+    variety: bool = False,
+    latest_episode_window: int = 0,
 ) -> tuple[ReleaseCandidate | None, list[dict[str, object]]]:
     rejected: list[dict[str, object]] = []
     eligible: list[ReleaseCandidate] = []
+    # For a variety show the newest episode on offer defines the window: only
+    # releases inside it are chased, so following a show never turns into
+    # pulling down its entire back catalogue.
+    newest_episode = (
+        max(
+            (
+                number
+                for number in (single_episode_number(item.title) for item in candidates)
+                if number is not None
+            ),
+            default=None,
+        )
+        if variety
+        else None
+    )
     for candidate in candidates:
         reasons: list[str] = []
         warnings = candidate.warnings or []
@@ -1110,9 +1138,12 @@ def _choose_candidate(
             reasons.append("站点提供的 TMDB 或 IMDb 与目标影视不匹配")
         if "ID_UNVERIFIED" in hard_warnings and not exact_identity:
             reasons.append("无法验证站点提供的 TMDB 或 IMDb")
-        if "YEAR_MISMATCH" in hard_warnings and not exact_identity:
+        # A long-running variety show is named for the year of the current
+        # episode, while TMDB records the year it first aired; requiring them
+        # to match rejects every release the show will ever have.
+        if "YEAR_MISMATCH" in hard_warnings and not exact_identity and not variety:
             reasons.append("资源年份与目标影视不匹配")
-        if "TV_PACK_UNVERIFIED" in hard_warnings:
+        if "TV_PACK_UNVERIFIED" in hard_warnings and not variety:
             reasons.append("无法确认资源为全集包或完整季包")
         if "PARTIAL_PACK" in warning_set and media_type != MediaType.TV:
             reasons.append("资源不是完整资源包")
@@ -1120,7 +1151,10 @@ def _choose_candidate(
             missing_fallback = _FALLBACK_IDENTITY_REASONS - match_reason_set
             if "TITLE_EXACT" in missing_fallback:
                 reasons.append("缺少精确 ID，且资源标题未与影视名称或别名精确匹配")
-            if "YEAR_MATCH" in missing_fallback:
+            # The year is corroborating evidence for a film or a season; for a
+            # show in its eighteenth year it is noise, so identity rests on an
+            # exact title and a matching media type instead.
+            if "YEAR_MATCH" in missing_fallback and not variety:
                 reasons.append("缺少精确 ID，且无法确认资源年份匹配")
             if "MEDIA_TYPE_MATCH" in missing_fallback:
                 reasons.append("缺少精确 ID，且无法确认影视类型匹配")
@@ -1129,7 +1163,18 @@ def _choose_candidate(
             and not _tv_pack_rank(candidate)
             and "无法确认资源为全集包或完整季包" not in reasons
         ):
-            reasons.append("无法确认资源为全集包或完整季包")
+            episode = single_episode_number(candidate.title) if variety else None
+            if episode is None:
+                reasons.append(
+                    "综艺资源既不是整季包也不是单集" if variety
+                    else "无法确认资源为全集包或完整季包"
+                )
+            elif newest_episode is None or not is_within_latest_window(
+                episode, newest_episode, latest_episode_window
+            ):
+                reasons.append(
+                    f"第 {episode} 集不在最新 {latest_episode_window} 集范围内"
+                )
         if candidate.score < policy.minimum_score:
             reasons.append("评分低于策略门槛")
         if (candidate.seeders or 0) <= 0:

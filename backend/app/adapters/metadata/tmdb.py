@@ -48,10 +48,17 @@ class TmdbProductionCountry(BaseModel):
     iso_3166_1: str | None = None
 
 
+class TmdbGenre(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+
+
 class TmdbDetails(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: int
+    genres: list[TmdbGenre] = Field(default_factory=list)
     title: str | None = None
     name: str | None = None
     original_title: str | None = None
@@ -265,6 +272,7 @@ class TmdbProvider(MetadataProvider):
             country_codes=self._country_codes(media_type, chinese),
             aliases=aliases,
             year=year,
+            genre_ids=[genre.id for genre in chinese.genres],
             number_of_seasons=chinese.number_of_seasons,
             number_of_episodes=chinese.number_of_episodes,
             episode_matrix=matrix,

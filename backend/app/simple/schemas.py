@@ -193,6 +193,9 @@ class AutomationPolicyUpdate(BaseModel):
     cooldown_tier_1_hours: int = Field(default=24, ge=1, le=24 * 30)
     cooldown_tier_2_hours: int = Field(default=72, ge=1, le=24 * 30)
     cooldown_tier_3_hours: int = Field(default=168, ge=1, le=24 * 30)
+    # Variety shows publish one episode a week and never finish a season,
+    # so they are followed by chasing the newest few episodes.  0 = off.
+    variety_recent_episodes: int = Field(default=5, ge=0, le=50)
 
     @field_validator("site_ids")
     @classmethod

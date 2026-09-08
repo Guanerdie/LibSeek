@@ -228,6 +228,7 @@ class MetadataRecord(BaseModel):
     country_codes: list[str] | None = None
     aliases: list[str] = Field(default_factory=list)
     year: int | None = None
+    genre_ids: list[int] = Field(default_factory=list)
     number_of_seasons: int | None = Field(default=None, ge=0)
     number_of_episodes: int | None = Field(default=None, ge=0)
     episode_matrix: dict[int, list[int]] | None = None
