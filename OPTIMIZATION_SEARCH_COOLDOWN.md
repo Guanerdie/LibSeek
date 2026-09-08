@@ -110,9 +110,9 @@ npm run dev
 观察日志或数据库：
 ```sql
 -- 查看冷却中的条目
-SELECT title, search_miss_count, next_search_at 
-FROM library_media 
-WHERE next_search_at IS NOT NULL 
+SELECT title, search_miss_count, next_search_at
+FROM library_media
+WHERE next_search_at IS NOT NULL
 ORDER BY next_search_at;
 ```
 
@@ -135,15 +135,15 @@ ORDER BY next_search_at;
 如果需要强制某个条目立即重新搜索：
 
 ```sql
-UPDATE library_media 
-SET next_search_at = NULL, search_miss_count = 0 
+UPDATE library_media
+SET next_search_at = NULL, search_miss_count = 0
 WHERE id = '<media_id>';
 ```
 
 或批量重置所有：
 
 ```sql
-UPDATE library_media 
+UPDATE library_media
 SET next_search_at = NULL, search_miss_count = 0;
 ```
 

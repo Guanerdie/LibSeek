@@ -26,4 +26,3 @@ if engine.url.get_backend_name() == "sqlite":
 async def get_session() -> AsyncIterator[AsyncSession]:
     async with SessionFactory() as session:
         yield session
-

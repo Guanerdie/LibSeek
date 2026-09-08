@@ -7,4 +7,3 @@ defineProps<{ loading?: boolean; error?: string | null; empty?: boolean; emptyTe
   <div v-else-if="error" class="page-state error-state">{{ error }}</div>
   <div v-else-if="empty" class="page-state empty-state">{{ emptyText ?? '暂无数据' }}</div>
 </template>
-

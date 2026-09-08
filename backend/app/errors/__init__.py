@@ -19,4 +19,3 @@ class AppError(Exception):
         self.status_code = status_code
         self.retryable = retryable
         self.details = details or {}
-

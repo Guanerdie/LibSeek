@@ -1,7 +1,7 @@
 # UNIN 项目代码走查笔记
 
-> 日期：2026-09-02  
-> 版本：0.9.0  
+> 日期：2026-09-02
+> 版本：0.9.0
 > 走查范围：后端架构、数据模型、自动化逻辑、前端组织
 
 ---
@@ -181,7 +181,7 @@ run_automation(policy_id, dry_run) -> AutomationRun
    ```python
    # 只处理 READY 状态的条目
    where(LibraryMediaItem.state == MediaState.READY)
-   
+
    # 搜索后自动流转到 SEARCHING
    media.state = MediaState.SEARCHING
    ```
@@ -192,7 +192,7 @@ run_automation(policy_id, dry_run) -> AutomationRun
    policy.max_parallel_jobs
    policy.min_score
    policy.size_budget_gb
-   
+
    # _execute_job() 负责"怎么做"
    ```
 
@@ -290,7 +290,7 @@ class DownloaderAdapter(Protocol):
 class Settings(BaseSettings):
     # 支持环境变量和.env文件
     model_config = SettingsConfigDict(env_file=".env")
-    
+
     # 支持文件路径（适配Docker Secrets）
     nextfind_username: SecretStr | None
     nextfind_username_file: Path | None
@@ -385,7 +385,7 @@ backend/tests/
    ```python
    class AppError(Exception):
        """基类异常"""
-   
+
    # 业务异常都继承自AppError，便于统一捕获
    ```
 

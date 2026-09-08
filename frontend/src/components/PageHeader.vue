@@ -12,4 +12,3 @@ defineProps<{ eyebrow: string; title: string; description: string }>()
     <slot />
   </header>
 </template>
-

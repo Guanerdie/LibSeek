@@ -188,4 +188,3 @@ async def test_automation_run_jobs_api_scopes_and_paginates_tasks(session_factor
     assert payload["items"][0]["error_message"] == "搜索失败"
     assert missing.status_code == 404
     assert missing.json()["error_code"] == "AUTOMATION_RUN_NOT_FOUND"
-

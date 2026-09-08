@@ -51,21 +51,21 @@ async def run_automation(
     limit: int = 20,
 ) -> AutomationRun:
     # ... 原有代码 ...
-    
+
     # 创建信号量限制并发
     semaphore = asyncio.Semaphore(_CONCURRENT_SEARCH_LIMIT)
-    
+
     async def _execute_job_with_limit(job: AutomationJob):
         async with semaphore:
             return await _execute_job(
                 session, job, policy, adapters, dry_run
             )
-    
+
     # 替换原来的 gather
     results = await asyncio.gather(*[
         _execute_job_with_limit(job) for job in jobs
     ])
-    
+
     # ... 原有代码 ...
 ```
 
@@ -105,9 +105,9 @@ class AutomationPolicy(Base):
 ```vue
 <!-- frontend/src/views/AutomationSettings.vue -->
 <el-form-item label="最大并发搜索数">
-  <el-input-number 
-    v-model="policy.max_concurrent_searches" 
-    :min="1" 
+  <el-input-number
+    v-model="policy.max_concurrent_searches"
+    :min="1"
     :max="10"
   />
   <span class="hint">
@@ -176,7 +176,7 @@ class ReleaseSearch(Base):
     # ... 现有字段 ...
     cache_key: Mapped[str | None] = mapped_column(String(64), index=True)
     cache_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    
+
     @staticmethod
     def make_cache_key(media_id: str, site_ids: list[str]) -> str:
         """生成缓存键"""
@@ -199,12 +199,12 @@ async def get_or_create_search(
     force: bool = False
 ) -> ReleaseSearch:
     """获取或创建搜索，支持缓存"""
-    
+
     if not force:
         # 查找5分钟内的缓存
         cache_key = ReleaseSearch.make_cache_key(media_id, site_ids)
         now = utc_now()
-        
+
         cached = await session.scalar(
             select(ReleaseSearch)
             .where(
@@ -213,14 +213,14 @@ async def get_or_create_search(
             )
             .order_by(ReleaseSearch.created_at.desc())
         )
-        
+
         if cached:
             _logger.info(
                 "Using cached search result",
                 extra={"search_id": str(cached.id), "media_id": media_id}
             )
             return cached
-    
+
     # 创建新搜索
     search = ReleaseSearch(
         id=uuid4(),
@@ -238,7 +238,7 @@ async def get_or_create_search(
 
 ```vue
 <!-- frontend/src/views/MediaDetail.vue -->
-<el-button 
+<el-button
   @click="searchReleases(true)"
   :loading="searching"
 >
@@ -320,7 +320,7 @@ def configure_logging():
 
 def _filter_candidates(...):
     logger = structlog.get_logger()
-    
+
     for candidate in candidates:
         # 体积检查
         if candidate.size_bytes > policy.max_size_bytes:
@@ -334,7 +334,7 @@ def _filter_candidates(...):
                 media_title=media.title,
             )
             continue
-        
+
         # 做种数检查
         if candidate.seeders < policy.minimum_seeders:
             logger.info(
@@ -346,7 +346,7 @@ def _filter_candidates(...):
                 media_id=str(media.id),
             )
             continue
-        
+
         # 评分检查
         if candidate.score < policy.minimum_score:
             logger.info(
@@ -358,7 +358,7 @@ def _filter_candidates(...):
                 media_id=str(media.id),
             )
             continue
-        
+
         # 身份验证
         if not _is_identity_verified(candidate):
             logger.warning(
@@ -369,7 +369,7 @@ def _filter_candidates(...):
                 media_id=str(media.id),
             )
             continue
-        
+
         logger.info(
             "candidate_accepted",
             candidate_id=str(candidate.id),
@@ -379,7 +379,7 @@ def _filter_candidates(...):
             size_gb=round(candidate.size_bytes / 1e9, 2),
         )
         return candidate
-    
+
     logger.info(
         "no_candidate_selected",
         media_id=str(media.id),
@@ -402,13 +402,13 @@ from collections import Counter
 def analyze_logs(log_file):
     rejection_reasons = Counter()
     accepted_count = 0
-    
+
     with open(log_file) as f:
         for line in f:
             try:
                 log = json.loads(line)
                 event = log.get('event')
-                
+
                 if event == 'candidate_rejected':
                     reason = log.get('reason')
                     rejection_reasons[reason] += 1
@@ -416,7 +416,7 @@ def analyze_logs(log_file):
                     accepted_count += 1
             except json.JSONDecodeError:
                 continue
-    
+
     print("## 自动化日志分析")
     print(f"\n接受候选: {accepted_count}")
     print(f"\n拒绝原因分布:")
@@ -494,9 +494,9 @@ USER_AGENTS = [
 
 class PtSiteAdapterBase:
     async def _request_with_retry(
-        self, 
-        method: str, 
-        url: str, 
+        self,
+        method: str,
+        url: str,
         max_retries: int = 3,
         **kwargs
     ):
@@ -505,18 +505,18 @@ class PtSiteAdapterBase:
                 # 随机UA
                 headers = kwargs.get('headers', {})
                 headers['User-Agent'] = random.choice(USER_AGENTS)
-                
+
                 # 随机延迟（避免规律性）
                 if attempt > 0:
                     jitter = random.uniform(0, 2)
                     await asyncio.sleep(self.min_interval + jitter)
-                
+
                 response = await self.client.request(
                     method, url, headers=headers, **kwargs
                 )
                 response.raise_for_status()
                 return response
-                
+
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:  # Rate limit
                     wait = (2 ** attempt) + random.uniform(0, 1)
@@ -532,7 +532,7 @@ class PtSiteAdapterBase:
                 if attempt == max_retries - 1:
                     raise
                 await asyncio.sleep(2 ** attempt)
-        
+
         raise Exception(f"Failed after {max_retries} retries")
 ```
 
@@ -552,7 +552,7 @@ from unittest.mock import AsyncMock, patch
 @pytest.mark.asyncio
 async def test_full_automation_flow(db_session):
     """端到端测试：从发现缺失到提交下载"""
-    
+
     # 1. 准备测试数据
     media = LibraryMediaItem(
         id=uuid4(),
@@ -562,7 +562,7 @@ async def test_full_automation_flow(db_session):
         state=MediaState.READY,
     )
     db_session.add(media)
-    
+
     policy = AutomationPolicy(
         id="test",
         max_parallel_jobs=1,
@@ -571,7 +571,7 @@ async def test_full_automation_flow(db_session):
     )
     db_session.add(policy)
     await db_session.commit()
-    
+
     # 2. Mock 外部服务
     with patch('app.adapters.pt_sites.avistaz_live.AvistaZAdapter') as mock_pt:
         # Mock PT站返回结果
@@ -583,17 +583,17 @@ async def test_full_automation_flow(db_session):
                 # ...
             )
         ])
-        
+
         with patch('app.adapters.downloaders.qbittorrent.QbittorrentAdapter') as mock_qb:
             mock_qb.return_value.add_torrent = AsyncMock(return_value="hash123")
-            
+
             # 3. 运行自动化
             run = await run_automation(db_session, policy.id, dry_run=False)
-            
+
             # 4. 验证结果
             assert run.state == AutomationRunState.SUCCEEDED
             assert run.jobs_succeeded == 1
-            
+
             # 5. 验证下载已提交
             download = await db_session.scalar(
                 select(Download).where(Download.media_id == media.id)
@@ -664,17 +664,17 @@ async def match_rss_to_library(
     site: PtSiteAdapter
 ) -> list[Match]:
     """RSS 反向匹配"""
-    
+
     # 1. 获取站点最近1小时的种子RSS
     feed = await site.fetch_rss(hours=1)
-    
+
     # 2. 查询所有待搜索的缺失条目
     missing = await session.scalars(
         select(LibraryMediaItem).where(
             LibraryMediaItem.state == MediaState.READY
         )
     )
-    
+
     # 3. 标题匹配 + TMDB验证
     matches = []
     for entry in feed.entries:
@@ -683,7 +683,7 @@ async def match_rss_to_library(
                 # 验证身份
                 if await _verify_identity(entry, media):
                     matches.append(Match(media, entry))
-    
+
     return matches
 ```
 

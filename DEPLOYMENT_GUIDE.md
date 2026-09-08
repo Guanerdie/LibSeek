@@ -1,7 +1,7 @@
 # LibSeek 部署与维护指南
 
-> 项目GitHub: https://github.com/Guanerdie/LibSeek  
-> 生产服务器: 见本地 `~/.ssh/config` 的 `libseek-prod` 别名（本仓库公开，不记录真实地址）  
+> 项目GitHub: https://github.com/Guanerdie/LibSeek
+> 生产服务器: 见本地 `~/.ssh/config` 的 `libseek-prod` 别名（本仓库公开，不记录真实地址）
 > 更新日期: 2026-09-02
 
 ---
@@ -318,7 +318,7 @@ curl http://<PROD_HOST>/api/health
 **需要监控的指标**：
 1. **自动化成功率**
    ```sql
-   SELECT 
+   SELECT
      COUNT(*) FILTER (WHERE state = 'SUCCEEDED') * 100.0 / COUNT(*) as success_rate
    FROM automation_run
    WHERE created_at > datetime('now', '-7 days');
@@ -326,7 +326,7 @@ curl http://<PROD_HOST>/api/health
 
 2. **搜索冷却分布**
    ```sql
-   SELECT 
+   SELECT
      search_miss_count,
      COUNT(*) as count,
      AVG((julianday(next_search_at) - julianday('now')) * 24) as avg_hours_until_next
@@ -337,8 +337,8 @@ curl http://<PROD_HOST>/api/health
 
 3. **下载队列积压**
    ```sql
-   SELECT state, COUNT(*) 
-   FROM download 
+   SELECT state, COUNT(*)
+   FROM download
    WHERE state IN ('QUEUED', 'DOWNLOADING')
    GROUP BY state;
    ```
@@ -560,10 +560,10 @@ sudo docker compose logs backend | grep "401\|403"
 
 ## 联系信息
 
-**维护者**: [从项目README中获取]  
+**维护者**: [从项目README中获取]
 **技术支持**: [设置Issue或讨论区]
 
 ---
 
-**最后更新**: 2026-09-02  
+**最后更新**: 2026-09-02
 **文档版本**: 1.0
