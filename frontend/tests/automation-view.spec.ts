@@ -43,6 +43,7 @@ const policy: AutomationPolicy = {
   cooldown_tier_2_hours: 72,
   cooldown_tier_3_hours: 168,
   variety_recent_episodes: 5,
+  automate_variety: false,
   updated_at: '2026-08-23T00:00:00Z',
   last_run_at: null,
 }
@@ -147,10 +148,30 @@ describe('automation settings', () => {
     )
   })
 
+  it('leaves variety out of automation unless the switch is on', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    const box = wrapper.get('input[name="automate_variety"]')
+    expect((box.element as HTMLInputElement).checked).toBe(false)
+    // The episode window is meaningless while variety is excluded.
+    expect(
+      (wrapper.get('input[name="variety_recent_episodes"]').element as HTMLInputElement).disabled,
+    ).toBe(true)
+
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ automate_variety: false }),
+    )
+  })
+
   it('saves how many latest variety episodes to chase', async () => {
     const wrapper = mount(AutomationView)
     await flushPromises()
 
+    await wrapper.get('input[name="automate_variety"]').setValue(true)
     await wrapper.get('input[name="variety_recent_episodes"]').setValue(3)
     await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
     await flushPromises()
@@ -164,6 +185,7 @@ describe('automation settings', () => {
     const wrapper = mount(AutomationView)
     await flushPromises()
 
+    await wrapper.get('input[name="automate_variety"]').setValue(true)
     await wrapper.get('input[name="variety_recent_episodes"]').setValue(0)
     await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
     await flushPromises()

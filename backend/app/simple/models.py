@@ -370,6 +370,11 @@ class AutomationPolicy(Base):
     # How many of the newest episodes of a variety show to chase.  Zero
     # keeps the old behaviour: single episodes are never accepted.
     variety_recent_episodes: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    # Whether variety shows take part in automation at all.  Off by default:
+    # they publish per episode, renumber seasons differently from TMDB, and
+    # their newest episodes are often unseeded, so they burn search quota for
+    # little return until an operator decides to take them on.
+    automate_variety: Mapped[bool] = mapped_column(default=False, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

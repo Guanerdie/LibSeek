@@ -177,6 +177,7 @@ async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) 
     policy.cooldown_tier_2_hours = payload.cooldown_tier_2_hours
     policy.cooldown_tier_3_hours = payload.cooldown_tier_3_hours
     policy.variety_recent_episodes = payload.variety_recent_episodes
+    policy.automate_variety = payload.automate_variety
     await session.commit()
     await session.refresh(policy)
     return policy
@@ -970,6 +971,10 @@ def _supersede_job(source: AutomationJob) -> None:
 
 
 def _media_in_policy_scope(policy: AutomationPolicy, media: LibraryMediaItem) -> bool:
+    # Checked before the scope rules so that an explicitly selected media item
+    # cannot smuggle a variety show past the switch.
+    if not policy.automate_variety and is_variety(media.genre_ids):
+        return False
     if policy.scope_mode == "selected":
         return media.id in set(policy.selected_media_ids)
     if not policy.regions:

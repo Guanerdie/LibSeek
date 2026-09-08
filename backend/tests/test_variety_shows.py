@@ -38,6 +38,10 @@ def _policy(**overrides: object) -> AutomationPolicy:
         "minimum_seeders": 1,
         "allow_warnings": False,
         "site_ids": ["avistaz"],
+        "automate_variety": False,
+        "scope_mode": "filters",
+        "regions": [],
+        "selected_media_ids": [],
     }
     values.update(overrides)
     return AutomationPolicy(**values)  # type: ignore[arg-type]
@@ -319,3 +323,54 @@ def test_an_ordinary_series_is_complete() -> None:
     media = _media(genres=[18], status="Returning Series")
 
     assert settled_media_state(media) == MediaState.COMPLETE
+
+
+# ---------------------------------------------------------------------------
+# The switch: variety shows are out of automation unless asked for
+# ---------------------------------------------------------------------------
+
+
+def _library_item(*, genres: list[int]) -> LibraryMediaItem:
+    return LibraryMediaItem(
+        source_item_id="scope-1",
+        media_type=MediaType.TV,
+        tmdb_id=1,
+        title="Show",
+        year=2026,
+        genre_ids=genres,
+        state=MediaState.READY,
+    )
+
+
+def test_a_variety_show_is_out_of_scope_by_default() -> None:
+    from app.simple.automation import _media_in_policy_scope
+
+    policy = _policy()
+
+    assert policy.automate_variety is False
+    assert not _media_in_policy_scope(policy, _library_item(genres=[REALITY]))
+
+
+def test_an_ordinary_series_is_unaffected_by_the_switch() -> None:
+    from app.simple.automation import _media_in_policy_scope
+
+    assert _media_in_policy_scope(_policy(), _library_item(genres=[18]))
+
+
+def test_turning_the_switch_on_lets_variety_back_in() -> None:
+    from app.simple.automation import _media_in_policy_scope
+
+    policy = _policy(automate_variety=True)
+
+    assert _media_in_policy_scope(policy, _library_item(genres=[TALK]))
+
+
+def test_manual_selection_cannot_smuggle_a_variety_show_past_the_switch() -> None:
+    """The check runs before scope, so an explicit pick does not override it."""
+
+    from app.simple.automation import _media_in_policy_scope
+
+    item = _library_item(genres=[REALITY])
+    policy = _policy(scope_mode="selected", selected_media_ids=[item.id])
+
+    assert not _media_in_policy_scope(policy, item)

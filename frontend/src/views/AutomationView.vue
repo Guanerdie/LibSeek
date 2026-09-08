@@ -38,6 +38,7 @@ const form = reactive({
   cooldown_tier_2_hours: 72,
   cooldown_tier_3_hours: 168,
   variety_recent_episodes: 5,
+  automate_variety: false,
 })
 
 // Presets for the empty-search backoff ladder.  Sites differ in how much
@@ -123,6 +124,7 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.cooldown_tier_2_hours = policy.cooldown_tier_2_hours
   form.cooldown_tier_3_hours = policy.cooldown_tier_3_hours
   form.variety_recent_episodes = policy.variety_recent_episodes
+  form.automate_variety = policy.automate_variety
 }
 
 async function loadMediaOptions(page = 1): Promise<void> {
@@ -315,6 +317,7 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     cooldown_tier_2_hours: form.cooldown_tier_2_hours,
     cooldown_tier_3_hours: form.cooldown_tier_3_hours,
     variety_recent_episodes: form.variety_recent_episodes,
+    automate_variety: form.automate_variety,
   })
   applyPolicy(policy)
   return policy
@@ -533,14 +536,18 @@ onBeforeUnmount(() => {
       <div class="filter-heading">
         <div>
           <span class="eyebrow">VARIETY</span>
-          <strong>综艺追更新</strong>
+          <strong>综艺节目</strong>
           <p class="muted">
-            综艺一直在播、按集发布，没有完整季包。这里设置每次只抓最新的几集，
-            避免一口气把几百集老内容全下下来。填 0 表示不抓单集（只要整季包）。
+            综艺一直在播、按集发布，季号还常和 TMDB 对不上，最新几集又经常没人做种，
+            所以默认不纳入自动化。打开后才会尝试，并按下面的集数只追最新的几集。
           </p>
         </div>
       </div>
       <div class="configuration-field-grid">
+        <label class="configuration-checkbox">
+          <input v-model="form.automate_variety" name="automate_variety" type="checkbox" />
+          把综艺纳入自动化
+        </label>
         <label>
           只抓最新几集
           <input
@@ -549,6 +556,7 @@ onBeforeUnmount(() => {
             type="number"
             min="0"
             max="50"
+            :disabled="!form.automate_variety"
           />
         </label>
       </div>

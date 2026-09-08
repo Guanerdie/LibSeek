@@ -196,6 +196,8 @@ class AutomationPolicyUpdate(BaseModel):
     # Variety shows publish one episode a week and never finish a season,
     # so they are followed by chasing the newest few episodes.  0 = off.
     variety_recent_episodes: int = Field(default=5, ge=0, le=50)
+    # Variety shows are excluded from automation unless this is turned on.
+    automate_variety: bool = False
 
     @field_validator("site_ids")
     @classmethod
