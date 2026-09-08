@@ -6,6 +6,7 @@ import type {
   AutomationRun,
   AutomationRunPage,
   AutomationStats,
+  BulkSubscriptionResult,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
@@ -178,6 +179,21 @@ export const dailyApi = {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subscribed }),
+      },
+    ),
+  setSubscriptions: (mediaIds: string[], subscribed: boolean) =>
+    request<BulkSubscriptionResult>('/api/library/subscriptions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_ids: mediaIds, subscribed }),
+    }),
+  setMinimumScore: (mediaId: string, minimumScore: number | null) =>
+    request<DailyMediaDetail>(
+      `/api/library/${encodeURIComponent(mediaId)}/minimum-score`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minimum_score: minimumScore }),
       },
     ),
   identify: (mediaId: string, tmdbId?: number) =>

@@ -132,6 +132,26 @@ export const useDailyStore = defineStore('daily', {
         return false
       }
     },
+    async setSubscriptions(mediaIds: string[], subscribed: boolean): Promise<number | null> {
+      this.mediaError = null
+      try {
+        const result = await dailyApi.setSubscriptions(mediaIds, subscribed)
+        return result.changed
+      } catch (error) {
+        this.mediaError = error instanceof ApiError ? error.message : '无法批量更新追更清单'
+        return null
+      }
+    },
+    async setMinimumScore(mediaId: string, minimumScore: number | null): Promise<boolean> {
+      this.resourceError = null
+      try {
+        this.selectedMedia = await dailyApi.setMinimumScore(mediaId, minimumScore)
+        return true
+      } catch (error) {
+        this.resourceError = error instanceof ApiError ? error.message : '无法设置单片门槛'
+        return false
+      }
+    },
     async identify(mediaId: string, tmdbId?: number): Promise<boolean> {
       this.resourceError = null
       try {

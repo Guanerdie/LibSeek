@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -71,6 +71,33 @@ async function toggleSubscription(): Promise<void> {
     await daily.setSubscription(mediaId.value, !daily.selectedMedia.subscribed)
   } finally {
     subscribing.value = false
+  }
+}
+
+const scoreOverride = ref<string | number>('')
+const savingScore = ref(false)
+
+watch(
+  () => daily.selectedMedia?.minimum_score_override,
+  (value) => {
+    scoreOverride.value = value === null || value === undefined ? '' : String(value)
+  },
+  { immediate: true },
+)
+
+async function saveScoreOverride(): Promise<void> {
+  if (savingScore.value) return
+  // A number input can hand back a number rather than a string, so coerce
+  // before trimming instead of assuming.
+  const raw = String(scoreOverride.value ?? '').trim()
+  // An empty box clears the override; 0 is a real value, not "unset".
+  const parsed = raw === '' ? null : Number(raw)
+  if (parsed !== null && (Number.isNaN(parsed) || parsed < 0 || parsed > 1)) return
+  savingScore.value = true
+  try {
+    await daily.setMinimumScore(mediaId.value, parsed)
+  } finally {
+    savingScore.value = false
   }
 }
 
@@ -166,6 +193,27 @@ onMounted(async () => {
       <span class="muted">
         自动化的范围模式是「按筛选条件」，不读这份清单。去自动化设置页改成「手动选择」才会生效。
       </span>
+    </div>
+
+    <div v-if="daily.selectedMedia" class="panel compact-panel score-override-panel">
+      <div>
+        <strong>这部的最低评分</strong>
+        <span class="muted">
+          留空就跟随全局设置。想让某部剧宽松一点或严格一点时才填，不影响其它影视。
+        </span>
+      </div>
+      <input
+        v-model="scoreOverride"
+        name="minimum_score_override"
+        type="number"
+        min="0"
+        max="1"
+        step="0.05"
+        placeholder="跟随全局"
+      />
+      <button class="button" type="button" :disabled="savingScore" @click="saveScoreOverride">
+        保存
+      </button>
     </div>
 
     <div v-if="outcome" class="panel outcome-panel">

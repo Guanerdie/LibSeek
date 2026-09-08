@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   identify: vi.fn(),
   createSearch: vi.fn(),
   setSubscription: vi.fn(),
+  setSubscriptions: vi.fn(),
+  setMinimumScore: vi.fn(),
   search: vi.fn(),
   downloadCandidate: vi.fn(),
   retryDownload: vi.fn(),
@@ -104,6 +106,7 @@ function mediaDetail(overrides: Partial<DailyMediaDetail> = {}): DailyMediaDetai
     episodes: [],
     latest_search: null,
     latest_automation: null,
+    minimum_score_override: null,
     subscribed: false,
     subscription_active: false,
     ...overrides,
@@ -634,6 +637,64 @@ describe('simplified daily store', () => {
     expect(
       wrapper.findAll('button').some((item) => item.text() === '取消追更'),
     ).toBe(true)
+  })
+
+  it('adds the whole filtered page to the follow list', async () => {
+    mocks.media.mockResolvedValueOnce(mediaPage([media]))
+    mocks.setSubscriptions.mockResolvedValueOnce({ subscribed_total: 1, changed: 1 })
+    const wrapper = mount(LibraryView, {
+      global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } },
+    })
+    await flushPromises()
+
+    const button = wrapper
+      .findAll('button')
+      .find((item) => item.text().startsWith('本页加入追更'))
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setSubscriptions).toHaveBeenCalledWith([media.id], true)
+    expect(wrapper.get('.bulk-actions').text()).toContain('新增 1 项')
+  })
+
+  it('sets a per-media score override, and treats an empty box as clearing it', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail({ minimum_score_override: 0.45 }))
+    mocks.setMinimumScore.mockResolvedValue(mediaDetail({ minimum_score_override: null }))
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    const input = wrapper.get('input[name="minimum_score_override"]')
+    expect((input.element as HTMLInputElement).value).toBe('0.45')
+
+    await input.setValue('')
+    await wrapper.findAll('button').find((item) => item.text() === '保存')!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setMinimumScore).toHaveBeenCalledWith(media.id, null)
+  })
+
+  it('keeps a zero override instead of treating it as unset', async () => {
+    mocks.mediaDetail.mockResolvedValueOnce(mediaDetail())
+    mocks.setMinimumScore.mockResolvedValue(mediaDetail({ minimum_score_override: 0 }))
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/library/:id/resources', component: ResourcesView }],
+    })
+    await router.push(`/library/${media.id}/resources`)
+    const wrapper = mount(ResourcesView, { global: { plugins: [router] } })
+    await flushPromises()
+
+    await wrapper.get('input[name="minimum_score_override"]').setValue('0')
+    await wrapper.findAll('button').find((item) => item.text() === '保存')!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setMinimumScore).toHaveBeenCalledWith(media.id, 0)
   })
 
   it('refreshes qBittorrent state before displaying downloads', async () => {

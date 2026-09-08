@@ -245,6 +245,7 @@ export interface DailyMediaDetail extends DailyMedia {
   episodes: DailyEpisode[]
   latest_search: DailySearch | null
   latest_automation: DailyAutomationOutcome | null
+  minimum_score_override: number | null
   subscribed: boolean
   subscription_active: boolean
 }
@@ -428,4 +429,9 @@ export interface ScoreDistribution {
   window_days: number
   total: number
   buckets: ScoreBucket[]
+}
+
+export interface BulkSubscriptionResult {
+  subscribed_total: number
+  changed: number
 }

@@ -512,117 +512,127 @@ onBeforeUnmount(() => {
           </span>
         </label>
         <label>
-          最低做种数
-          <input v-model.number="form.minimum_seeders" type="number" min="0" step="1" />
-        </label>
-        <label>
-          最大体积（GiB，留空不限）
-          <input v-model="form.max_size_gib" type="number" min="0.1" step="0.1" />
-        </label>
-        <label class="configuration-checkbox">
-          <input v-model="form.allow_warnings" type="checkbox" /> 允许选择带风险提示的候选
-        </label>
-        <label>
-          执行间隔（分钟）
-          <input v-model.number="form.interval_minutes" name="interval_minutes" type="number" min="5" max="1440" />
-        </label>
-        <label>
-          首次重试延迟（分钟）
-          <input v-model.number="form.retry_delay_minutes" type="number" min="1" max="1440" />
-        </label>
-        <label>
-          最大尝试次数
-          <input v-model.number="form.max_attempts" type="number" min="1" max="10" />
-        </label>
-        <label>
           每日自动下载数量
           <input v-model.number="form.daily_download_limit" name="daily_download_limit" type="number" min="1" max="100" />
         </label>
-        <label>
-          每日自动下载体积（GiB，留空不限）
-          <input v-model="form.daily_download_gib" type="number" min="0.1" step="0.1" />
-        </label>
       </div>
-      <div class="filter-heading">
-        <div>
-          <span class="eyebrow">COOLDOWN</span>
-          <strong>空搜索退避</strong>
-          <p class="muted">
-            连续搜不到资源时，等待多久再搜同一条影视。过短会浪费站点配额，
-            过长会让新上架的资源迟迟发现不了。
-          </p>
+
+      <details class="advanced-settings">
+        <summary>更多设置（做种数、体积、重试、执行间隔）</summary>
+        <div class="configuration-field-grid">
+          <label>
+            最低做种数
+            <input v-model.number="form.minimum_seeders" type="number" min="0" step="1" />
+          </label>
+          <label>
+            最大体积（GiB，留空不限）
+            <input v-model="form.max_size_gib" type="number" min="0.1" step="0.1" />
+          </label>
+          <label>
+            每日自动下载体积（GiB，留空不限）
+            <input v-model="form.daily_download_gib" type="number" min="0.1" step="0.1" />
+          </label>
+          <label class="configuration-checkbox">
+            <input v-model="form.allow_warnings" type="checkbox" /> 允许选择带风险提示的候选
+          </label>
+          <label>
+            执行间隔（分钟）
+            <input v-model.number="form.interval_minutes" name="interval_minutes" type="number" min="5" max="1440" />
+          </label>
+          <label>
+            首次重试延迟（分钟）
+            <input v-model.number="form.retry_delay_minutes" type="number" min="1" max="1440" />
+          </label>
+          <label>
+            最大尝试次数
+            <input v-model.number="form.max_attempts" type="number" min="1" max="10" />
+          </label>
         </div>
-        <div class="cooldown-presets">
-          <button
-            v-for="preset in cooldownPresets"
-            :key="preset.id"
-            type="button"
-            class="button"
-            @click="applyCooldownPreset(preset.hours)"
-          >
-            {{ preset.label }}（{{ preset.hours.join(' / ') }} 小时）
-          </button>
+      </details>
+      <details class="advanced-settings">
+        <summary>空搜索退避与综艺</summary>
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">COOLDOWN</span>
+            <strong>空搜索退避</strong>
+            <p class="muted">
+              连续搜不到资源时，等待多久再搜同一条影视。过短会浪费站点配额，
+              过长会让新上架的资源迟迟发现不了。
+            </p>
+          </div>
+          <div class="cooldown-presets">
+            <button
+              v-for="preset in cooldownPresets"
+              :key="preset.id"
+              type="button"
+              class="button"
+              @click="applyCooldownPreset(preset.hours)"
+            >
+              {{ preset.label }}（{{ preset.hours.join(' / ') }} 小时）
+            </button>
+          </div>
         </div>
-      </div>
-      <div class="configuration-field-grid">
-        <label>
-          第一次搜不到后等待（小时）
-          <input
-            v-model.number="form.cooldown_tier_1_hours"
-            name="cooldown_tier_1_hours"
-            type="number"
-            min="1"
-            max="720"
-          />
-        </label>
-        <label>
-          第二次搜不到后等待（小时）
-          <input
-            v-model.number="form.cooldown_tier_2_hours"
-            name="cooldown_tier_2_hours"
-            type="number"
-            min="1"
-            max="720"
-          />
-        </label>
-        <label>
-          第三次及以后等待（小时）
-          <input
-            v-model.number="form.cooldown_tier_3_hours"
-            name="cooldown_tier_3_hours"
-            type="number"
-            min="1"
-            max="720"
-          />
-        </label>
-      </div>
-      <div class="filter-heading">
-        <div>
-          <span class="eyebrow">VARIETY</span>
-          <strong>综艺节目</strong>
-          <p class="muted">
-            综艺一直在播、按集发布，季号还常和 TMDB 对不上，最新几集又经常没人做种，
-            所以默认不纳入自动化。打开后才会尝试，并按下面的集数只追最新的几集。
-          </p>
+        <div class="configuration-field-grid">
+          <label>
+            第一次搜不到后等待（小时）
+            <input
+              v-model.number="form.cooldown_tier_1_hours"
+              name="cooldown_tier_1_hours"
+              type="number"
+              min="1"
+              max="720"
+            />
+          </label>
+          <label>
+            第二次搜不到后等待（小时）
+            <input
+              v-model.number="form.cooldown_tier_2_hours"
+              name="cooldown_tier_2_hours"
+              type="number"
+              min="1"
+              max="720"
+            />
+          </label>
+          <label>
+            第三次及以后等待（小时）
+            <input
+              v-model.number="form.cooldown_tier_3_hours"
+              name="cooldown_tier_3_hours"
+              type="number"
+              min="1"
+              max="720"
+            />
+          </label>
         </div>
-      </div>
-      <div class="configuration-field-grid">
-        <label class="configuration-checkbox">
-          <input v-model="form.automate_variety" name="automate_variety" type="checkbox" />
-          把综艺纳入自动化
-        </label>
-        <label>
-          只抓最新几集
-          <input
-            v-model.number="form.variety_recent_episodes"
-            name="variety_recent_episodes"
-            type="number"
-            min="0"
-            max="50"
-            :disabled="!form.automate_variety"
-          />
-        </label>
-      </div>
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">VARIETY</span>
+            <strong>综艺节目</strong>
+            <p class="muted">
+              综艺一直在播、按集发布，季号还常和 TMDB 对不上，最新几集又经常没人做种，
+              所以默认不纳入自动化。打开后才会尝试，并按下面的集数只追最新的几集。
+            </p>
+          </div>
+        </div>
+        <div class="configuration-field-grid">
+          <label class="configuration-checkbox">
+            <input v-model="form.automate_variety" name="automate_variety" type="checkbox" />
+            把综艺纳入自动化
+          </label>
+          <label>
+            只抓最新几集
+            <input
+              v-model.number="form.variety_recent_episodes"
+              name="variety_recent_episodes"
+              type="number"
+              min="0"
+              max="50"
+              :disabled="!form.automate_variety"
+            />
+          </label>
+        </div>
+      </details>
+
       <div v-if="form.scope_mode === 'filters'" class="filter-heading">
         <div>
           <span class="eyebrow">REGIONS</span>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -33,6 +33,29 @@ const filters = reactive<{
   state: daily.mediaQuery.state ?? '',
   year: daily.mediaQuery.year ? String(daily.mediaQuery.year) : '',
 })
+
+const bulkBusy = ref(false)
+const bulkNotice = ref<string | null>(null)
+
+/** Add every item the current filter produced to the follow list. */
+async function subscribeCurrentPage(subscribed: boolean): Promise<void> {
+  if (bulkBusy.value || daily.media.length === 0) return
+  bulkBusy.value = true
+  bulkNotice.value = null
+  try {
+    const changed = await daily.setSubscriptions(
+      daily.media.map((item) => item.id),
+      subscribed,
+    )
+    if (changed !== null) {
+      bulkNotice.value = subscribed
+        ? `已把本页 ${daily.media.length} 项加入追更清单（新增 ${changed} 项）`
+        : `已从追更清单移除本页 ${daily.media.length} 项（减少 ${changed} 项）`
+    }
+  } finally {
+    bulkBusy.value = false
+  }
+}
 
 function applyFilters(): void {
   void daily.loadMedia({
@@ -138,6 +161,29 @@ onMounted(() => daily.loadMedia())
         </button>
       </div>
     </form>
+
+    <div v-if="daily.media.length" class="filter-actions bulk-actions">
+      <span v-if="bulkNotice" class="muted">{{ bulkNotice }}</span>
+      <span v-else class="muted">
+        追更清单决定自动化处理哪些影视；先用上面的条件筛出想要的，再整页加入。
+      </span>
+      <button
+        class="button"
+        type="button"
+        :disabled="bulkBusy"
+        @click="subscribeCurrentPage(false)"
+      >
+        本页移出追更
+      </button>
+      <button
+        class="button primary"
+        type="button"
+        :disabled="bulkBusy"
+        @click="subscribeCurrentPage(true)"
+      >
+        本页加入追更（{{ daily.media.length }} 项）
+      </button>
+    </div>
 
     <PageState
       :loading="daily.mediaListLoading"

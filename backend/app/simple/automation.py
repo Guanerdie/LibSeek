@@ -207,6 +207,51 @@ async def set_media_subscription(
     return policy
 
 
+async def set_media_subscriptions(
+    session: AsyncSession, *, media_ids: list[str], subscribed: bool
+) -> AutomationPolicy:
+    """Add or remove many media items at once.
+
+    A library of tens of thousands cannot be curated one click at a time, so
+    the list view hands over whatever the current filter selected.  Ids that do
+    not exist are ignored rather than failing the batch: the filter that
+    produced them may be a moment out of date, and refusing the whole request
+    over one stale row would be worse than quietly skipping it.
+    """
+
+    policy = await get_policy(session)
+    known = set(
+        await session.scalars(
+            select(LibraryMediaItem.id).where(LibraryMediaItem.id.in_(media_ids))
+        )
+    )
+    current = list(policy.selected_media_ids)
+    if subscribed:
+        existing = set(current)
+        current.extend(item for item in media_ids if item in known and item not in existing)
+    else:
+        removing = set(media_ids)
+        current = [item for item in current if item not in removing]
+    policy.selected_media_ids = current
+    await session.commit()
+    await session.refresh(policy)
+    return policy
+
+
+async def set_media_minimum_score(
+    session: AsyncSession, *, media_id: str, minimum_score: float | None
+) -> LibraryMediaItem:
+    """Set or clear one media item's own score threshold."""
+
+    media = await session.get(LibraryMediaItem, media_id, with_for_update=True)
+    if media is None:
+        raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+    media.minimum_score_override = minimum_score
+    await session.commit()
+    await session.refresh(media)
+    return media
+
+
 async def list_jobs(
     session: AsyncSession,
     *,
@@ -718,6 +763,7 @@ async def _execute_job(
                     seasons=season_context,
                     variety=media_is_variety,
                     latest_episode_window=policy.variety_recent_episodes,
+                    minimum_score=media.minimum_score_override,
                 )
                 if (
                     selected is not None
@@ -833,6 +879,7 @@ async def _execute_job(
                         seasons=current_seasons,
                         variety=is_variety(current_media.genre_ids),
                         latest_episode_window=current_policy.variety_recent_episodes,
+                        minimum_score=current_media.minimum_score_override,
                     )
                     if current_media.media_type.value not in current_policy.media_types:
                         accepted = None
@@ -1154,9 +1201,13 @@ def _choose_candidate(
     seasons: SeasonContext | None = None,
     variety: bool = False,
     latest_episode_window: int = 0,
+    minimum_score: float | None = None,
 ) -> tuple[ReleaseCandidate | None, list[dict[str, object]]]:
     rejected: list[dict[str, object]] = []
     eligible: list[ReleaseCandidate] = []
+    # A per-media override beats the policy-wide bar, so one show can be
+    # loosened or tightened without moving the threshold for everything else.
+    score_floor = policy.minimum_score if minimum_score is None else minimum_score
     # For a variety show the newest episode on offer defines the window: only
     # releases inside it are chased, so following a show never turns into
     # pulling down its entire back catalogue.
@@ -1223,8 +1274,11 @@ def _choose_candidate(
                 reasons.append(
                     f"第 {episode} 集不在最新 {latest_episode_window} 集范围内"
                 )
-        if candidate.score < policy.minimum_score:
-            reasons.append("评分低于策略门槛")
+        if candidate.score < score_floor:
+            reasons.append(
+                "评分低于本片单独设置的门槛" if minimum_score is not None
+                else "评分低于策略门槛"
+            )
         if (candidate.seeders or 0) <= 0:
             reasons.append("当前没有做种，不能自动下载")
         elif (candidate.seeders or 0) < policy.minimum_seeders:

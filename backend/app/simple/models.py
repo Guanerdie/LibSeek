@@ -119,6 +119,11 @@ class LibraryMediaItem(Base):
     # wrong for the former.
     genre_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     tmdb_status: Mapped[str | None] = mapped_column(String(40))
+    # Overrides the policy's global minimum score for this one item.  The
+    # global threshold has to serve everything at once, so a show you care
+    # about and a filler one get judged by the same bar; this lets one item
+    # be looser or stricter without moving everyone else.
+    minimum_score_override: Mapped[float | None] = mapped_column(Float)
     poster_path: Mapped[str | None] = mapped_column(Text)
     state: Mapped[MediaState] = mapped_column(
         enum_column(MediaState, 24), default=MediaState.MISSING, nullable=False, index=True

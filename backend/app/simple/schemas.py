@@ -152,6 +152,7 @@ class MediaDetail(MediaSummary):
     episodes: list[EpisodeView] = Field(default_factory=list)
     latest_search: SearchView | None = None
     latest_automation: AutomationOutcomeView | None = None
+    minimum_score_override: float | None = None
     subscribed: bool = False
     # False when subscribed but the policy scope is still "filters", i.e. the
     # subscription list is not what automation is reading.
@@ -160,6 +161,21 @@ class MediaDetail(MediaSummary):
 
 class SubscriptionUpdate(BaseModel):
     subscribed: bool
+
+
+class BulkSubscriptionUpdate(BaseModel):
+    media_ids: list[str] = Field(min_length=1, max_length=500)
+    subscribed: bool
+
+
+class BulkSubscriptionResult(BaseModel):
+    subscribed_total: int
+    changed: int
+
+
+class MinimumScoreOverrideUpdate(BaseModel):
+    # None clears the override and falls back to the policy threshold.
+    minimum_score: float | None = Field(default=None, ge=0, le=1)
 
 
 class DownloadCreate(BaseModel):

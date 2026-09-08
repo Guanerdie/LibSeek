@@ -42,6 +42,8 @@ from app.simple.schemas import (
     AutomationPolicyView,
     AutomationRunPage,
     AutomationRunView,
+    BulkSubscriptionResult,
+    BulkSubscriptionUpdate,
     CandidateView,
     DownloadCreate,
     DownloadPage,
@@ -51,6 +53,7 @@ from app.simple.schemas import (
     MediaFilterOptions,
     MediaPage,
     MediaSummary,
+    MinimumScoreOverrideUpdate,
     SearchCreate,
     SearchDetail,
     SearchView,
@@ -144,12 +147,18 @@ def _automation_outcome(job: AutomationJob | None) -> AutomationOutcomeView | No
     )
 
 
-@router.get("/library/{media_id}", response_model=MediaDetail)
-async def media_detail(media_id: str, session: Session, principal: ViewerPrincipal) -> MediaDetail:
-    del principal
+async def _media_detail_payload(session: AsyncSession, media_id: str) -> MediaDetail:
+    """Assemble the media detail response.
+
+    Three endpoints return this same shape -- reading it, toggling a
+    subscription, and setting a score override -- so they build it here rather
+    than each keeping their own copy in step.
+    """
+
     media, episodes, latest_search = await service.get_media(session, media_id)
     job = await service.latest_automation_job(session, media_id)
     policy = await automation.get_policy(session)
+    subscribed = media.id in set(policy.selected_media_ids)
     return MediaDetail.model_validate(
         {
             **MediaSummary.model_validate(media).model_dump(),
@@ -158,12 +167,49 @@ async def media_detail(media_id: str, session: Session, principal: ViewerPrincip
                 SearchView.model_validate(latest_search) if latest_search is not None else None
             ),
             "latest_automation": _automation_outcome(job),
-            "subscribed": media.id in set(policy.selected_media_ids),
-            "subscription_active": (
-                media.id in set(policy.selected_media_ids) and policy.scope_mode == "selected"
-            ),
+            "subscribed": subscribed,
+            "subscription_active": subscribed and policy.scope_mode == "selected",
         }
     )
+
+
+@router.get("/library/{media_id}", response_model=MediaDetail)
+async def media_detail(media_id: str, session: Session, principal: ViewerPrincipal) -> MediaDetail:
+    del principal
+    return await _media_detail_payload(session, media_id)
+
+
+@router.post("/library/subscriptions", response_model=BulkSubscriptionResult)
+async def bulk_set_subscription(
+    payload: BulkSubscriptionUpdate,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> BulkSubscriptionResult:
+    """Subscribe or unsubscribe a whole filtered selection in one go."""
+
+    del principal
+    before = len((await automation.get_policy(session)).selected_media_ids)
+    policy = await automation.set_media_subscriptions(
+        session, media_ids=payload.media_ids, subscribed=payload.subscribed
+    )
+    after = len(policy.selected_media_ids)
+    return BulkSubscriptionResult(subscribed_total=after, changed=abs(after - before))
+
+
+@router.put("/library/{media_id}/minimum-score", response_model=MediaDetail)
+async def set_media_minimum_score(
+    media_id: str,
+    payload: MinimumScoreOverrideUpdate,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> MediaDetail:
+    """Give one media item its own score threshold, or clear it."""
+
+    del principal
+    await automation.set_media_minimum_score(
+        session, media_id=media_id, minimum_score=payload.minimum_score
+    )
+    return await _media_detail_payload(session, media_id)
 
 
 @router.put("/library/{media_id}/subscription", response_model=MediaDetail)
@@ -180,28 +226,17 @@ async def set_subscription(
     which is why it ended up with three entries and was never revisited.
     Toggling it from the media itself is the same data, reached the way people
     actually think about it: "follow this show".
+
+    ``scope_mode`` is deliberately not touched here; the response reports
+    whether the subscription is actually in effect instead.
     """
 
     del principal
-    media, episodes, latest_search = await service.get_media(session, media_id)
-    policy = await automation.set_media_subscription(
+    media, _, _ = await service.get_media(session, media_id)
+    await automation.set_media_subscription(
         session, media_id=media.id, subscribed=payload.subscribed
     )
-    job = await service.latest_automation_job(session, media_id)
-    return MediaDetail.model_validate(
-        {
-            **MediaSummary.model_validate(media).model_dump(),
-            "episodes": episodes,
-            "latest_search": (
-                SearchView.model_validate(latest_search) if latest_search is not None else None
-            ),
-            "latest_automation": _automation_outcome(job),
-            "subscribed": media.id in set(policy.selected_media_ids),
-            "subscription_active": (
-                media.id in set(policy.selected_media_ids) and policy.scope_mode == "selected"
-            ),
-        }
-    )
+    return await _media_detail_payload(session, media_id)
 
 
 @router.post("/library/{media_id}/identify", response_model=MediaSummary)
