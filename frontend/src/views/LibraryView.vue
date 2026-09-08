@@ -8,7 +8,7 @@ import Pagination from '../components/Pagination.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
 import type { DailyMediaRegion, DailyMediaState, DailyMediaType } from '../types'
-import { statusLabel } from '../utils/format'
+import { mediaStateLabel } from '../utils/format'
 
 const daily = useDailyStore()
 const summary = computed(() => {
@@ -115,7 +115,7 @@ onMounted(() => daily.loadMedia())
           <select v-model="filters.state">
             <option value="">全部状态</option>
             <option v-for="state in daily.mediaFilterOptions.states" :key="state" :value="state">
-              {{ statusLabel(state) }}
+              {{ mediaStateLabel(state) }}
             </option>
           </select>
         </label>
@@ -158,7 +158,7 @@ onMounted(() => daily.loadMedia())
               TMDB {{ item.tmdb_id ?? '待识别' }}
             </p>
           </div>
-          <StatusPill :status="item.state" :label="statusLabel(item.state)" />
+          <StatusPill :status="item.state" :label="mediaStateLabel(item.state)" />
         </div>
         <p v-if="item.attention_reason" class="inline-warning">{{ item.attention_reason }}</p>
         <RouterLink class="button primary" :to="`/library/${item.id}/resources`">

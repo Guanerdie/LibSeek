@@ -87,6 +87,27 @@ export function statusLabel(status: string): string {
   )
 }
 
+/** Labels for a library item's own state.
+ *
+ * Kept apart from `statusLabel` because the same key means different things in
+ * different places: a download's `MISSING` means qBittorrent lost the torrent,
+ * while a media item's `MISSING` means the library does not have the film yet.
+ */
+export function mediaStateLabel(state: string): string {
+  return (
+    {
+      MISSING: '待补充',
+      IDENTIFYING: '识别中',
+      READY: '待搜索',
+      SEARCHING: '搜索中',
+      CANDIDATES: '有候选待确认',
+      DOWNLOADING: '下载中',
+      COMPLETE: '已完成',
+      NEEDS_ATTENTION: '需要处理',
+    }[state] ?? state
+  )
+}
+
 const candidateReasonLabels: Record<string, string> = {
   TMDB_ID_EXACT: 'TMDB 编号精确匹配',
   IMDB_ID_EXACT: 'IMDb 编号精确匹配',

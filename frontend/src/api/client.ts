@@ -20,6 +20,7 @@ import type {
   LoginResponse,
   Page,
   Principal,
+  ScoreDistribution,
 } from '../types'
 
 interface ErrorPayload {
@@ -265,4 +266,6 @@ export const automationApi = {
 
 export const statsApi = {
   overview: () => request<AutomationStats>('/api/stats'),
+  scoreDistribution: () =>
+    request<ScoreDistribution>('/api/automation/score-distribution'),
 }

@@ -417,3 +417,15 @@ export interface AutomationStats {
     by_state: Record<string, number>
   }
 }
+
+export interface ScoreBucket {
+  low: number
+  high: number
+  count: number
+}
+
+export interface ScoreDistribution {
+  window_days: number
+  total: number
+  buckets: ScoreBucket[]
+}

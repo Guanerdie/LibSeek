@@ -23,6 +23,7 @@ from app.simple.models import (
     DownloadState,
     LibraryMediaItem,
     MediaState,
+    ReleaseCandidate,
     ReleaseSearch,
     SearchState,
 )
@@ -164,6 +165,49 @@ async def _download_health(session: AsyncSession) -> dict[str, object]:
         "total": sum(by_state.values()),
         "errored": by_state.get(DownloadState.ERROR.value, 0),
         "by_state": by_state,
+    }
+
+
+# Buckets for the score histogram behind the "minimum score" setting.  0.05 is
+# fine enough to show where the mass sits without turning into noise.
+_SCORE_BUCKET = 0.05
+_SCORE_WINDOW_DAYS = 30
+
+
+async def score_distribution(session: AsyncSession) -> dict[str, object]:
+    """How candidate scores are spread, so the threshold can be set with eyes open.
+
+    The setting is a bare number box today, and it is the single most
+    consequential one: production sat at 0.7 while only 2% of candidates ever
+    reached it, so automation rejected almost everything and looked broken.
+    Showing the distribution turns "0.7" from a guess into a decision.
+    """
+
+    since = utc_now() - timedelta(days=_SCORE_WINDOW_DAYS)
+    scores = [
+        float(score)
+        for score in await session.scalars(
+            select(ReleaseCandidate.score)
+            .join(ReleaseSearch, ReleaseSearch.id == ReleaseCandidate.search_id)
+            .where(ReleaseSearch.created_at >= since)
+        )
+    ]
+    buckets: list[dict[str, object]] = []
+    steps = round(1 / _SCORE_BUCKET)
+    for index in range(steps):
+        low = round(index * _SCORE_BUCKET, 2)
+        high = round(low + _SCORE_BUCKET, 2)
+        # The last bucket is closed so a perfect 1.0 is counted somewhere.
+        count = sum(
+            1
+            for score in scores
+            if score >= low and (score < high or (index == steps - 1 and score <= high))
+        )
+        buckets.append({"low": low, "high": high, "count": count})
+    return {
+        "window_days": _SCORE_WINDOW_DAYS,
+        "total": len(scores),
+        "buckets": buckets,
     }
 
 

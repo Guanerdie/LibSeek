@@ -483,3 +483,13 @@ async def automation_stats(
 
     del principal
     return await stats.collect_stats(session)
+
+
+@router.get("/automation/score-distribution")
+async def automation_score_distribution(
+    session: Session, principal: ViewerPrincipal
+) -> dict[str, object]:
+    """Candidate score spread, for the minimum-score setting to show against."""
+
+    del principal
+    return await stats.score_distribution(session)

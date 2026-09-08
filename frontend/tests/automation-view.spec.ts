@@ -5,6 +5,7 @@ import type { AutomationJob, AutomationPolicy, AutomationRun } from '../src/type
 import AutomationView from '../src/views/AutomationView.vue'
 
 const mocks = vi.hoisted(() => ({
+  scoreDistribution: vi.fn(),
   policy: vi.fn(),
   updatePolicy: vi.fn(),
   jobs: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock('../src/api/client', () => ({
   ApiError: class MockApiError extends Error {},
   automationApi: mocks,
   dailyApi: { media: mocks.media },
+  statsApi: { scoreDistribution: mocks.scoreDistribution },
 }))
 
 const policy: AutomationPolicy = {
@@ -90,6 +92,16 @@ function automationJob(overrides: Partial<AutomationJob> = {}): AutomationJob {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mocks.scoreDistribution.mockResolvedValue({
+    window_days: 30,
+    total: 100,
+    buckets: [
+      { low: 0.5, high: 0.55, count: 40 },
+      { low: 0.55, high: 0.6, count: 30 },
+      { low: 0.6, high: 0.65, count: 20 },
+      { low: 0.65, high: 0.7, count: 10 },
+    ],
+  })
   mocks.policy.mockResolvedValue(policy)
   mocks.updatePolicy.mockImplementation(async (payload) => ({
     ...policy,
@@ -211,6 +223,52 @@ describe('automation settings', () => {
     expect(
       (wrapper.get('input[name="cooldown_tier_3_hours"]').element as HTMLInputElement).value,
     ).toBe('72')
+  })
+
+  it('shows how many candidates the current score threshold lets through', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    // policy.minimum_score is 0.7, so only buckets whose top exceeds it pass.
+    // With buckets ending at 0.55/0.6/0.65/0.7 that is none of them.
+    expect(wrapper.get('.score-hint').text()).toContain('0')
+
+    await wrapper.get('input[name="minimum_score"]').setValue(0.6)
+    await flushPromises()
+
+    // Buckets 0.6-0.65 (20) and 0.65-0.7 (10) now clear the line.
+    const hint = wrapper.get('.score-hint').text()
+    expect(hint).toContain('30')
+    expect(hint).toContain('30%')
+  })
+
+  it('draws a bar per score bucket and marks the passing ones', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.get('input[name="minimum_score"]').setValue(0.6)
+    await flushPromises()
+
+    const bars = wrapper.findAll('.score-bar')
+    expect(bars).toHaveLength(4)
+    expect(bars.filter((bar) => bar.classes('is-passing'))).toHaveLength(2)
+  })
+
+  it('keeps working when the histogram cannot be loaded', async () => {
+    mocks.scoreDistribution.mockRejectedValueOnce(new Error('nope'))
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    expect(wrapper.find('.score-chart').exists()).toBe(false)
+    expect(wrapper.find('input[name="minimum_score"]').exists()).toBe(true)
+  })
+
+  it('says how many shows the subscription list holds', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    // The fixture policy is on "filters", so the list is inert and says so.
+    expect(wrapper.get('.scope-hint').text()).toContain('不生效')
   })
 
   it('starts a background run, polls it, and refreshes jobs after completion', async () => {

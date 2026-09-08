@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
-import { ApiError, automationApi, dailyApi } from '../api/client'
+import { ApiError, automationApi, dailyApi, statsApi } from '../api/client'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import Pagination from '../components/Pagination.vue'
@@ -13,6 +13,7 @@ import type {
   DailyMedia,
   DailyMediaRegion,
   DailyMediaType,
+  ScoreDistribution,
 } from '../types'
 import { formatShanghai } from '../utils/format'
 
@@ -54,6 +55,22 @@ function applyCooldownPreset(hours: readonly number[]): void {
   form.cooldown_tier_2_hours = hours[1]
   form.cooldown_tier_3_hours = hours[2]
 }
+const scoreDistribution = ref<ScoreDistribution | null>(null)
+
+/** How many recent candidates the current threshold would let through. */
+const scorePassing = computed(() => {
+  const dist = scoreDistribution.value
+  if (!dist || dist.total === 0) return null
+  const passing = dist.buckets
+    .filter((bucket) => bucket.high > form.minimum_score)
+    .reduce((sum, bucket) => sum + bucket.count, 0)
+  return { passing, total: dist.total, rate: passing / dist.total }
+})
+
+const scoreChartMax = computed(() =>
+  Math.max(1, ...(scoreDistribution.value?.buckets ?? []).map((bucket) => bucket.count)),
+)
+
 const jobs = ref<AutomationJob[]>([])
 const runs = ref<AutomationRun[]>([])
 const runsTotal = ref(0)
@@ -366,6 +383,16 @@ async function retry(jobId: string): Promise<void> {
 onMounted(() => {
   isMounted = true
   void load()
+  // The histogram is a hint, not a requirement: if it fails to load the
+  // number box still behaves exactly as it did before.
+  statsApi
+    .scoreDistribution()
+    .then((value) => {
+      scoreDistribution.value = value
+    })
+    .catch(() => {
+      scoreDistribution.value = null
+    })
 })
 
 onBeforeUnmount(() => {
@@ -438,15 +465,51 @@ onBeforeUnmount(() => {
             <option value="filters">按类型和地区规则</option>
             <option value="selected">只处理手动选择的影视</option>
           </select>
+          <span class="field-hint scope-hint">
+            <template v-if="form.scope_mode === 'selected'">
+              当前追更清单里有
+              <strong>{{ form.selected_media_ids.length }}</strong> 部；在影视详情页点「追这部」增减。
+            </template>
+            <template v-else>
+              追更清单（{{ form.selected_media_ids.length }} 部）在这个模式下不生效。
+            </template>
+          </span>
         </label>
         <fieldset class="configuration-checkbox">
           <legend>影视类型</legend>
           <label><input v-model="form.media_types" type="checkbox" value="movie" /> 电影</label>
           <label><input v-model="form.media_types" type="checkbox" value="tv" /> 电视剧</label>
         </fieldset>
-        <label>
+        <label class="score-field">
           最低评分
-          <input v-model.number="form.minimum_score" type="number" min="0" max="1" step="0.05" />
+          <input
+            v-model.number="form.minimum_score"
+            name="minimum_score"
+            type="number"
+            min="0"
+            max="1"
+            step="0.05"
+          />
+          <span v-if="scorePassing" class="field-hint score-hint">
+            最近 {{ scoreDistribution?.window_days }} 天的
+            {{ scorePassing.total }} 个候选里，约
+            <strong>{{ scorePassing.passing }}</strong> 个（{{
+              Math.round(scorePassing.rate * 100)
+            }}%）能过这条线
+          </span>
+          <span v-if="scoreDistribution && scoreDistribution.total > 0" class="score-chart">
+            <span
+              v-for="bucket in scoreDistribution.buckets"
+              :key="bucket.low"
+              class="score-bar"
+              :class="{ 'is-passing': bucket.high > form.minimum_score }"
+              :style="{ height: `${Math.round((bucket.count / scoreChartMax) * 100)}%` }"
+              :title="`${bucket.low.toFixed(2)} ~ ${bucket.high.toFixed(2)}：${bucket.count} 个`"
+            />
+          </span>
+          <span v-if="scoreDistribution && scoreDistribution.total > 0" class="score-axis">
+            <span>0</span><span>0.5</span><span>1.0</span>
+          </span>
         </label>
         <label>
           最低做种数
