@@ -156,35 +156,28 @@ async def get_policy(session: AsyncSession) -> AutomationPolicy:
 
 
 async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) -> AutomationPolicy:
+    """Apply only the settings the caller actually sent.
+
+    Every field has a default, so a client that predates a setting would
+    otherwise submit that default and silently reset it -- the Android app
+    knows 17 of these fields and the policy now has 30, so saving anything
+    from the phone would wipe the quality weights, cooldown ladder and
+    variety switch.  ``model_fields_set`` is what the request carried, so an
+    older client can only change what it knows about.
+    """
+
     policy = await get_policy(session)
-    policy.enabled = payload.enabled
-    policy.dry_run = payload.dry_run
-    policy.auto_identify = payload.auto_identify
-    policy.scope_mode = payload.scope_mode
-    policy.regions = [item.value for item in payload.regions]
-    policy.selected_media_ids = payload.selected_media_ids
-    policy.site_ids = payload.site_ids
-    policy.media_types = [item.value for item in payload.media_types]
-    policy.minimum_score = payload.minimum_score
-    policy.minimum_seeders = payload.minimum_seeders
-    policy.max_size_bytes = payload.max_size_bytes
-    policy.allow_warnings = payload.allow_warnings
-    policy.interval_minutes = payload.interval_minutes
-    policy.retry_delay_minutes = payload.retry_delay_minutes
-    policy.max_attempts = payload.max_attempts
-    policy.daily_download_limit = payload.daily_download_limit
-    policy.daily_download_bytes = payload.daily_download_bytes
-    policy.cooldown_tier_1_hours = payload.cooldown_tier_1_hours
-    policy.cooldown_tier_2_hours = payload.cooldown_tier_2_hours
-    policy.cooldown_tier_3_hours = payload.cooldown_tier_3_hours
-    policy.variety_recent_episodes = payload.variety_recent_episodes
-    policy.automate_variety = payload.automate_variety
-    policy.weight_resolution = payload.weight_resolution
-    policy.weight_size = payload.weight_size
-    policy.weight_source = payload.weight_source
-    policy.weight_seeders = payload.weight_seeders
-    policy.weight_promotion = payload.weight_promotion
-    policy.seeder_floor = payload.seeder_floor
+    sent = payload.model_fields_set
+    # These two arrive as enum lists and are stored as their string values;
+    # every other field copies across unchanged.
+    enum_lists = {"regions", "media_types"}
+    for name in AutomationPolicyUpdate.model_fields:
+        if name not in sent:
+            continue
+        value = getattr(payload, name)
+        if name in enum_lists:
+            value = [item.value for item in value]
+        setattr(policy, name, value)
     await session.commit()
     await session.refresh(policy)
     return policy

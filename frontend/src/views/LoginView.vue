@@ -11,6 +11,7 @@ const auth = useAuthStore()
 const username = ref('')
 const password = ref('')
 const passwordConfirmation = ref('')
+const remember = ref(false)
 const validationError = ref<string | null>(null)
 const setupMode = computed(() => auth.adminInitialized === false)
 const formReady = computed(() => auth.adminInitialized !== null)
@@ -38,7 +39,7 @@ async function submit(): Promise<void> {
   try {
     authenticated = creatingAdmin
       ? await auth.setupAdmin(normalizedUsername, password.value)
-      : await auth.login(normalizedUsername, password.value)
+      : await auth.login(normalizedUsername, password.value, remember.value)
   } finally {
     password.value = ''
     passwordConfirmation.value = ''
@@ -94,6 +95,10 @@ async function submit(): Promise<void> {
             maxlength="1024"
             required
           />
+        </label>
+        <label v-if="!setupMode" class="login-remember">
+          <input v-model="remember" name="remember" type="checkbox" />
+          记住这台设备（30 天内免登录）
         </label>
         <div v-if="validationError || auth.error" class="login-error" role="alert">
           {{ validationError || auth.error }}

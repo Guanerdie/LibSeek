@@ -89,14 +89,35 @@ export const useAuthStore = defineStore('auth', () => {
     await initialization
   }
 
-  async function login(username: string, password: string): Promise<boolean> {
+  async function changePassword(
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<boolean> {
+    working.value = true
+    error.value = null
+    try {
+      // The server rotates the signing key, so it hands back a fresh CSRF
+      // token with the reissued session cookie; keep it or every later
+      // mutation would be rejected.
+      const response = await authApi.changePassword(currentPassword, newPassword)
+      replaceCsrfToken(response.csrf_token)
+      return true
+    } catch (caught) {
+      error.value = caught instanceof Error ? caught.message : '无法修改密码'
+      return false
+    } finally {
+      working.value = false
+    }
+  }
+
+  async function login(username: string, password: string, remember = false): Promise<boolean> {
     working.value = true
     error.value = null
     try {
       // Refresh immediately before login so an idle bootstrap token cannot expire in the form.
       const csrf = await authApi.csrf()
       replaceCsrfToken(csrf.csrf_token)
-      const response = await authApi.login(username, password)
+      const response = await authApi.login(username, password, remember)
       principal.value = { username: response.username, role: response.role }
       replaceCsrfToken(response.csrf_token)
       adminInitialized.value = true
@@ -163,6 +184,7 @@ export const useAuthStore = defineStore('auth', () => {
     error,
     initialize,
     login,
+    changePassword,
     setupAdmin,
     logout,
     expireSession,

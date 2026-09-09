@@ -21,6 +21,38 @@ import { formatShanghai } from '../utils/format'
 const auth = useAuthStore()
 const store = useConfigurationStore()
 
+const currentPassword = ref('')
+const newPassword = ref('')
+const newPasswordConfirmation = ref('')
+const passwordFeedback = ref<{ status: 'success' | 'error'; message: string } | null>(null)
+const changingPassword = ref(false)
+
+async function submitPasswordChange(): Promise<void> {
+  passwordFeedback.value = null
+  if (newPassword.value.length < 8) {
+    passwordFeedback.value = { status: 'error', message: '新密码至少需要 8 位' }
+    return
+  }
+  if (newPassword.value !== newPasswordConfirmation.value) {
+    passwordFeedback.value = { status: 'error', message: '两次输入的新密码不一致' }
+    return
+  }
+  changingPassword.value = true
+  try {
+    const ok = await auth.changePassword(currentPassword.value, newPassword.value)
+    passwordFeedback.value = ok
+      ? { status: 'success', message: '密码已修改，其他设备上的登录已失效' }
+      : { status: 'error', message: auth.error ?? '无法修改密码' }
+  } finally {
+    changingPassword.value = false
+    // Never leave a password sitting in the form, whatever the outcome.
+    currentPassword.value = ''
+    newPassword.value = ''
+    newPasswordConfirmation.value = ''
+  }
+}
+
+
 const fallbackPtArchitectures: PtSiteArchitectureOption[] = [
   {
     architecture: 'avistaz',
@@ -573,6 +605,27 @@ void store.refresh()
     <PageState :loading="store.loading && !store.data" :error="!store.data ? store.error : null" />
 
     <div v-if="store.data" class="configuration-form">
+      <form class="integration-config-section" autocomplete="off" aria-labelledby="password-config-title" @submit.prevent="submitPasswordChange">
+        <header>
+          <div>
+            <span class="eyebrow">ACCOUNT</span>
+            <h2 id="password-config-title">登录密码</h2>
+            <p class="muted">修改后其他设备上的登录会立即失效，当前这台不受影响。</p>
+          </div>
+        </header>
+        <div class="configuration-field-grid password-form">
+          <label><span>当前密码</span><input v-model="currentPassword" name="current_password" type="password" autocomplete="current-password" maxlength="1024" required /></label>
+          <label><span>新密码（至少 8 位）</span><input v-model="newPassword" name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required /></label>
+          <label><span>确认新密码</span><input v-model="newPasswordConfirmation" name="new_password_confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required /></label>
+        </div>
+        <div v-if="passwordFeedback" :class="['configuration-message', passwordFeedback.status]" :role="passwordFeedback.status === 'error' ? 'alert' : 'status'">
+          <span>{{ passwordFeedback.message }}</span>
+        </div>
+        <div class="configuration-section-actions">
+          <button class="button primary" type="submit" :disabled="changingPassword">{{ changingPassword ? '正在修改…' : '修改密码' }}</button>
+        </div>
+      </form>
+
       <form class="integration-config-section" autocomplete="off" aria-labelledby="nextfind-config-title" @submit.prevent="saveSection('nextfind')">
         <header>
           <div><span class="eyebrow">MEDIA SOURCE</span><h2 id="nextfind-config-title">NextFind</h2></div>

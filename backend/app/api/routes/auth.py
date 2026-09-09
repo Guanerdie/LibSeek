@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from app.api.dependencies import (
     AuthenticatedMutationPrincipal,
+    OperatorPrincipal,
     SettingsDep,
     ViewerPrincipal,
     legacy_auth_fields_present,
@@ -35,6 +36,7 @@ from app.schemas.auth import (
     CsrfResponse,
     LoginRequest,
     LoginResponse,
+    PasswordChangeRequest,
     PrincipalResponse,
     SetupRequest,
     SetupStatusResponse,
@@ -154,32 +156,86 @@ async def login(
         material=material,
     ):
         raise AppError("AUTH_LOGIN_FAILED", "用户名或密码错误", status_code=401)
-    return _start_session(response, settings, material)
+    return _start_session(response, settings, material, remember=request.remember)
+
+
+@router.post("/password", response_model=LoginResponse)
+async def change_password(
+    request: PasswordChangeRequest,
+    response: Response,
+    settings: SettingsDep,
+    principal: OperatorPrincipal,
+) -> LoginResponse:
+    """Change the administrator password, and cut every other session loose.
+
+    The old password must be supplied: a stolen session cookie should not be
+    enough to lock the owner out of their own service.
+    """
+
+    if legacy_auth_fields_present(settings):
+        # The credential lives in the environment; the app cannot rewrite it,
+        # and pretending otherwise would leave the user thinking it changed.
+        raise AppError(
+            "AUTH_PASSWORD_NOT_MANAGED",
+            "当前密码来自环境变量，请直接修改部署配置后重启",
+            status_code=409,
+        )
+    material = require_auth_material(settings)
+    if not verify_auth_material_credentials(
+        username=principal.username,
+        password=request.current_password.get_secret_value(),
+        material=material,
+    ):
+        raise AppError("AUTH_PASSWORD_MISMATCH", "当前密码不正确", status_code=401)
+    try:
+        record = runtime_store(settings).change_admin_password(
+            create_password_digest(request.new_password.get_secret_value())
+        )
+    except RuntimeConfigError as exc:
+        raise _runtime_config_unavailable() from exc
+
+    # Rotating the signing key invalidated this browser's cookie too; hand it
+    # a fresh one so changing the password does not sign the owner out.
+    refreshed = AuthMaterial(
+        username=record.username,
+        credential=record.password_digest,
+        credential_kind="pbkdf2_sha256",
+        signing_key=record.session_signing_key,
+        role=material.role,
+    )
+    return _start_session(response, settings, refreshed, remember=False)
 
 
 def _start_session(
     response: Response,
     settings: SettingsDep,
     material: AuthMaterial,
+    *,
+    remember: bool = False,
 ) -> LoginResponse:
+    ttl = (
+        settings.auth_session_remember_ttl_seconds
+        if remember
+        else settings.auth_session_ttl_seconds
+    )
     csrf_token = new_csrf_token()
     session_token = create_session_token(
         username=material.username,
         role=material.role,
         csrf_token=csrf_token,
         signing_key=material.signing_key,
-        ttl_seconds=settings.auth_session_ttl_seconds,
+        ttl_seconds=ttl,
     )
     _set_session_cookie(
         response,
         session_token,
-        max_age=settings.auth_session_ttl_seconds,
+        max_age=ttl,
         secure=settings.auth_cookie_secure,
     )
     _set_csrf_cookie(
         response,
         csrf_token,
-        max_age=settings.auth_session_ttl_seconds,
+        max_age=ttl,
         secure=settings.auth_cookie_secure,
     )
     _no_store(response)

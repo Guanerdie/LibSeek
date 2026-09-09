@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     auth_session_signing_key_file: Path | None = None
     auth_local_role: AuthRole = AuthRole.ADMIN
     auth_session_ttl_seconds: int = Field(default=8 * 60 * 60, ge=300, le=7 * 24 * 60 * 60)
+    # Used when the sign-in asks to be remembered.  Longer than the plain
+    # session because the point is not to retype a password every day on a
+    # device that is already trusted.
+    auth_session_remember_ttl_seconds: int = Field(
+        default=30 * 24 * 60 * 60, ge=3600, le=180 * 24 * 60 * 60
+    )
     auth_bootstrap_csrf_ttl_seconds: int = Field(default=10 * 60, ge=60, le=60 * 60)
     auth_cookie_secure: bool = False
     allowed_external_hosts: tuple[str, ...] = (

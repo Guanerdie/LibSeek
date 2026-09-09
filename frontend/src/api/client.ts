@@ -119,11 +119,17 @@ export const authApi = {
       { csrf: 'omit' },
     ),
   csrf: () => request<CsrfResponse>('/api/auth/csrf'),
-  login: (username: string, password: string) =>
+  login: (username: string, password: string, remember = false) =>
     request<LoginResponse>('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, remember }),
+    }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<LoginResponse>('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }),
   me: () => request<Principal>('/api/auth/me'),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),

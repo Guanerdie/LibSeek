@@ -216,6 +216,40 @@ class RuntimeConfigStore:
                 ) from exc
         return record
 
+    def change_admin_password(self, password_digest: str) -> AuthRecord:
+        """Replace the stored digest, and rotate the session signing key with it.
+
+        Rotating the key is what makes a password change mean something: every
+        session token ever issued was signed with the old key, so sessions on
+        other devices stop validating immediately.  The caller re-issues its
+        own cookie afterwards so the person changing the password is not
+        logged out of the browser they are sitting at.
+        """
+
+        existing = self.auth_record()
+        if existing is None:
+            raise RuntimeConfigError("administrator is not initialized")
+        record = AuthRecord(
+            username=existing.username,
+            password_digest=_single_line(password_digest, maximum=1024),
+            session_signing_key=secrets.token_urlsafe(48),
+        )
+        payload = {
+            "version": _AUTH_VERSION,
+            "username": record.username,
+            "password_digest": record.password_digest,
+            "session_signing_key": record.session_signing_key,
+        }
+        with _WRITE_LOCK:
+            _ensure_private_directory(self.auth_dir)
+            try:
+                _atomic_replace_json(self.auth_path, payload)
+            except OSError as exc:
+                raise RuntimeConfigError(
+                    "runtime authentication configuration is unavailable"
+                ) from exc
+        return record
+
     def auth_record(self) -> AuthRecord | None:
         if not self.auth_path.exists():
             return None

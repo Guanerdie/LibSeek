@@ -95,7 +95,9 @@ describe('connection settings', () => {
     const wrapper = mount(ConfigurationView)
     await flushPromises()
 
-    expect(wrapper.findAll('.integration-config-section')).toHaveLength(5)
+    // Five connection sections plus the account password form.
+    expect(wrapper.findAll('.integration-config-section')).toHaveLength(6)
+    expect(wrapper.find('#password-config-title').exists()).toBe(true)
     expect(wrapper.text()).toContain('NextFind')
     expect(wrapper.text()).toContain('TMDB')
     expect(wrapper.text()).toContain('PT 站点')

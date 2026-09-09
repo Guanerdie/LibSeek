@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   setup: vi.fn(),
   csrf: vi.fn(),
   login: vi.fn(),
+  changePassword: vi.fn(),
   me: vi.fn(),
   logout: vi.fn(),
   setApiCsrfToken: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock('../src/api/client', async (importOriginal) => {
       setup: mocks.setup,
       csrf: mocks.csrf,
       login: mocks.login,
+      changePassword: mocks.changePassword,
       me: mocks.me,
       logout: mocks.logout,
     },
@@ -108,11 +110,44 @@ describe('auth store', () => {
 
     await expect(store.login('admin-user', 'temporary-password')).resolves.toBe(true)
 
-    expect(mocks.login).toHaveBeenCalledWith('admin-user', 'temporary-password')
+    expect(mocks.login).toHaveBeenCalledWith('admin-user', 'temporary-password', false)
     expect(store.principal).toEqual({ username: 'admin-user', role: 'admin' })
     expect(store.hasRole('viewer')).toBe(true)
     expect(store.hasRole('operator')).toBe(true)
     expect(store.hasRole('admin')).toBe(true)
+    expect(Object.keys(store.$state)).not.toContain('password')
+    expect(localStorage.length).toBe(0)
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('passes the remember choice through to the server', async () => {
+    mocks.csrf.mockResolvedValue({ csrf_token: 'csrf-token' })
+    mocks.login.mockResolvedValue({
+      username: 'admin-user',
+      role: 'admin',
+      csrf_token: 'session-token',
+    })
+    const store = useAuthStore()
+
+    await store.login('admin-user', 'temporary-password', true)
+
+    expect(mocks.login).toHaveBeenCalledWith('admin-user', 'temporary-password', true)
+  })
+
+  it('keeps the reissued csrf token after a password change', async () => {
+    // The server rotates the signing key, so a stale token would break every
+    // later mutation.
+    mocks.changePassword.mockResolvedValue({
+      username: 'admin-user',
+      role: 'admin',
+      csrf_token: 'rotated-token',
+    })
+    const store = useAuthStore()
+
+    await expect(store.changePassword('old-pass', 'new-pass-1')).resolves.toBe(true)
+
+    expect(store.csrfToken).toBe('rotated-token')
+    // A password must never survive the call, whatever the outcome.
     expect(Object.keys(store.$state)).not.toContain('password')
     expect(localStorage.length).toBe(0)
     expect(sessionStorage.length).toBe(0)
