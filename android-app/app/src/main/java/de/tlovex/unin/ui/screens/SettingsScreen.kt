@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Password
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material3.AlertDialog
@@ -30,6 +31,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +90,9 @@ fun SettingsScreen(
                     }
                 }
             }
+        }
+        if (state.canChangePassword) {
+            item { AccountPasswordCard(state, callbacks) }
         }
         item { Text("服务连接", style = MaterialTheme.typography.titleLarge) }
         items(state.connections, key = { it.key }) { connection ->
@@ -735,6 +740,99 @@ private fun SaveButton(text: String, valid: Boolean, saving: Boolean, onClick: (
     )
 }
 
+/**
+ * Changing the account password.
+ *
+ * The three fields are local state and are cleared the moment a change
+ * succeeds, so no password ever reaches [UninUiState]. Succeeding signs every
+ * other device out; the copy says so, because that is surprising otherwise.
+ */
+@Composable
+private fun AccountPasswordCard(state: UninUiState, callbacks: UninCallbacks) {
+    var currentPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var handledChangeCount by remember { mutableStateOf(state.passwordChangeCount) }
+
+    LaunchedEffect(state.passwordChangeCount) {
+        if (state.passwordChangeCount != handledChangeCount) {
+            handledChangeCount = state.passwordChangeCount
+            currentPassword = ""
+            newPassword = ""
+            confirmation = ""
+        }
+    }
+
+    val tooShort = newPassword.isNotEmpty() && newPassword.length < MINIMUM_PASSWORD_LENGTH
+    val mismatched = confirmation.isNotEmpty() && confirmation != newPassword
+    val valid = currentPassword.isNotEmpty() &&
+        newPassword.length >= MINIMUM_PASSWORD_LENGTH &&
+        confirmation == newPassword
+
+    NeumorphicCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                GradientMark(Icons.Outlined.Password, null)
+                Spacer(Modifier.size(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("登录密码", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "修改后其他设备需要重新登录，这台不受影响",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            PasswordField(
+                value = currentPassword,
+                onValueChange = { currentPassword = it },
+                label = "当前密码",
+            )
+            PasswordField(
+                value = newPassword,
+                onValueChange = { newPassword = it },
+                label = "新密码",
+                isError = tooShort,
+                supportingText = "至少 $MINIMUM_PASSWORD_LENGTH 位",
+            )
+            PasswordField(
+                value = confirmation,
+                onValueChange = { confirmation = it },
+                label = "确认新密码",
+                isError = mismatched,
+                supportingText = if (mismatched) "两次输入不一致" else null,
+            )
+            SaveButton(
+                text = "更新密码",
+                valid = valid,
+                saving = state.isChangingPassword,
+                onClick = { callbacks.onChangePassword(currentPassword, newPassword) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun PasswordField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    isError: Boolean = false,
+    supportingText: String? = null,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text(label) },
+        singleLine = true,
+        isError = isError,
+        supportingText = supportingText?.let { message -> { Text(message) } },
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+    )
+}
+
 @Composable
 private fun ConnectionCard(connection: ConnectionUi, callbacks: UninCallbacks, modifier: Modifier = Modifier) {
     val (label, color) = when (connection.state) {
@@ -765,6 +863,9 @@ private fun ConnectionCard(connection: ConnectionUi, callbacks: UninCallbacks, m
         }
     }
 }
+
+// Matches the server's minimum; rejecting locally saves a round trip.
+private const val MINIMUM_PASSWORD_LENGTH = 8
 
 private fun configuredDescription(configured: Boolean, secretConfigured: Boolean): String = when {
     configured && secretConfigured -> "服务端配置完整；敏感字段可在此替换"

@@ -88,6 +88,58 @@ data class MediaDetailDto(
     @SerializedName("updated_at") val updatedAt: String,
     val episodes: List<EpisodeDto>,
     @SerializedName("latest_search") val latestSearch: SearchSummaryDto?,
+    @SerializedName("latest_automation") val latestAutomation: AutomationOutcomeDto? = null,
+    @SerializedName("minimum_score_override") val minimumScoreOverride: Double? = null,
+    val subscribed: Boolean = false,
+    // False when subscribed but the policy scope is still "filters", i.e. the
+    // subscription list is not what automation is reading.
+    @SerializedName("subscription_active") val subscriptionActive: Boolean = false,
+)
+
+/** A candidate automation turned down, and the server's reasons for it. */
+data class RejectedCandidateDto(
+    @SerializedName("candidate_id") val candidateId: String? = null,
+    val title: String? = null,
+    val reasons: List<String> = emptyList(),
+)
+
+/** Why the last automation attempt did or did not download anything. */
+data class AutomationOutcomeDto(
+    @SerializedName("job_id") val jobId: String,
+    val state: AutomationJobState,
+    @SerializedName("created_at") val createdAt: String,
+    @SerializedName("finished_at") val finishedAt: String? = null,
+    @SerializedName("error_code") val errorCode: String? = null,
+    @SerializedName("error_message") val errorMessage: String? = null,
+    @SerializedName("candidate_count") val candidateCount: Int = 0,
+    @SerializedName("selected_title") val selectedTitle: String? = null,
+    @SerializedName("selected_score") val selectedScore: Double? = null,
+    @SerializedName("search_cooldown_until") val searchCooldownUntil: String? = null,
+    @SerializedName("download_skipped") val downloadSkipped: String? = null,
+    val rejected: List<RejectedCandidateDto> = emptyList(),
+)
+
+data class SubscriptionUpdateDto(
+    val subscribed: Boolean,
+)
+
+data class QuickFillRequestDto(
+    /** Skip the server's five-minute result cache and ask the site again. */
+    val force: Boolean = false,
+)
+
+/**
+ * The outcome of one click: a search was run, the best candidate picked, and --
+ * unless the policy said otherwise -- submitted.
+ *
+ * Every candidate is still returned, so the operator can override the pick by
+ * hand; this is a shortcut over the manual path, not a replacement for it.
+ */
+data class QuickFillResultDto(
+    val search: SearchDetailDto,
+    @SerializedName("selected_candidate_id") val selectedCandidateId: String? = null,
+    val download: DownloadDto? = null,
+    val rejected: List<RejectedCandidateDto> = emptyList(),
 )
 
 data class IdentityRequestDto(

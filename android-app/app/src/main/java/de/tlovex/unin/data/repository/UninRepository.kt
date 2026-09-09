@@ -16,6 +16,8 @@ import de.tlovex.unin.data.model.DownloadRequestDto
 import de.tlovex.unin.data.model.DownloadState
 import de.tlovex.unin.data.model.IdentityRequestDto
 import de.tlovex.unin.data.model.LoginDto
+import de.tlovex.unin.data.model.LoginRequestDto
+import de.tlovex.unin.data.model.PasswordChangeRequestDto
 import de.tlovex.unin.data.model.MediaDetailDto
 import de.tlovex.unin.data.model.MediaPageDto
 import de.tlovex.unin.data.model.MediaState
@@ -27,9 +29,13 @@ import de.tlovex.unin.data.model.OutboundProxyConfigurationUpdateDto
 import de.tlovex.unin.data.model.PrincipalDto
 import de.tlovex.unin.data.model.PtSiteArchitecture
 import de.tlovex.unin.data.model.QbittorrentConfigurationUpdateDto
+import de.tlovex.unin.data.model.QuickFillRequestDto
+import de.tlovex.unin.data.model.QuickFillResultDto
+import de.tlovex.unin.data.model.SubscriptionUpdateDto
 import de.tlovex.unin.data.model.SearchDetailDto
 import de.tlovex.unin.data.model.SearchRequestDto
 import de.tlovex.unin.data.model.SetupStatusDto
+import de.tlovex.unin.data.model.StatsDto
 import de.tlovex.unin.data.model.SyncResultDto
 import de.tlovex.unin.data.model.TmdbConfigurationUpdateDto
 import de.tlovex.unin.data.remote.UninApi
@@ -63,11 +69,21 @@ class UninRepository(
         }
     }
 
-    suspend fun login(username: String, password: String): LoginDto {
+    suspend fun login(username: String, password: String, remember: Boolean = false): LoginDto {
         cookieJar.clear()
         api.csrf()
-        return api.login(CredentialsDto(username, password))
+        return api.login(LoginRequestDto(username, password, remember))
     }
+
+    /**
+     * Replaces the account password and returns the reissued session.
+     *
+     * The server rotates its signing key, which invalidates this device's cookie
+     * along with every other one; the response carries a fresh session that the
+     * cookie jar stores, so the caller stays signed in here and nowhere else.
+     */
+    suspend fun changePassword(currentPassword: String, newPassword: String): LoginDto =
+        api.changePassword(PasswordChangeRequestDto(currentPassword, newPassword))
 
     suspend fun currentUser(): PrincipalDto = api.me()
 
@@ -209,6 +225,21 @@ class UninRepository(
     suspend fun searchMedia(mediaId: String, siteIds: List<String>): SearchDetailDto =
         api.createSearch(mediaId, SearchRequestDto(siteIds))
 
+    /**
+     * Adds or removes one media item from the automation scope.
+     *
+     * The scope list already existed on the policy; this reaches it the way
+     * people think about it -- "follow this show" -- rather than through a
+     * multi-select holding the whole library. It deliberately does not switch
+     * the policy's scope mode; the response reports whether the subscription is
+     * actually in effect.
+     */
+    suspend fun setSubscription(mediaId: String, subscribed: Boolean): MediaDetailDto =
+        api.setSubscription(mediaId, SubscriptionUpdateDto(subscribed))
+
+    suspend fun quickFill(mediaId: String, force: Boolean = false): QuickFillResultDto =
+        api.quickFill(mediaId, QuickFillRequestDto(force))
+
     suspend fun search(searchId: String): SearchDetailDto = api.search(searchId)
 
     suspend fun downloadCandidate(
@@ -247,4 +278,6 @@ class UninRepository(
 
     suspend fun retryAutomationJob(jobId: String): AutomationJobDto =
         api.retryAutomationJob(jobId)
+
+    suspend fun stats(): StatsDto = api.stats()
 }

@@ -16,6 +16,8 @@ import de.tlovex.unin.data.model.DownloadRequestDto
 import de.tlovex.unin.data.model.DownloadState
 import de.tlovex.unin.data.model.IdentityRequestDto
 import de.tlovex.unin.data.model.LoginDto
+import de.tlovex.unin.data.model.LoginRequestDto
+import de.tlovex.unin.data.model.PasswordChangeRequestDto
 import de.tlovex.unin.data.model.MediaDetailDto
 import de.tlovex.unin.data.model.MediaPageDto
 import de.tlovex.unin.data.model.MediaState
@@ -23,9 +25,13 @@ import de.tlovex.unin.data.model.MediaSummaryDto
 import de.tlovex.unin.data.model.MediaType
 import de.tlovex.unin.data.model.PrincipalDto
 import de.tlovex.unin.data.model.PtSiteArchitecture
+import de.tlovex.unin.data.model.QuickFillRequestDto
+import de.tlovex.unin.data.model.QuickFillResultDto
+import de.tlovex.unin.data.model.SubscriptionUpdateDto
 import de.tlovex.unin.data.model.SearchDetailDto
 import de.tlovex.unin.data.model.SearchRequestDto
 import de.tlovex.unin.data.model.SetupStatusDto
+import de.tlovex.unin.data.model.StatsDto
 import de.tlovex.unin.data.model.SyncResultDto
 import retrofit2.Response
 import retrofit2.http.Body
@@ -46,7 +52,10 @@ interface UninApi {
     suspend fun csrf(): CsrfDto
 
     @POST("api/auth/login")
-    suspend fun login(@Body credentials: CredentialsDto): LoginDto
+    suspend fun login(@Body credentials: LoginRequestDto): LoginDto
+
+    @POST("api/auth/password")
+    suspend fun changePassword(@Body request: PasswordChangeRequestDto): LoginDto
 
     @GET("api/auth/me")
     suspend fun me(): PrincipalDto
@@ -102,6 +111,18 @@ interface UninApi {
         @Body request: IdentityRequestDto,
     ): MediaSummaryDto
 
+    @PUT("api/library/{mediaId}/subscription")
+    suspend fun setSubscription(
+        @Path("mediaId") mediaId: String,
+        @Body request: SubscriptionUpdateDto,
+    ): MediaDetailDto
+
+    @POST("api/library/{mediaId}/quick-fill")
+    suspend fun quickFill(
+        @Path("mediaId") mediaId: String,
+        @Body request: QuickFillRequestDto,
+    ): QuickFillResultDto
+
     @POST("api/library/{mediaId}/searches")
     suspend fun createSearch(
         @Path("mediaId") mediaId: String,
@@ -155,4 +176,7 @@ interface UninApi {
 
     @POST("api/automation/jobs/{jobId}/retry")
     suspend fun retryAutomationJob(@Path("jobId") jobId: String): AutomationJobDto
+
+    @GET("api/stats")
+    suspend fun stats(): StatsDto
 }

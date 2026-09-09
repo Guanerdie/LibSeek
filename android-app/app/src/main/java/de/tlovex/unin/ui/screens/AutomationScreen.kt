@@ -97,6 +97,25 @@ fun AutomationScreen(
                 },
             )
         }
+        state.automationStats?.let { stats ->
+            item {
+                NeumorphicCard(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            "最近 ${stats.windowDays} 天",
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        PolicySummaryRow("库存补齐", stats.libraryCoverageText)
+                        PolicySummaryRow("搜索命中", stats.searchSuccessText)
+                        PolicySummaryRow("下载任务", stats.downloadHealthText)
+                        PolicySummaryRow("站点响应", stats.siteLatencyText)
+                    }
+                }
+            }
+        }
         if (state.automationRunOutcomeUnknown) {
             item {
                 NeumorphicCard(Modifier.fillMaxWidth()) {
@@ -183,6 +202,10 @@ fun AutomationScreen(
                         "每日体积上限",
                         policy.dailyDownloadSizeGb?.let { "$it GB" } ?: "不限",
                     )
+                    PolicySummaryRow("搜不到时的冷却", policy.cooldownText)
+                    PolicySummaryRow("综艺", policy.varietyText)
+                    PolicySummaryRow("画质权重", policy.qualityWeightsText)
+                    PolicySummaryRow("做种数下限", "${policy.seederFloor} 人")
                     if (policy.enabled && !policy.dryRun) {
                         Text(
                             "实时自动化会在服务端允许 qB 写入时自动提交下载，请确认预算和筛选条件后保存。",

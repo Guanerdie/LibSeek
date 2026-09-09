@@ -21,6 +21,21 @@ data class AutomationPolicyUpdateDto(
     @SerializedName("max_attempts") val maxAttempts: Int = 3,
     @SerializedName("daily_download_limit") val dailyDownloadLimit: Int = 3,
     @SerializedName("daily_download_bytes") val dailyDownloadBytes: Long? = null,
+    // Backoff after a search finds nothing, in hours; the tiers must not decrease.
+    @SerializedName("cooldown_tier_1_hours") val cooldownTier1Hours: Int = 24,
+    @SerializedName("cooldown_tier_2_hours") val cooldownTier2Hours: Int = 72,
+    @SerializedName("cooldown_tier_3_hours") val cooldownTier3Hours: Int = 168,
+    // Variety shows never finish a season, so they are followed by chasing the
+    // newest few episodes. 0 turns that off.
+    @SerializedName("variety_recent_episodes") val varietyRecentEpisodes: Int = 5,
+    @SerializedName("automate_variety") val automateVariety: Boolean = false,
+    // Release-quality weights; relative, normalised server-side when scoring.
+    @SerializedName("weight_resolution") val weightResolution: Int = 44,
+    @SerializedName("weight_size") val weightSize: Int = 24,
+    @SerializedName("weight_source") val weightSource: Int = 12,
+    @SerializedName("weight_seeders") val weightSeeders: Int = 13,
+    @SerializedName("weight_promotion") val weightPromotion: Int = 3,
+    @SerializedName("seeder_floor") val seederFloor: Int = 3,
 )
 
 data class AutomationPolicyDto(
@@ -41,8 +56,59 @@ data class AutomationPolicyDto(
     @SerializedName("max_attempts") val maxAttempts: Int,
     @SerializedName("daily_download_limit") val dailyDownloadLimit: Int,
     @SerializedName("daily_download_bytes") val dailyDownloadBytes: Long?,
+    @SerializedName("cooldown_tier_1_hours") val cooldownTier1Hours: Int = 24,
+    @SerializedName("cooldown_tier_2_hours") val cooldownTier2Hours: Int = 72,
+    @SerializedName("cooldown_tier_3_hours") val cooldownTier3Hours: Int = 168,
+    @SerializedName("variety_recent_episodes") val varietyRecentEpisodes: Int = 5,
+    @SerializedName("automate_variety") val automateVariety: Boolean = false,
+    @SerializedName("weight_resolution") val weightResolution: Int = 44,
+    @SerializedName("weight_size") val weightSize: Int = 24,
+    @SerializedName("weight_source") val weightSource: Int = 12,
+    @SerializedName("weight_seeders") val weightSeeders: Int = 13,
+    @SerializedName("weight_promotion") val weightPromotion: Int = 3,
+    @SerializedName("seeder_floor") val seederFloor: Int = 3,
     @SerializedName("updated_at") val updatedAt: String,
     @SerializedName("last_run_at") val lastRunAt: String?,
+)
+
+/**
+ * The policy as it must be sent back when saving.
+ *
+ * `PUT /api/automation/policy` is a whole-document write for every field the
+ * body mentions, so every setting the app does not edit still has to be echoed
+ * back. Leaving one out used to send this DTO's default in its place, silently
+ * resetting whatever the operator had configured elsewhere -- which is why this
+ * lives beside the DTOs with a test, rather than inline in the ViewModel.
+ */
+fun AutomationPolicyDto.toUpdate(): AutomationPolicyUpdateDto = AutomationPolicyUpdateDto(
+    enabled = enabled,
+    dryRun = dryRun,
+    autoIdentify = autoIdentify,
+    scopeMode = scopeMode,
+    regions = regions,
+    selectedMediaIds = selectedMediaIds,
+    siteIds = siteIds,
+    mediaTypes = mediaTypes,
+    minimumScore = minimumScore,
+    minimumSeeders = minimumSeeders,
+    maxSizeBytes = maxSizeBytes,
+    allowWarnings = allowWarnings,
+    intervalMinutes = intervalMinutes,
+    retryDelayMinutes = retryDelayMinutes,
+    maxAttempts = maxAttempts,
+    dailyDownloadLimit = dailyDownloadLimit,
+    dailyDownloadBytes = dailyDownloadBytes,
+    cooldownTier1Hours = cooldownTier1Hours,
+    cooldownTier2Hours = cooldownTier2Hours,
+    cooldownTier3Hours = cooldownTier3Hours,
+    varietyRecentEpisodes = varietyRecentEpisodes,
+    automateVariety = automateVariety,
+    weightResolution = weightResolution,
+    weightSize = weightSize,
+    weightSource = weightSource,
+    weightSeeders = weightSeeders,
+    weightPromotion = weightPromotion,
+    seederFloor = seederFloor,
 )
 
 enum class AutomationScopeMode {
@@ -72,6 +138,7 @@ data class AutomationJobDto(
     @SerializedName("attempt_count") val attemptCount: Int,
     @SerializedName("next_attempt_at") val nextAttemptAt: String?,
     val decision: Map<String, Any?>,
+    @SerializedName("error_code") val errorCode: String? = null,
     @SerializedName("error_message") val errorMessage: String?,
     @SerializedName("created_at") val createdAt: String,
     @SerializedName("finished_at") val finishedAt: String?,

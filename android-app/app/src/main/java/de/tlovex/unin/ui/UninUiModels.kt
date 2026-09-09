@@ -29,6 +29,13 @@ data class MissingMediaUi(
     val tmdbConfirmed: Boolean = false,
     val candidateCount: Int = 0,
     val downloadActive: Boolean = false,
+    // Only the detail response carries these; list rows leave them at their
+    // defaults rather than pretending to know.
+    val subscribed: Boolean = false,
+    // False when subscribed but the policy still runs on filters, so the
+    // subscription list is not what automation is reading.
+    val subscriptionActive: Boolean = false,
+    val automationSummary: String? = null,
 )
 
 @Immutable
@@ -80,6 +87,28 @@ data class AutomationPolicyUi(
     val maxAttempts: Int = 3,
     val dailyLimit: Int = 3,
     val dailyDownloadSizeGb: Int? = null,
+    // Read-only here: these are edited on the web, where the score histogram
+    // gives them context. Shown so the app is honest about what is in effect.
+    val cooldownText: String = "24 / 72 / 168 小时",
+    val varietyText: String = "已屏蔽",
+    val qualityWeightsText: String = "",
+    val seederFloor: Int = 3,
+)
+
+/**
+ * The monitoring numbers, already worded.
+ *
+ * The web page draws these as charts; on a phone the useful part is the four
+ * headline figures, so the formatting happens once in the ViewModel rather
+ * than being re-derived in the UI.
+ */
+@Immutable
+data class AutomationStatsUi(
+    val windowDays: Int = 7,
+    val libraryCoverageText: String,
+    val searchSuccessText: String,
+    val downloadHealthText: String,
+    val siteLatencyText: String,
 )
 
 @Immutable
@@ -110,17 +139,25 @@ data class UninUiState(
     val currentDestination: UninDestination = UninDestination.Missing,
     val username: String = "",
     val password: String = "",
+    val rememberDevice: Boolean = false,
     val loginError: String? = null,
     val accountDisplayName: String = "",
+    val canChangePassword: Boolean = false,
+    val isChangingPassword: Boolean = false,
+    // Bumped after every successful change so the form can clear itself without
+    // the password ever living in this state.
+    val passwordChangeCount: Int = 0,
     val serverLabel: String = "unin.tlovex.de",
     val missingMedia: List<MissingMediaUi> = emptyList(),
     val selectedMedia: MissingMediaUi? = null,
     val candidates: List<ResourceCandidateUi> = emptyList(),
     val submittingCandidateId: String? = null,
+    val quickFillMediaId: String? = null,
     val downloadSubmissionUnknownMediaIds: Set<String> = emptySet(),
     val downloads: List<DownloadItemUi> = emptyList(),
     val automationPolicy: AutomationPolicyUi = AutomationPolicyUi(),
     val automationRuns: List<AutomationRunUi> = emptyList(),
+    val automationStats: AutomationStatsUi? = null,
     val isAutomationRunInProgress: Boolean = false,
     val automationRunOutcomeUnknown: Boolean = false,
     val connections: List<ConnectionUi> = emptyList(),
@@ -133,14 +170,23 @@ data class UninUiState(
 data class UninCallbacks(
     val onUsernameChanged: (String) -> Unit = {},
     val onPasswordChanged: (String) -> Unit = {},
+    val onRememberDeviceChanged: (Boolean) -> Unit = {},
     val onLogin: () -> Unit = {},
     val onLogout: () -> Unit = {},
+    /**
+     * Passwords are callback arguments rather than state fields, for the same
+     * reason the configuration secrets are: the host submits them immediately
+     * and discards them.
+     */
+    val onChangePassword: (currentPassword: String, newPassword: String) -> Unit = { _, _ -> },
     val onDestinationSelected: (UninDestination) -> Unit = {},
     val onSyncMissing: () -> Unit = {},
     val onMediaSelected: (MissingMediaUi) -> Unit = {},
     val onConfirmTmdb: (MissingMediaUi) -> Unit = {},
     val onConfirmTmdbWithId: (MissingMediaUi, Int) -> Unit = { _, _ -> },
     val onSearchResources: (MissingMediaUi) -> Unit = {},
+    val onQuickFill: (MissingMediaUi) -> Unit = {},
+    val onToggleSubscription: (MissingMediaUi, Boolean) -> Unit = { _, _ -> },
     val onCandidateDownload: (ResourceCandidateUi) -> Unit = {},
     val onRefreshDownloads: () -> Unit = {},
     val onRetryDownload: (DownloadItemUi) -> Unit = {},

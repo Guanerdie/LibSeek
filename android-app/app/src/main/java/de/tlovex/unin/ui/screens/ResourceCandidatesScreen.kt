@@ -15,13 +15,16 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import de.tlovex.unin.ui.MissingMediaUi
 import de.tlovex.unin.ui.ResourceCandidateUi
 import de.tlovex.unin.ui.UninCallbacks
 import de.tlovex.unin.ui.UninDestination
@@ -95,6 +99,19 @@ fun ResourceCandidatesScreen(
                 SectionHeading(
                     title = state.selectedMedia?.title ?: "候选资源",
                     subtitle = state.selectedMedia?.missingDescription ?: "比较匹配程度、做种与风险后再提交",
+                )
+            }
+        }
+        state.selectedMedia?.let { media ->
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                MediaActionsCard(
+                    media = media,
+                    quickFillRunning = state.quickFillMediaId == media.id,
+                    quickFillEnabled = state.quickFillMediaId == null &&
+                        state.submittingCandidateId == null &&
+                        !submissionUnknownForSelected &&
+                        !media.downloadActive,
+                    callbacks = callbacks,
                 )
             }
         }
@@ -195,6 +212,72 @@ fun ResourceCandidatesScreen(
                 }
             },
         )
+    }
+}
+
+/**
+ * Following a title, filling it in one click, and why the last attempt did or
+ * did not download anything.
+ *
+ * Quick fill deliberately sits above the candidate list rather than replacing
+ * it: the same search feeds both, so choosing by hand stays one scroll away.
+ */
+@Composable
+private fun MediaActionsCard(
+    media: MissingMediaUi,
+    quickFillRunning: Boolean,
+    quickFillEnabled: Boolean,
+    callbacks: UninCallbacks,
+) {
+    NeumorphicCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("追更", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = when {
+                            !media.subscribed -> "加入后，自动化会持续为这部补片"
+                            media.subscriptionActive -> "自动化正在跟进这部"
+                            // Subscribing changes nothing while the policy runs
+                            // on filters; saying so beats appearing to work.
+                            else -> "已加入，但自动化当前按筛选条件运行，需在网页把范围改为「手动选择」才会生效"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (media.subscribed && !media.subscriptionActive) {
+                            UninWarning
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                Spacer(Modifier.size(12.dp))
+                Switch(
+                    checked = media.subscribed,
+                    onCheckedChange = { callbacks.onToggleSubscription(media, it) },
+                )
+            }
+            media.automationSummary?.let { summary ->
+                HorizontalDivider()
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            GradientPrimaryButton(
+                text = "一键补片",
+                onClick = { callbacks.onQuickFill(media) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = quickFillEnabled,
+                loading = quickFillRunning,
+                icon = Icons.Outlined.Bolt,
+            )
+            Text(
+                "搜索、按评分挑一个并提交下载。候选仍会全部列出，可以自己另选。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

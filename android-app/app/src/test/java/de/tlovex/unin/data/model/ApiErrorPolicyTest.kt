@@ -21,4 +21,13 @@ class ApiErrorPolicyTest {
         assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(502, "AUTH_REQUIRED"))
         assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(403, "AUTH_ROLE_FORBIDDEN"))
     }
+
+    @Test
+    fun mistypingTheCurrentPasswordDoesNotSignTheUserOut() {
+        // Changing the password rejects a wrong current password with a 401.
+        // Treating that as an expired session would throw the user back to the
+        // login screen for a typo.
+        assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(401, "AUTH_PASSWORD_MISMATCH"))
+        assertFalse(ApiErrorPolicy.isSessionAuthenticationFailure(409, "AUTH_PASSWORD_NOT_MANAGED"))
+    }
 }

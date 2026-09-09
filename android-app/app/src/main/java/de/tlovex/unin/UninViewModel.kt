@@ -9,6 +9,7 @@ import de.tlovex.unin.data.model.AuthRole
 import de.tlovex.unin.data.model.ApiErrorPolicy
 import de.tlovex.unin.data.model.AutomationJobDto
 import de.tlovex.unin.data.model.AutomationJobState
+import de.tlovex.unin.data.model.AutomationOutcomeDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
 import de.tlovex.unin.data.model.AutomationRunDto
@@ -24,13 +25,17 @@ import de.tlovex.unin.data.model.MediaSummaryDto
 import de.tlovex.unin.data.model.MediaType
 import de.tlovex.unin.data.model.PrincipalDto
 import de.tlovex.unin.data.model.PtSiteArchitecture
+import de.tlovex.unin.data.model.QuickFillResultDto
 import de.tlovex.unin.data.model.SearchDetailDto
 import de.tlovex.unin.data.model.SearchState
+import de.tlovex.unin.data.model.StatsDto
+import de.tlovex.unin.data.model.toUpdate
 import de.tlovex.unin.data.remote.peekErrorBody
 import de.tlovex.unin.data.repository.UninRepository
 import de.tlovex.unin.ui.AutomationPolicyUi
 import de.tlovex.unin.ui.AutomationRunState
 import de.tlovex.unin.ui.AutomationRunUi
+import de.tlovex.unin.ui.AutomationStatsUi
 import de.tlovex.unin.ui.ConnectionState
 import de.tlovex.unin.ui.ConnectionUi
 import de.tlovex.unin.ui.DownloadItemUi
@@ -132,14 +137,18 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     val callbacks = UninCallbacks(
         onUsernameChanged = ::updateUsername,
         onPasswordChanged = ::updatePassword,
+        onRememberDeviceChanged = ::updateRememberDevice,
         onLogin = ::login,
         onLogout = ::logout,
+        onChangePassword = ::changePassword,
         onDestinationSelected = ::selectDestination,
         onSyncMissing = ::syncLibrary,
         onMediaSelected = ::openMedia,
         onConfirmTmdb = { media -> confirmTmdb(media) },
         onConfirmTmdbWithId = { media, tmdbId -> confirmTmdb(media, tmdbId) },
         onSearchResources = ::searchResources,
+        onQuickFill = ::quickFill,
+        onToggleSubscription = ::toggleSubscription,
         onCandidateDownload = ::downloadCandidate,
         onRefreshDownloads = ::syncDownloads,
         onRetryDownload = ::retryDownload,
@@ -242,9 +251,14 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         mutableUiState.update { it.copy(password = value, loginError = null) }
     }
 
+    private fun updateRememberDevice(value: Boolean) {
+        mutableUiState.update { it.copy(rememberDevice = value) }
+    }
+
     private fun login() {
         val username = uiState.value.username.trim()
         val password = uiState.value.password
+        val remember = uiState.value.rememberDevice
         if (username.isEmpty() || password.isEmpty() || authenticationJob?.isActive == true) return
 
         lateinit var job: Job
@@ -252,7 +266,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             beginOperation()
             mutableUiState.update { it.copy(loginError = null) }
             try {
-                val login = repository.login(username, password)
+                val login = repository.login(username, password, remember)
                 showAuthenticated(PrincipalDto(login.username, login.role))
                 loadInitialContent()
             } catch (error: CancellationException) {
@@ -288,6 +302,31 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 showSignedOut(warning)
                 endOperation()
             }
+        }
+    }
+
+    /**
+     * Replaces the account password.
+     *
+     * A wrong current password comes back as `AUTH_PASSWORD_MISMATCH`, which is
+     * a 401 the session policy deliberately does not treat as an expired
+     * session -- mistyping here must not sign the user out.
+     */
+    private fun changePassword(currentPassword: String, newPassword: String) {
+        if (currentPassword.isEmpty() || newPassword.isEmpty()) return
+        if (uiState.value.isChangingPassword) return
+
+        mutableUiState.update { it.copy(isChangingPassword = true) }
+        launchAction("修改密码失败，请稍后重试") {
+            repository.changePassword(currentPassword, newPassword)
+            mutableUiState.update {
+                it.copy(
+                    passwordChangeCount = it.passwordChangeCount + 1,
+                    snackbarMessage = "密码已更新，其他设备需要重新登录",
+                )
+            }
+        }.invokeOnCompletion {
+            mutableUiState.update { it.copy(isChangingPassword = false) }
         }
     }
 
@@ -559,6 +598,145 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Search, pick the best candidate and submit it, in one request.
+     *
+     * The server runs an ordinary search, so every candidate still comes back
+     * and stays listed -- this is a shortcut over the manual path, never a
+     * replacement for choosing by hand.
+     */
+    private fun quickFill(media: MissingMediaUi) {
+        if (media.downloadActive) {
+            mutableUiState.update {
+                it.copy(
+                    currentDestination = UninDestination.Downloads,
+                    snackbarMessage = "该影视已有下载任务，请先查看下载状态",
+                )
+            }
+            return
+        }
+        if (media.id in unknownDownloadSubmissionMediaIds) {
+            mutableUiState.update {
+                it.copy(
+                    downloadSubmissionUnknownMediaIds = unknownDownloadSubmissionMediaIds,
+                    snackbarMessage = "请先在下载页同步上次提交结果",
+                )
+            }
+            return
+        }
+        if (uiState.value.quickFillMediaId != null) return
+
+        searchJob?.cancel()
+        mutableUiState.update {
+            it.copy(
+                selectedMedia = media,
+                candidates = emptyList(),
+                quickFillMediaId = media.id,
+                currentDestination = UninDestination.Resources,
+            )
+        }
+        searchJob = launchAction("一键补片失败") {
+            try {
+                val result = repository.quickFill(media.id)
+                applySearch(result.search)
+                val submitted = result.download != null
+                val downloads = if (submitted) {
+                    runCatching { loadAllDownloads() }.getOrNull()
+                } else {
+                    null
+                }
+                mutableUiState.update { state ->
+                    val selected = state.selectedMedia
+                        ?.takeIf { it.id == media.id }
+                        ?.copy(downloadActive = submitted)
+                    state.copy(
+                        downloads = downloads?.map { it.toUi() } ?: state.downloads,
+                        selectedMedia = selected ?: state.selectedMedia,
+                        missingMedia = selected?.let { state.missingMedia.replace(it) }
+                            ?: state.missingMedia,
+                        snackbarMessage = quickFillMessage(result),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // Quick fill submits to qBittorrent server-side, so a broken
+                // response leaves the same unknown outcome a manual submission
+                // would; lock the media until the download page reconciles it.
+                if (error.mayLeaveWriteOutcomeUnknown()) {
+                    rememberUnknownDownloadSubmission(media.id)
+                    mutableUiState.update {
+                        it.copy(
+                            downloadSubmissionUnknownMediaIds = unknownDownloadSubmissionMediaIds,
+                            currentDestination = UninDestination.Downloads,
+                            snackbarMessage = "提交响应中断，服务端可能仍在处理；请同步状态后再操作",
+                        )
+                    }
+                } else {
+                    throw error
+                }
+            } finally {
+                mutableUiState.update { state ->
+                    if (state.quickFillMediaId == media.id) {
+                        state.copy(quickFillMediaId = null)
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    private fun quickFillMessage(result: QuickFillResultDto): String {
+        val selected = result.search.candidates
+            .firstOrNull { it.id == result.selectedCandidateId }
+        return when {
+            result.download != null && selected != null ->
+                "已提交《${selected.title}》到 qBittorrent"
+            result.download != null -> "已提交所选资源到 qBittorrent"
+            selected != null -> "已选中《${selected.title}》，但策略未提交下载"
+            result.search.candidates.isEmpty() -> "没有搜到候选资源"
+            else -> {
+                val reasons = result.rejected
+                    .flatMap { it.reasons }
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .distinct()
+                if (reasons.isEmpty()) {
+                    "候选 ${result.search.candidates.size} 个，但没有一个达标"
+                } else {
+                    "没有达标的候选：${reasons.take(MAX_REJECTION_REASONS).joinToString("；")}"
+                }
+            }
+        }
+    }
+
+    private fun toggleSubscription(media: MissingMediaUi, subscribed: Boolean) {
+        launchAction(if (subscribed) "无法加入追更" else "无法取消追更") {
+            val detail = repository.setSubscription(media.id, subscribed)
+            val updated = detail.toUi(candidateCount = media.candidateCount)
+            mutableUiState.update { state ->
+                state.copy(
+                    selectedMedia = if (state.selectedMedia?.id == updated.id) {
+                        updated
+                    } else {
+                        state.selectedMedia
+                    },
+                    missingMedia = state.missingMedia.replace(updated),
+                    snackbarMessage = when {
+                        !subscribed -> "已取消追更《${updated.title}》"
+                        // Subscribing while the policy still runs on filters
+                        // changes nothing until the scope is switched, and
+                        // silently doing nothing is worse than saying so.
+                        !updated.subscriptionActive ->
+                            "已加入追更；自动化当前按筛选条件运行，需在网页把范围改为「手动选择」才会生效"
+                        else -> "已加入追更《${updated.title}》"
+                    },
+                )
+            }
+        }
+    }
+
     private suspend fun awaitSearch(initial: SearchDetailDto): SearchDetailDto {
         var search = initial
         repeat(SEARCH_POLL_LIMIT) {
@@ -796,12 +974,16 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             val policy = repository.automationPolicy()
             val jobs = loadAllAutomationJobs()
             val latestRun = repository.latestAutomationRun()
+            // The monitoring numbers are a nicety; losing them must not cost
+            // the operator the policy and the job history.
+            val stats = runCatching { repository.stats() }.getOrNull()
             currentPolicy = policy
             pendingPolicy = policy.toUpdate()
             mutableUiState.update {
                 it.copy(
                     automationPolicy = policy.toUi(),
                     automationRuns = jobs.map { it.toUi() },
+                    automationStats = stats?.toUi() ?: it.automationStats,
                 )
             }
             if (latestRun == null) {
@@ -1375,6 +1557,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 isBusy = activeOperations > 0,
                 canSyncLibrary = principal.role != AuthRole.VIEWER,
                 accountDisplayName = principal.displayName(),
+                // The endpoint is operator-and-above, same as every other write.
+                canChangePassword = principal.role != AuthRole.VIEWER,
                 serverLabel = serverLabel,
                 connections = authenticatedConnections(),
                 settingsConfiguration = SettingsConfigurationUiState(
@@ -1388,9 +1572,13 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun showSignedOut(error: String? = null) {
         val username = uiState.value.username
+        val rememberDevice = uiState.value.rememberDevice
         mutableUiState.value = UninUiState(
             isBusy = activeOperations > 0,
             username = username,
+            // Survives a failed attempt so a retry does not silently drop the
+            // choice; a fresh launch starts unticked.
+            rememberDevice = rememberDevice,
             loginError = error,
             serverLabel = serverLabel,
             connections = signedOutConnections(),
@@ -1510,12 +1698,47 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             discoveredAt = discoveredAt,
             updatedAt = updatedAt,
         )
-        val mapped = summary.toUi(candidateCount)
+        val mapped = summary.toUi(candidateCount).copy(
+            subscribed = subscribed,
+            subscriptionActive = subscriptionActive,
+            automationSummary = latestAutomation?.summary(),
+        )
         return if (mediaType == MediaType.TV && missingEpisodes > 0 && attentionReason == null) {
             mapped.copy(missingDescription = "缺失 $missingEpisodes 集")
         } else {
             mapped
         }
+    }
+
+    /**
+     * One line explaining the last automated attempt.
+     *
+     * "Nothing happened" is the outcome that needs explaining, so the reasons
+     * the candidates were turned down matter more here than the successes.
+     */
+    private fun AutomationOutcomeDto.summary(): String {
+        val parts = buildList {
+            add("上次自动化 ${formatServerTime(createdAt)}")
+            if (!selectedTitle.isNullOrBlank()) {
+                add("选中《$selectedTitle》")
+            } else {
+                add("候选 $candidateCount 个，未选中")
+                val reasons = rejected
+                    .flatMap { it.reasons }
+                    .map(String::trim)
+                    .filter(String::isNotEmpty)
+                    .distinct()
+                if (reasons.isNotEmpty()) {
+                    add(reasons.take(MAX_REJECTION_REASONS).joinToString("；"))
+                }
+            }
+            if (!downloadSkipped.isNullOrBlank()) add(downloadSkipped)
+            if (!searchCooldownUntil.isNullOrBlank()) {
+                add("冷却至 ${formatServerTime(searchCooldownUntil)}")
+            }
+            if (!errorMessage.isNullOrBlank()) add(errorMessage)
+        }
+        return parts.joinToString(" · ")
     }
 
     private fun CandidateDto.toUi(): ResourceCandidateUi {
@@ -1603,37 +1826,69 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         dailyDownloadSizeGb = dailyDownloadBytes?.let {
             (it.toDouble() / BYTES_PER_GIB).roundToInt()
         },
+        cooldownText = "$cooldownTier1Hours / $cooldownTier2Hours / $cooldownTier3Hours 小时",
+        varietyText = when {
+            !automateVariety -> "已屏蔽"
+            varietyRecentEpisodes > 0 -> "跟最近 $varietyRecentEpisodes 集"
+            else -> "参与，但不限集数"
+        },
+        qualityWeightsText = "画质 $weightResolution · 体积 $weightSize · " +
+            "做种 $weightSeeders · 片源 $weightSource · 促销 $weightPromotion",
+        seederFloor = seederFloor,
     )
 
-    private fun AutomationPolicyDto.toUpdate() = AutomationPolicyUpdateDto(
-        enabled = enabled,
-        dryRun = dryRun,
-        autoIdentify = autoIdentify,
-        scopeMode = scopeMode,
-        regions = regions,
-        selectedMediaIds = selectedMediaIds,
-        siteIds = siteIds,
-        mediaTypes = mediaTypes,
-        minimumScore = minimumScore,
-        minimumSeeders = minimumSeeders,
-        maxSizeBytes = maxSizeBytes,
-        allowWarnings = allowWarnings,
-        intervalMinutes = intervalMinutes,
-        retryDelayMinutes = retryDelayMinutes,
-        maxAttempts = maxAttempts,
-        dailyDownloadLimit = dailyDownloadLimit,
-        dailyDownloadBytes = dailyDownloadBytes,
-    )
+    private fun StatsDto.toUi(): AutomationStatsUi {
+        // Days with no searches carry a null rate rather than a zero, so they
+        // are excluded from the ratio instead of dragging it down.
+        val active = searchTrend.filter { it.total > 0 }
+        val searched = active.sumOf { it.total }
+        val succeeded = active.sumOf { it.succeeded }
+        return AutomationStatsUi(
+            windowDays = windowDays,
+            libraryCoverageText = libraryCoverage?.let { coverage ->
+                val rate = coverage.coverageRate
+                    ?.let { " · ${(it * 100).roundToInt()}%" }
+                    .orEmpty()
+                "已补齐 ${coverage.covered} / ${coverage.total}$rate"
+            } ?: "暂无数据",
+            searchSuccessText = if (searched == 0) {
+                "近 $windowDays 天没有搜索记录"
+            } else {
+                "$succeeded / $searched 次搜到资源 · ${(succeeded * 100.0 / searched).roundToInt()}%"
+            },
+            downloadHealthText = downloadHealth?.let { health ->
+                if (health.errored > 0) {
+                    "共 ${health.total} 个 · ${health.errored} 个失败"
+                } else {
+                    "共 ${health.total} 个 · 没有失败"
+                }
+            } ?: "暂无数据",
+            siteLatencyText = siteLatency
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString("、") {
+                    "${it.siteId.siteDisplayName()} 平均 ${it.averageSeconds.roundToInt()} 秒"
+                }
+                ?: "暂无数据",
+        )
+    }
 
     private fun AutomationJobDto.toUi(): AutomationRunUi {
         val mode = decision["mode"] as? String
         val candidateCount = (decision["candidate_count"] as? Number)?.toInt() ?: 0
         val selectedTitle = decision["selected_title"] as? String
         val skipped = decision["download_skipped"] as? String
+        val cooldownUntil = decision["search_cooldown_until"] as? String
         val details = buildList {
             add("候选 $candidateCount 个")
-            if (!selectedTitle.isNullOrBlank()) add("选择：$selectedTitle")
+            if (!selectedTitle.isNullOrBlank()) {
+                add("选择：$selectedTitle")
+            } else {
+                // Why nothing was picked is the question this list exists to
+                // answer; without it a run reads as "候选 40 个" and no outcome.
+                rejectionSummary(decision)?.let { add(it) }
+            }
             if (!skipped.isNullOrBlank()) add(skipped)
+            if (!cooldownUntil.isNullOrBlank()) add("冷却至 ${formatServerTime(cooldownUntil)}")
             if (!errorMessage.isNullOrBlank()) add(errorMessage)
         }.joinToString(" · ")
         val uiState = if (supersededAt != null) {
@@ -1661,6 +1916,31 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             canRetry = supersededAt == null &&
                 (state == AutomationJobState.FAILED || state == AutomationJobState.RETRY_WAIT),
         )
+    }
+
+    /**
+     * The distinct reasons the server gave for turning candidates down.
+     *
+     * `decision` arrives as plain JSON, so every level is checked rather than
+     * cast: an older or newer server shape must degrade to "no summary", never
+     * crash the automation list.
+     */
+    private fun rejectionSummary(decision: Map<String, Any?>): String? {
+        val reasons = (decision["rejected"] as? List<*>)
+            .orEmpty()
+            .mapNotNull { entry -> (entry as? Map<*, *>)?.get("reasons") as? List<*> }
+            .flatten()
+            .filterIsInstance<String>()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        if (reasons.isEmpty()) return null
+        val shown = reasons.take(MAX_REJECTION_REASONS).joinToString("；")
+        return if (reasons.size > MAX_REJECTION_REASONS) {
+            "未选择：$shown 等 ${reasons.size} 项"
+        } else {
+            "未选择：$shown"
+        }
     }
 
     private val AutomationRunDto.isActive: Boolean
@@ -2012,6 +2292,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val PAGE_SIZE = 100
         const val DEFAULT_PT_SITE = "avistaz"
+        // Enough to explain a run at a glance without turning the row into a wall.
+        const val MAX_REJECTION_REASONS = 2
         const val BYTES_PER_GIB = 1024L * 1024L * 1024L
         const val SEARCH_POLL_LIMIT = 60
         const val SEARCH_POLL_INTERVAL_MS = 1_000L
