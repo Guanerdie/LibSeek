@@ -2435,6 +2435,41 @@ async def test_scheduler_syncs_downloads_even_when_search_policy_is_disabled(
 
 
 @pytest.mark.asyncio
+async def test_scheduler_waits_for_an_active_run_without_syncing_nextfind(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry run leaves ``last_run_at`` alone, so the policy can fall due mid-run."""
+
+    nextfind_builds: list[str] = []
+
+    async def fake_sync(_session: AsyncSession, _qb: QbittorrentAdapter) -> int:
+        return 0
+
+    async def fake_close(_adapter: object) -> None:
+        return None
+
+    def fake_nextfind() -> object:
+        nextfind_builds.append("nextfind")
+        return object()
+
+    monkeypatch.setattr(
+        automation_runner, "build_qb_readonly", lambda: cast(QbittorrentAdapter, object())
+    )
+    monkeypatch.setattr(automation_runner, "sync_download_statuses", fake_sync)
+    monkeypatch.setattr(automation_runner, "close_adapter", fake_close)
+    monkeypatch.setattr(automation_runner, "build_nextfind", fake_nextfind)
+
+    async with session_factory() as session:
+        await update_policy(session, AutomationPolicyUpdate(enabled=True))
+        session.add(AutomationRun(trigger="manual_retry", state=AutomationRunState.RUNNING))
+        await session.commit()
+
+        assert await automation_runner.run_scheduled_cycle(session) is False
+
+    assert nextfind_builds == []
+
+
+@pytest.mark.asyncio
 async def test_automation_identifies_a_unique_tmdb_match_before_search(session_factory) -> None:
     async with session_factory() as session:
         media = LibraryMediaItem(

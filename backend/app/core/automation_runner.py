@@ -324,6 +324,11 @@ async def run_scheduled_cycle(
     policy = await automation.get_policy(session)
     if not automation.policy_is_due(policy):
         return False
+    if await automation.active_automation_run(session) is not None:
+        # A manual run or retry is still going.  Syncing NextFind first would
+        # repeat the fetch on every poll only to be refused the run; the first
+        # poll after it finishes picks the cycle up.
+        return False
 
     nextfind = None
     try:
@@ -338,7 +343,13 @@ async def run_scheduled_cycle(
         if nextfind is not None:
             await close_adapter(nextfind)
 
-    run = await automation.create_automation_run(session, trigger="scheduled")
+    try:
+        run = await automation.create_automation_run(session, trigger="scheduled")
+    except AppError as exc:
+        # A manual run can still start while NextFind was syncing.
+        if exc.error_code != "AUTOMATION_RUN_IN_PROGRESS":
+            raise
+        return False
     await execute_recorded_automation_run(
         session, run, stop_requested=stop_requested
     )

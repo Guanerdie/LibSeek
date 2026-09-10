@@ -398,20 +398,24 @@ async def list_run_jobs(
     return await list_jobs(session, page=page, page_size=page_size, run_id=run_id)
 
 
+async def active_automation_run(session: AsyncSession) -> AutomationRun | None:
+    """The run still pending or running, if any; only one may exist at a time."""
+
+    run: AutomationRun | None = await session.scalar(
+        select(AutomationRun)
+        .where(AutomationRun.state.in_((AutomationRunState.PENDING, AutomationRunState.RUNNING)))
+        .order_by(AutomationRun.created_at.desc())
+        .limit(1)
+    )
+    return run
+
+
 async def create_automation_run(session: AsyncSession, *, trigger: str) -> AutomationRun:
     async with _run_creation_lock:
         policy = await get_policy(session)
         if not policy.enabled:
             raise AppError("AUTOMATION_DISABLED", "请先启用自动化策略", status_code=409)
-        active = await session.scalar(
-            select(AutomationRun)
-            .where(
-                AutomationRun.state.in_((AutomationRunState.PENDING, AutomationRunState.RUNNING))
-            )
-            .order_by(AutomationRun.created_at.desc())
-            .limit(1)
-        )
-        if active is not None:
+        if await active_automation_run(session) is not None:
             raise AppError(
                 "AUTOMATION_RUN_IN_PROGRESS",
                 "已有自动化运行正在执行，请等待完成",
@@ -464,15 +468,7 @@ async def retry_job(session: AsyncSession, job_id: str) -> tuple[AutomationJob, 
         policy = await get_policy(session)
         if not policy.enabled:
             raise AppError("AUTOMATION_DISABLED", "请先启用自动化策略", status_code=409)
-        active = await session.scalar(
-            select(AutomationRun)
-            .where(
-                AutomationRun.state.in_((AutomationRunState.PENDING, AutomationRunState.RUNNING))
-            )
-            .order_by(AutomationRun.created_at.desc())
-            .limit(1)
-        )
-        if active is not None:
+        if await active_automation_run(session) is not None:
             raise AppError(
                 "AUTOMATION_RUN_IN_PROGRESS",
                 "已有自动化运行正在执行，请等待完成",
