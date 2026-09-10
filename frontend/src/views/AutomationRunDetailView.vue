@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { ApiError, automationApi } from '../api/client'
 import PageHeader from '../components/PageHeader.vue'
@@ -167,7 +167,7 @@ onBeforeUnmount(() => {
       :title="run ? (run.trigger === 'scheduled' ? '周期自动搜索详情' : '手动自动搜索详情') : '自动化执行详情'"
       description="按任务查看本次执行结果；失败任务可以重试，也可以进入资源页人工筛选。"
     >
-      <a class="button secondary" href="/automation">返回执行记录</a>
+      <RouterLink class="button secondary" to="/automation">返回执行记录</RouterLink>
     </PageHeader>
 
     <PageState :loading="loading" :error="error" />
@@ -231,13 +231,13 @@ onBeforeUnmount(() => {
               >
                 {{ retryingJobId === job.id ? '重试中…' : (job.state === 'RETRY_WAIT' ? '立即重试' : '重试任务') }}
               </button>
-              <a
+              <RouterLink
                 v-if="job.state === 'FAILED' || job.search_id"
                 class="button primary small"
-                :href="manualScreeningHref(job)"
+                :to="manualScreeningHref(job)"
               >
                 人工筛选资源
-              </a>
+              </RouterLink>
             </div>
           </article>
         </div>

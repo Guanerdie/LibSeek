@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import { ApiError, automationApi, dailyApi, statsApi } from '../api/client'
 import PageHeader from '../components/PageHeader.vue'
@@ -443,7 +444,7 @@ onBeforeUnmount(() => {
           <h2>后台自动搜索</h2>
         </div>
         <div class="automation-current-actions">
-          <a class="button secondary small" :href="`/automation/runs/${currentRun.id}`">查看任务</a>
+          <RouterLink class="button secondary small" :to="`/automation/runs/${currentRun.id}`">查看任务</RouterLink>
           <StatusPill :status="currentRun.state" />
         </div>
       </div>
@@ -796,9 +797,9 @@ onBeforeUnmount(() => {
               <span v-if="runItem.deferred" class="warning-text">等待 {{ runItem.deferred }} 项</span>
             </div>
             <p v-if="runItem.error_message" class="inline-warning">{{ runItem.error_message }}</p>
-            <a class="button secondary small" :href="`/automation/runs/${runItem.id}`">
+            <RouterLink class="button secondary small" :to="`/automation/runs/${runItem.id}`">
               查看任务详情
-            </a>
+            </RouterLink>
           </article>
         </div>
         <Pagination

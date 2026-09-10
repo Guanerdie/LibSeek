@@ -1,8 +1,11 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { config, flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AutomationJob, AutomationPolicy, AutomationRun } from '../src/types'
 import AutomationView from '../src/views/AutomationView.vue'
+
+// The view is mounted without a router; the stub keeps in-app links inspectable.
+config.global.stubs = { ...config.global.stubs, RouterLink: RouterLinkStub }
 
 const mocks = vi.hoisted(() => ({
   scoreDistribution: vi.fn(),
@@ -123,6 +126,27 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+})
+
+describe('automation run links', () => {
+  it('opens the current run inside the app instead of reloading the page', async () => {
+    mocks.latestRun.mockResolvedValue(
+      automationRun({
+        state: 'SUCCEEDED',
+        created: 2,
+        succeeded: 2,
+        finished_at: '2026-08-25T00:01:00Z',
+      }),
+    )
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    const link = wrapper
+      .findAllComponents(RouterLinkStub)
+      .find((item) => item.text() === '查看任务')
+    expect(link?.props('to')).toBe('/automation/runs/run-1')
+    wrapper.unmount()
+  })
 })
 
 describe('automation settings', () => {
