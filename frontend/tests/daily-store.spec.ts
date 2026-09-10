@@ -11,6 +11,7 @@ import ResourcesView from '../src/views/ResourcesView.vue'
 
 const mocks = vi.hoisted(() => ({
   syncMedia: vi.fn(),
+  syncStatus: vi.fn(),
   media: vi.fn(),
   mediaDetail: vi.fn(),
   identify: vi.fn(),
@@ -563,7 +564,7 @@ describe('simplified daily store', () => {
     await wrapper.get('.button.primary').trigger('click')
     await flushPromises()
 
-    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], false)
+    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, undefined, false)
   })
 
   it('lets the refresh button skip a cached result', async () => {
@@ -584,7 +585,7 @@ describe('simplified daily store', () => {
     await refresh!.trigger('click')
     await flushPromises()
 
-    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], true)
+    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, undefined, true)
   })
 
   it('explains why the last automation run picked nothing', async () => {
@@ -693,7 +694,7 @@ describe('simplified daily store', () => {
     mount(ResourcesView, { global: { plugins: [router] } })
     await flushPromises()
 
-    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, ['avistaz'], false)
+    expect(mocks.createSearch).toHaveBeenCalledWith(media.id, undefined, false)
   })
 
   it('leaves a previously failed search on screen instead of silently retrying', async () => {
@@ -713,6 +714,7 @@ describe('simplified daily store', () => {
   it('quick fill submits in one click and still lists every candidate', async () => {
     mocks.mediaDetail.mockResolvedValue(mediaDetail({ latest_search: successfulSearch }))
     mocks.search.mockResolvedValue(searchWithOneCandidate)
+    mocks.createSearch.mockResolvedValueOnce(searchWithOneCandidate)
     mocks.quickFill.mockResolvedValueOnce({
       search: searchWithOneCandidate,
       selected_candidate_id: 'c1',
@@ -741,6 +743,7 @@ describe('simplified daily store', () => {
   it('says so when quick fill finds candidates but none are acceptable', async () => {
     mocks.mediaDetail.mockResolvedValue(mediaDetail({ latest_search: successfulSearch }))
     mocks.search.mockResolvedValue(searchWithOneCandidate)
+    mocks.createSearch.mockResolvedValueOnce(searchWithOneCandidate)
     mocks.quickFill.mockResolvedValueOnce({
       search: searchWithOneCandidate,
       selected_candidate_id: null,

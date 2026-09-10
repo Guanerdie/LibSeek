@@ -4,7 +4,9 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
+from typing import Literal
 from urllib.parse import quote, urlparse
 
 from sqlalchemy import select
@@ -214,6 +216,57 @@ async def close_adapter(adapter: object) -> None:
         await result
 
 
+@dataclass
+class LibrarySyncStatus:
+    """The most recent NextFind sync, whether a click or the scheduler started it."""
+
+    state: Literal["IDLE", "RUNNING", "SUCCEEDED", "FAILED"] = "IDLE"
+    created: int = 0
+    updated: int = 0
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+# One process holds the app, so the sync's progress lives in memory; a restart
+# forgets it along with the sync it would describe.
+_library_sync = LibrarySyncStatus()
+
+
+def library_sync_status() -> LibrarySyncStatus:
+    return replace(_library_sync)
+
+
+def library_sync_running() -> bool:
+    return _nextfind_sync_lock.locked() or _library_sync.state == "RUNNING"
+
+
+def mark_library_sync_started() -> None:
+    _library_sync.state = "RUNNING"
+    _library_sync.created = 0
+    _library_sync.updated = 0
+    _library_sync.error_message = None
+    _library_sync.started_at = utc_now()
+    _library_sync.finished_at = None
+
+
+def mark_library_sync_finished(
+    *, created: int = 0, updated: int = 0, error_message: str | None = None
+) -> None:
+    _library_sync.state = "FAILED" if error_message is not None else "SUCCEEDED"
+    _library_sync.created = created
+    _library_sync.updated = updated
+    _library_sync.error_message = error_message
+    _library_sync.finished_at = utc_now()
+
+
+def settle_library_sync(error_message: str) -> None:
+    """Fail a queued sync that never got to report, so it cannot stay RUNNING."""
+
+    if _library_sync.state == "RUNNING" and not _nextfind_sync_lock.locked():
+        mark_library_sync_finished(error_message=error_message)
+
+
 async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> tuple[int, int]:
     if _nextfind_sync_lock.locked():
         raise AppError(
@@ -223,7 +276,16 @@ async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> t
             retryable=True,
         )
     async with _nextfind_sync_lock:
-        return await _sync_nextfind_locked(session, adapter)
+        mark_library_sync_started()
+        try:
+            created, updated = await _sync_nextfind_locked(session, adapter)
+        except BaseException as exc:
+            mark_library_sync_finished(
+                error_message=exc.message if isinstance(exc, AppError) else "缺失影视同步失败"
+            )
+            raise
+        mark_library_sync_finished(created=created, updated=updated)
+        return created, updated
 
 
 async def _sync_nextfind_locked(

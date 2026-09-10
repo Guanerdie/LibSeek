@@ -11,6 +11,7 @@ from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.simple import automation, service, stats
+from app.simple.background import queue_library_sync, queue_release_search
 from app.simple.integrations import (
     build_nextfind,
     build_pt_site,
@@ -20,11 +21,11 @@ from app.simple.integrations import (
     candidate_details_url,
     close_adapter,
     identify_media,
+    library_sync_running,
+    library_sync_status,
     retry_download,
-    run_release_search,
     submit_download,
     sync_download_statuses,
-    sync_nextfind,
 )
 from app.simple.models import (
     AutomationJob,
@@ -49,6 +50,7 @@ from app.simple.schemas import (
     DownloadPage,
     DownloadView,
     IdentityRequest,
+    LibrarySyncView,
     MediaDetail,
     MediaFilterOptions,
     MediaPage,
@@ -115,15 +117,31 @@ async def library(
     )
 
 
-@router.post("/library/sync", response_model=SyncResult)
-async def sync_library(session: Session, principal: OperatorPrincipal) -> SyncResult:
+@router.post(
+    "/library/sync",
+    response_model=LibrarySyncView,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def sync_library(principal: OperatorPrincipal) -> LibrarySyncView:
+    """Start a NextFind sync in the background and report its progress.
+
+    Paging through the whole missing list can outlast a proxy's read timeout,
+    so the reply comes at once and clients poll ``GET /library/sync``.  A sync
+    already running -- another click, or the scheduler -- is reported rather
+    than started twice.
+    """
+
     del principal
-    adapter = build_nextfind()
-    try:
-        created, updated = await sync_nextfind(session, adapter)
-    finally:
-        await close_adapter(adapter)
-    return SyncResult(created=created, updated=updated)
+    if not library_sync_running():
+        # Missing configuration still fails here, before anything is queued.
+        queue_library_sync(build_nextfind())
+    return LibrarySyncView.model_validate(library_sync_status())
+
+
+@router.get("/library/sync", response_model=LibrarySyncView)
+async def library_sync_progress(principal: ViewerPrincipal) -> LibrarySyncView:
+    del principal
+    return LibrarySyncView.model_validate(library_sync_status())
 
 
 def _automation_outcome(job: AutomationJob | None) -> AutomationOutcomeView | None:
@@ -266,24 +284,27 @@ async def search_media(
     session: Session,
     principal: OperatorPrincipal,
 ) -> SearchDetail:
+    """Start a PT search, or hand back one still running or just finished.
+
+    The search runs in the background -- it walks several query strategies at
+    the site's rate limit, which can outlast a proxy timeout -- and clients
+    poll ``GET /searches/{id}`` until it finishes.
+    """
+
     del principal
-    search, created = await service.get_or_create_search(
+    site_ids = payload.site_ids or (await automation.get_policy(session)).site_ids
+    search, created = await service.start_search(
         session,
         media_id=media_id,
-        site_ids=payload.site_ids,
+        site_ids=site_ids,
         force=payload.force,
     )
     if created:
-        await run_release_search(
-            session,
-            search.id,
-            lambda site_id: build_pt_site(site_id, allow_torrent_fetch=False),
-            metadata_factory=build_tmdb,
-        )
-    completed, candidates = await service.get_search(session, search.id)
+        queue_release_search(search.id)
+    current, candidates = await service.get_search(session, search.id)
     return SearchDetail.model_validate(
         {
-            **SearchView.model_validate(completed).model_dump(),
+            **SearchView.model_validate(current).model_dump(),
             "candidates": [_candidate_view(item) for item in candidates],
         }
     )

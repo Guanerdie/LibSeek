@@ -199,6 +199,35 @@ async def get_or_create_search(
     return search, True
 
 
+async def start_search(
+    session: AsyncSession,
+    *,
+    media_id: str,
+    site_ids: list[str],
+    force: bool = False,
+) -> tuple[ReleaseSearch, bool]:
+    """Return a search to follow, and whether it still has to be run.
+
+    Searches run in the background, so a second click -- or a phone and a
+    browser at once -- would otherwise start the same query while the first
+    answer is still on its way.  A search already in flight for this media and
+    site list is handed back instead; ``force`` only skips *finished* results.
+    """
+
+    in_flight = await session.scalar(
+        select(ReleaseSearch)
+        .where(
+            ReleaseSearch.cache_key == ReleaseSearch.make_cache_key(media_id, site_ids),
+            ReleaseSearch.state.in_((SearchState.PENDING, SearchState.RUNNING)),
+        )
+        .order_by(ReleaseSearch.created_at.desc(), ReleaseSearch.id.desc())
+        .limit(1)
+    )
+    if in_flight is not None:
+        return in_flight, False
+    return await get_or_create_search(session, media_id=media_id, site_ids=site_ids, force=force)
+
+
 async def create_search(
     session: AsyncSession,
     *,

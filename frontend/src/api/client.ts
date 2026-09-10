@@ -18,6 +18,7 @@ import type {
   DailyMediaPage,
   DailyMediaQuery,
   DailySearch,
+  LibrarySyncStatus,
   LoginResponse,
   Page,
   Principal,
@@ -163,8 +164,9 @@ export const configurationApi = {
 }
 
 export const dailyApi = {
-  syncMedia: () =>
-    request<{ created: number; updated: number }>('/api/library/sync', { method: 'POST' }),
+  // The sync runs in the background on the server; poll syncStatus until it ends.
+  syncMedia: () => request<LibrarySyncStatus>('/api/library/sync', { method: 'POST' }),
+  syncStatus: () => request<LibrarySyncStatus>('/api/library/sync'),
   media: (params: DailyMediaQuery = {}) =>
     request<DailyMediaPage>(
       `/api/library?${queryString({
@@ -209,11 +211,13 @@ export const dailyApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tmdb_id: tmdbId }),
     }),
-  createSearch: (mediaId: string, siteIds: string[], force = false) =>
+  // Without siteIds the server searches the sites the automation policy uses.
+  // The search runs in the background; poll search() until it finishes.
+  createSearch: (mediaId: string, siteIds?: string[], force = false) =>
     request<DailySearch>(`/api/library/${encodeURIComponent(mediaId)}/searches`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ site_ids: siteIds, force }),
+      body: JSON.stringify(siteIds ? { site_ids: siteIds, force } : { force }),
     }),
   quickFill: (mediaId: string, force = false) =>
     request<QuickFillResult>(`/api/library/${encodeURIComponent(mediaId)}/quick-fill`, {

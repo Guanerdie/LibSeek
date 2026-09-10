@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import PageHeader from '../components/PageHeader.vue'
@@ -14,6 +14,9 @@ const router = useRouter()
 const daily = useDailyStore()
 const mediaId = computed(() => String(route.params.id))
 const candidates = computed(() => daily.search?.candidates ?? [])
+const searchActive = computed(
+  () => daily.search?.state === 'PENDING' || daily.search?.state === 'RUNNING',
+)
 const tmdbId = ref('')
 const submittingCandidateId = ref<string | null>(null)
 const failedCandidateId = ref<string | null>(null)
@@ -43,7 +46,9 @@ function freeStatusClass(downloadFactor: number | null): string {
 }
 
 async function startSearch(force = false): Promise<void> {
-  await daily.startSearch(mediaId.value, ['avistaz'], force)
+  // No explicit sites: the server searches the ones the automation policy
+  // uses, so quick fill and the scheduler read the same cached result.
+  await daily.startSearch(mediaId.value, undefined, force)
   if (daily.search) {
     await router.replace({ query: { search: daily.search.id } })
   }
@@ -160,8 +165,10 @@ async function download(candidate: DailyCandidate): Promise<void> {
 onMounted(async () => {
   await daily.loadMediaDetail(mediaId.value)
   const querySearchId = typeof route.query.search === 'string' ? route.query.search : null
+  // A search still running -- started here earlier, or by automation -- is
+  // followed until it answers; a finished one is loaded with its candidates.
   const searchId =
-    querySearchId ?? (daily.search?.state === 'SUCCEEDED' ? daily.search.id : null)
+    querySearchId ?? (daily.search && daily.search.state !== 'FAILED' ? daily.search.id : null)
   if (searchId) {
     await daily.loadSearch(searchId)
     return
@@ -173,6 +180,8 @@ onMounted(async () => {
   // re-running it would hide the failure the operator needs to see.
   if (!daily.search && daily.selectedMedia?.tmdb_id) await startSearch(false)
 })
+
+onBeforeUnmount(() => daily.stopFollowingSearch())
 </script>
 
 <template>
@@ -192,11 +201,11 @@ onMounted(async () => {
       </button>
       <button
         class="button"
-        :disabled="daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id"
+        :disabled="daily.mediaDetailLoading || !daily.selectedMedia?.tmdb_id || searchActive"
         title="跳过 5 分钟内的缓存结果，重新向站点发起搜索"
         @click="startSearch(true)"
       >
-        重新搜索
+        {{ searchActive ? '搜索中…' : '重新搜索' }}
       </button>
       <button
         v-if="daily.selectedMedia"
@@ -307,6 +316,10 @@ onMounted(async () => {
       </div>
       <StatusPill :status="daily.search.state" :label="statusLabel(daily.search.state)" />
     </div>
+
+    <p v-if="searchActive" class="panel compact-panel muted search-progress" role="status">
+      正在向站点搜索，结果出来后会自动显示，可以先离开这个页面。
+    </p>
 
     <PageState
       v-if="daily.search?.state === 'SUCCEEDED'"

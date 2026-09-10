@@ -22,6 +22,7 @@ from app.db.session import SessionFactory
 from app.errors import AppError
 from app.schemas.common import ErrorResponse
 from app.simple import routes as daily
+from app.simple.background import cancel_background_tasks, recover_interrupted_searches
 from app.simple.integrations import build_pt_site
 from app.simple.retention import history_retention_loop
 
@@ -32,6 +33,7 @@ settings = get_settings()
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     async with SessionFactory() as session:
+        await recover_interrupted_searches(session)
         await recover_interrupted_jobs(session)
 
     stop = asyncio.Event()
@@ -53,6 +55,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await cancel_manual_automation_runs()
+        await cancel_background_tasks()
         if tasks:
             stop.set()
             await asyncio.gather(*tasks)

@@ -72,17 +72,38 @@ class MediaPage(BaseModel):
 
 
 class SearchCreate(BaseModel):
-    site_ids: list[str] = Field(min_length=1, max_length=10)
+    # Omitted: search the sites the automation policy uses -- the same search
+    # quick fill and the scheduler read back from the result cache.
+    site_ids: list[str] | None = Field(default=None, min_length=1, max_length=10)
     # Skip the short-lived result cache; the UI's refresh button sets this.
     force: bool = False
 
     @field_validator("site_ids")
     @classmethod
-    def normalize_sites(cls, values: list[str]) -> list[str]:
+    def normalize_sites(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
         normalized = list(dict.fromkeys(value.strip().lower() for value in values if value.strip()))
         if not normalized:
             raise ValueError("at least one site is required")
         return normalized
+
+
+class LibrarySyncView(BaseModel):
+    """Progress of the background NextFind sync.
+
+    ``created`` and ``updated`` keep the old synchronous response readable
+    for clients that still treat the POST reply as the finished result.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    state: Literal["IDLE", "RUNNING", "SUCCEEDED", "FAILED"]
+    created: int = 0
+    updated: int = 0
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class SearchView(BaseModel):

@@ -281,6 +281,17 @@ export interface DailySearch {
   candidates?: DailyCandidate[]
 }
 
+export type LibrarySyncState = 'IDLE' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+export interface LibrarySyncStatus {
+  state: LibrarySyncState
+  created: number
+  updated: number
+  error_message: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
 export interface DailyDownload {
   id: string
   media_id: string

@@ -8,8 +8,36 @@ import type {
   DailyMediaFilterOptions,
   DailyMediaQuery,
   DailySearch,
+  LibrarySyncStatus,
   QuickFillResult,
 } from '../types'
+
+// Searches and NextFind syncs run on the server in the background; the page
+// follows them by polling instead of holding one request open for minutes.
+const SEARCH_POLL_INTERVAL_MS = 1000
+const SEARCH_POLL_LIMIT_MS = 5 * 60_000
+const SYNC_POLL_INTERVAL_MS = 1500
+const SYNC_POLL_LIMIT_MS = 15 * 60_000
+
+function isSearchActive(search: DailySearch | null): boolean {
+  return search?.state === 'PENDING' || search?.state === 'RUNNING'
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms))
+}
+
+/** Poll a background NextFind sync until it ends; null if it outlasts the wait. */
+async function followLibrarySync(initial: LibrarySyncStatus): Promise<LibrarySyncStatus | null> {
+  let status = initial
+  const deadline = Date.now() + SYNC_POLL_LIMIT_MS
+  while (status.state === 'RUNNING') {
+    if (Date.now() > deadline) return null
+    await sleep(SYNC_POLL_INTERVAL_MS)
+    status = await dailyApi.syncStatus()
+  }
+  return status
+}
 
 interface DailyState {
   media: DailyMedia[]
@@ -34,6 +62,7 @@ interface DailyState {
   downloadsError: string | null
   mediaRequestSequence: number
   mediaListRequests: number
+  searchPollGeneration: number
 }
 
 export const useDailyStore = defineStore('daily', {
@@ -60,6 +89,7 @@ export const useDailyStore = defineStore('daily', {
     downloadsError: null,
     mediaRequestSequence: 0,
     mediaListRequests: 0,
+    searchPollGeneration: 0,
   }),
   actions: {
     async syncMedia(): Promise<void> {
@@ -68,7 +98,19 @@ export const useDailyStore = defineStore('daily', {
       this.mediaSyncing = true
       this.mediaError = null
       try {
-        await dailyApi.syncMedia()
+        let status = await dailyApi.syncMedia()
+        if (status.state === 'RUNNING') {
+          const finished = await followLibrarySync(status)
+          if (finished === null) {
+            this.mediaError = '同步仍在后台进行，请稍后刷新列表'
+            return
+          }
+          status = finished
+        }
+        if (status.state === 'FAILED') {
+          this.mediaError = status.error_message || '无法同步缺失影视'
+          return
+        }
         const requestSequence = ++this.mediaRequestSequence
         const response = await dailyApi.media(this.mediaQuery)
         if (requestSequence === this.mediaRequestSequence) {
@@ -113,6 +155,7 @@ export const useDailyStore = defineStore('daily', {
       this.resourceError = null
       this.selectedMedia = null
       this.search = null
+      this.stopFollowingSearch()
       try {
         const selectedMedia = await dailyApi.mediaDetail(mediaId)
         this.selectedMedia = selectedMedia
@@ -164,18 +207,55 @@ export const useDailyStore = defineStore('daily', {
         return false
       }
     },
-    async startSearch(mediaId: string, siteIds: string[], force = false): Promise<void> {
+    /** Omitting ``siteIds`` searches the sites the automation policy uses. */
+    async startSearch(mediaId: string, siteIds?: string[], force = false): Promise<void> {
       this.resourceError = null
       try {
         this.search = await dailyApi.createSearch(mediaId, siteIds, force)
+        await this.followSearch()
       } catch (error) {
         this.resourceError = error instanceof ApiError ? error.message : '无法开始搜索'
       }
     },
+    /**
+     * Poll the current search until the site has answered.
+     *
+     * Resolves to the finished search, or null once a newer search, another
+     * media item or leaving the page took over -- or the wait ran out.
+     */
+    async followSearch(): Promise<DailySearch | null> {
+      const generation = ++this.searchPollGeneration
+      const deadline = Date.now() + SEARCH_POLL_LIMIT_MS
+      while (this.search && isSearchActive(this.search)) {
+        if (Date.now() > deadline) {
+          this.resourceError = '搜索仍在后台进行，请稍后刷新页面查看结果'
+          return null
+        }
+        await sleep(SEARCH_POLL_INTERVAL_MS)
+        if (generation !== this.searchPollGeneration) return null
+        const next = await dailyApi.search(this.search.id)
+        if (generation !== this.searchPollGeneration) return null
+        this.search = next
+      }
+      return this.search
+    },
+    stopFollowingSearch(): void {
+      this.searchPollGeneration += 1
+    },
     async quickFill(mediaId: string, force = false): Promise<QuickFillResult | null> {
       this.resourceError = null
       try {
-        const result = await dailyApi.quickFill(mediaId, force)
+        // Search first and follow it like any other search; quick fill then
+        // reuses that fresh result instead of holding one request open across
+        // the whole PT search.
+        this.search = await dailyApi.createSearch(mediaId, undefined, force)
+        const finished = await this.followSearch()
+        if (!finished) return null
+        if (finished.state === 'FAILED') {
+          this.resourceError = finished.error_message || '搜索失败'
+          return null
+        }
+        const result = await dailyApi.quickFill(mediaId, false)
         this.search = result.search
         this.selectedMedia = await dailyApi.mediaDetail(mediaId)
         return result
@@ -188,6 +268,7 @@ export const useDailyStore = defineStore('daily', {
       this.resourceError = null
       try {
         this.search = await dailyApi.search(searchId)
+        await this.followSearch()
       } catch (error) {
         this.resourceError = error instanceof ApiError ? error.message : '无法读取搜索结果'
       }
