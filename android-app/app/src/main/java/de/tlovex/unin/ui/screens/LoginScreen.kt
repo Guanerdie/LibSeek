@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -106,6 +107,13 @@ fun LoginScreen(
                         isError = state.loginError != null,
                         supportingText = state.loginError?.let { message -> { Text(message) } },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                if (state.username.isNotBlank() && state.password.isNotBlank()) {
+                                    callbacks.onLogin()
+                                }
+                            },
+                        ),
                     )
                     Spacer(Modifier.height(10.dp))
                     Row(
