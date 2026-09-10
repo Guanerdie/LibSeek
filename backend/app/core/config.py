@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     rss_matcher_enabled: bool = False
     rss_matcher_poll_seconds: int = Field(default=600, ge=60, le=3600)
     rss_matcher_window_hours: int = Field(default=1, ge=1, le=24)
+    # Automation runs, jobs, searches and the activity log older than this are
+    # pruned once a day.  Rows that still steer behaviour are kept regardless;
+    # see app.simple.retention.  0 turns pruning off.
+    history_retention_days: int = Field(default=90, ge=0, le=3650)
     runtime_config_dir: Path = Field(
         default=Path("/var/lib/unin"),
         validation_alias=AliasChoices("UNIN_RUNTIME_CONFIG_DIR", "runtime_config_dir"),
@@ -194,6 +198,14 @@ class Settings(BaseSettings):
         ):
             raise ValueError("invalid outbound proxy URL")
         return value.rstrip("/")
+
+    @field_validator("history_retention_days")
+    @classmethod
+    def validate_history_retention(cls, value: int) -> int:
+        # The score histogram looks back 30 days; anything shorter starves it.
+        if 0 < value < 30:
+            raise ValueError("history retention must be 0 (off) or at least 30 days")
+        return value
 
     @staticmethod
     def _read_secret(secret: SecretStr | None, path: Path | None) -> str | None:

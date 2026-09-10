@@ -56,3 +56,24 @@ async def test_disabled_scheduler_still_recovers_running_jobs(
         assert recovered.state == AutomationJobState.RETRY_WAIT
         assert recovered.next_attempt_at is not None
         assert recovered.error_message == "上次执行被应用重启中断，等待重试"
+
+
+@pytest.mark.asyncio
+async def test_history_retention_runs_in_the_background(
+    session_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retention = AsyncMock()
+    monkeypatch.setattr(main_module, "SessionFactory", session_factory)
+    monkeypatch.setattr(main_module, "history_retention_loop", retention)
+    monkeypatch.setattr(
+        main_module,
+        "settings",
+        main_module.settings.model_copy(
+            update={"automation_scheduler_enabled": False, "history_retention_days": 90}
+        ),
+    )
+
+    async with main_module.lifespan(main_module.app):
+        pass
+
+    retention.assert_awaited_once()

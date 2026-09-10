@@ -23,6 +23,7 @@ from app.errors import AppError
 from app.schemas.common import ErrorResponse
 from app.simple import routes as daily
 from app.simple.integrations import build_pt_site
+from app.simple.retention import history_retention_loop
 
 settings = get_settings()
 
@@ -37,6 +38,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     tasks: list[asyncio.Task[None]] = []
     if settings.automation_scheduler_enabled:
         tasks.append(asyncio.create_task(automation_scheduler_loop(stop)))
+    if settings.history_retention_days > 0:
+        tasks.append(asyncio.create_task(history_retention_loop(stop)))
     if settings.rss_matcher_enabled:
         tasks.append(
             asyncio.create_task(
