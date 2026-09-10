@@ -350,7 +350,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         }
         val downloadsRequest = async { loadAllDownloads() }
         val policyRequest = async { repository.automationPolicy() }
-        val jobsRequest = async { loadAllAutomationJobs() }
+        val jobsRequest = async { loadRecentAutomationJobs() }
         val latestRunRequest = async { repository.latestAutomationRun() }
         val configurationRequest = if (currentRole == AuthRole.ADMIN) {
             async { repository.configurationStatus() }
@@ -972,7 +972,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadAutomation() {
         launchAction("无法读取自动化配置") {
             val policy = repository.automationPolicy()
-            val jobs = loadAllAutomationJobs()
+            val jobs = loadRecentAutomationJobs()
             val latestRun = repository.latestAutomationRun()
             // The monitoring numbers are a nicety; losing them must not cost
             // the operator the policy and the job history.
@@ -1088,7 +1088,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshAutomationStatus() {
         launchAction("无法检查自动化运行状态") {
             val policy = repository.automationPolicy()
-            val jobs = loadAllAutomationJobs()
+            val jobs = loadRecentAutomationJobs()
             val latestRun = repository.latestAutomationRun()
             currentPolicy = policy
             pendingPolicy = policy.toUpdate()
@@ -1117,7 +1117,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun reconcileUnknownAutomationRun() {
         rememberUnknownAutomationRun()
         val policy = runCatching { repository.automationPolicy() }.getOrNull()
-        val jobs = runCatching { loadAllAutomationJobs() }.getOrNull()
+        val jobs = runCatching { loadRecentAutomationJobs() }.getOrNull()
         val latestRunResult = runCatching { repository.latestAutomationRun() }
         val latestRun = latestRunResult.getOrNull()
         val resolved = latestRunResult.isSuccess && latestRun?.isActive != true
@@ -1219,7 +1219,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
 
                 clearUnknownAutomationRun()
                 val jobs = try {
-                    loadAllAutomationJobs()
+                    loadRecentAutomationJobs()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -1279,7 +1279,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 val retryJob = repository.retryAutomationJob(run.id)
                 startAutomationRunPolling(retryJob.runId)
                 val jobs = try {
-                    loadAllAutomationJobs()
+                    loadRecentAutomationJobs()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Throwable) {
@@ -1648,14 +1648,21 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         return items
     }
 
-    private suspend fun loadAllAutomationJobs(): List<AutomationJobDto> {
+    /**
+     * The newest automation jobs, up to [AUTOMATION_HISTORY_LIMIT].
+     *
+     * Every scheduled run adds jobs and the server never prunes them, so reading
+     * the whole history cost one more request per hundred jobs on every app
+     * start and every visit to the automation tab. The phone lists recent runs;
+     * the full paged record stays on the web.
+     */
+    private suspend fun loadRecentAutomationJobs(): List<AutomationJobDto> {
         val first = repository.automationJobs(page = 1, pageSize = PAGE_SIZE)
         val items = first.items.toMutableList()
-        val pages = (first.total + PAGE_SIZE - 1) / PAGE_SIZE
-        for (page in 2..pages) {
+        recentWindowPages(first.total, PAGE_SIZE, AUTOMATION_HISTORY_LIMIT).forEach { page ->
             items += repository.automationJobs(page = page, pageSize = PAGE_SIZE).items
         }
-        return items
+        return items.take(AUTOMATION_HISTORY_LIMIT)
     }
 
     private fun List<MediaSummaryDto>.toMissingMedia(
@@ -2291,6 +2298,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val PAGE_SIZE = 100
+        const val AUTOMATION_HISTORY_LIMIT = 200
         const val DEFAULT_PT_SITE = "avistaz"
         // Enough to explain a run at a glance without turning the row into a wall.
         const val MAX_REJECTION_REASONS = 2

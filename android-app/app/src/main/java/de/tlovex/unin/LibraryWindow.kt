@@ -19,11 +19,7 @@ internal object LibraryWindow {
         MediaState.NEEDS_ATTENTION,
     )
 
-    fun additionalPages(total: Int): List<Int> {
-        val cappedTotal = total.coerceIn(0, maxItems)
-        val pageCount = (cappedTotal + pageSize - 1) / pageSize
-        return if (pageCount <= 1) emptyList() else (2..pageCount).toList()
-    }
+    fun additionalPages(total: Int): List<Int> = recentWindowPages(total, pageSize, maxItems)
 
     fun combine(pages: List<List<MediaSummaryDto>>): List<MediaSummaryDto> = pages
         .asSequence()
@@ -37,4 +33,15 @@ internal object LibraryWindow {
         runCatching { Instant.parse(updatedAt) }.getOrElse {
             runCatching { OffsetDateTime.parse(updatedAt).toInstant() }.getOrDefault(Instant.MIN)
         }
+}
+
+/**
+ * Pages after the first needed to read at most [maxItems] of a newest-first server list.
+ *
+ * The phone shows what is recent; the server keeps the rest of the history.
+ */
+internal fun recentWindowPages(total: Int, pageSize: Int, maxItems: Int): List<Int> {
+    val cappedTotal = total.coerceIn(0, maxItems)
+    val pageCount = (cappedTotal + pageSize - 1) / pageSize
+    return if (pageCount <= 1) emptyList() else (2..pageCount).toList()
 }

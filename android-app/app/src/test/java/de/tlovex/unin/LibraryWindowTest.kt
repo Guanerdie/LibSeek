@@ -27,6 +27,16 @@ class LibraryWindowTest {
     }
 
     @Test
+    fun `reads only the newest window of a longer history`() {
+        assertEquals(emptyList<Int>(), recentWindowPages(total = 0, pageSize = 100, maxItems = 200))
+        assertEquals(emptyList<Int>(), recentWindowPages(total = 100, pageSize = 100, maxItems = 200))
+        assertEquals(listOf(2), recentWindowPages(total = 150, pageSize = 100, maxItems = 200))
+        // Fourteen thousand jobs still cost two requests, not a hundred and forty.
+        assertEquals(listOf(2), recentWindowPages(total = 14_000, pageSize = 100, maxItems = 200))
+        assertEquals(listOf(2, 3), recentWindowPages(total = 14_000, pageSize = 30, maxItems = 90))
+    }
+
+    @Test
     fun `keeps the latest unique items inside the mobile display limit`() {
         val items = (0..LibraryWindow.maxItems + 5).map { index ->
             media(
