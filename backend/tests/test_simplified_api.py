@@ -185,6 +185,56 @@ async def test_library_api_filters_by_nextfind_region_and_common_fields(
 
 
 @pytest.mark.asyncio
+async def test_library_api_accepts_several_states_at_once(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        session.add_all(
+            [
+                LibraryMediaItem(
+                    source_item_id=f"state-{state.value}",
+                    media_type=MediaType.MOVIE,
+                    title=f"State {state.value}",
+                    state=state,
+                )
+                for state in (MediaState.READY, MediaState.CANDIDATES, MediaState.COMPLETE)
+            ]
+        )
+        await session.commit()
+
+    async def session_override() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async def viewer_override() -> Principal:
+        return Principal(
+            username="viewer",
+            role=AuthRole.VIEWER,
+            issued_at=0,
+            expires_at=2_000_000_000,
+            csrf_digest="test",
+        )
+
+    app.dependency_overrides[get_session] = session_override
+    app.dependency_overrides[get_viewer_principal] = viewer_override
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            several = await client.get(
+                "/api/library", params=[("state", "READY"), ("state", "CANDIDATES")]
+            )
+            single = await client.get("/api/library", params={"state": "COMPLETE"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert several.status_code == 200
+    assert sorted(item["state"] for item in several.json()["items"]) == ["CANDIDATES", "READY"]
+    assert several.json()["total"] == 2
+    assert [item["state"] for item in single.json()["items"]] == ["COMPLETE"]
+
+
+@pytest.mark.asyncio
 async def test_media_detail_returns_latest_failed_search_with_error_message(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

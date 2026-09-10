@@ -79,7 +79,9 @@ def _candidate_view(candidate: ReleaseCandidate) -> CandidateView:
 async def library(
     session: Session,
     principal: ViewerPrincipal,
-    state: MediaState | None = None,
+    # Repeatable (?state=READY&state=CANDIDATES) so a client can ask for every
+    # open state in one request instead of one request per state.
+    state: Annotated[list[MediaState] | None, Query()] = None,
     media_type: MediaType | None = None,
     region: NextFindRegion | None = None,
     year: int | None = Query(default=None, ge=1870, le=2200),
@@ -90,7 +92,7 @@ async def library(
     del principal
     items, total = await service.list_media(
         session,
-        state=state,
+        states=state,
         media_type=media_type,
         region=region,
         year=year,

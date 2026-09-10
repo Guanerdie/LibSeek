@@ -22,13 +22,13 @@ from app.simple.models import (
     ReleaseSearch,
     SearchState,
 )
-from app.simple.regions import NEXTFIND_REGION_ORDER, NextFindRegion, nextfind_regions
+from app.simple.regions import NEXTFIND_REGION_ORDER, NextFindRegion, region_tag
 
 
 async def list_media(
     session: AsyncSession,
     *,
-    state: MediaState | None,
+    states: Sequence[MediaState] | None,
     media_type: MediaType | None,
     region: NextFindRegion | None,
     year: int | None,
@@ -37,10 +37,12 @@ async def list_media(
     page_size: int,
 ) -> tuple[list[LibraryMediaItem], int]:
     filters: list[ColumnElement[bool]] = []
-    if state is not None:
-        filters.append(LibraryMediaItem.state == state)
+    if states:
+        filters.append(LibraryMediaItem.state.in_(states))
     if media_type is not None:
         filters.append(LibraryMediaItem.media_type == media_type)
+    if region is not None:
+        filters.append(LibraryMediaItem.region_tags.contains(region_tag(region), autoescape=True))
     if year is not None:
         filters.append(LibraryMediaItem.year == year)
     if query and (term := query.strip()):
@@ -51,24 +53,13 @@ async def list_media(
             )
         )
 
-    statement = (
-        select(LibraryMediaItem)
-        .where(*filters)
-        .order_by(LibraryMediaItem.updated_at.desc())
-    )
-    if region is not None:
-        all_rows = list(await session.scalars(statement))
-        matching = [
-            item
-            for item in all_rows
-            if region in nextfind_regions(item.country_codes, item.original_language)
-        ]
-        start = (page - 1) * page_size
-        return matching[start : start + page_size], len(matching)
-
     total = await session.scalar(select(func.count()).select_from(LibraryMediaItem).where(*filters))
     page_rows = await session.scalars(
-        statement.offset((page - 1) * page_size).limit(page_size)
+        select(LibraryMediaItem)
+        .where(*filters)
+        .order_by(LibraryMediaItem.updated_at.desc(), LibraryMediaItem.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     return list(page_rows), int(total or 0)
 
@@ -76,21 +67,15 @@ async def list_media(
 async def media_filter_options(
     session: AsyncSession,
 ) -> tuple[list[MediaType], list[NextFindRegion], list[MediaState], list[int]]:
-    rows = await session.execute(
-        select(
-            LibraryMediaItem.media_type,
-            LibraryMediaItem.state,
-            LibraryMediaItem.year,
-        )
-    )
-    media_types: set[MediaType] = set()
-    states: set[MediaState] = set()
-    years: set[int] = set()
-    for media_type, state, year in rows:
-        media_types.add(media_type)
-        states.add(state)
-        if year is not None:
-            years.add(year)
+    # One DISTINCT per column: the options are a handful of values, and reading
+    # a row per media item to find them grew with the library.
+    media_types = set(await session.scalars(select(LibraryMediaItem.media_type).distinct()))
+    states = set(await session.scalars(select(LibraryMediaItem.state).distinct()))
+    years = {
+        year
+        for year in await session.scalars(select(LibraryMediaItem.year).distinct())
+        if year is not None
+    }
     return (
         sorted(media_types, key=lambda item: item.value),
         list(NEXTFIND_REGION_ORDER),

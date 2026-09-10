@@ -68,3 +68,18 @@ def nextfind_regions(
         for region in NEXTFIND_REGION_ORDER
         if language in _LANGUAGE_CODES[region]
     ]
+
+
+def region_tags(country_codes: Iterable[str] | None, original_language: str | None) -> str:
+    """The regions as one delimited string, e.g. ``"|欧美|日本|"``.
+
+    Stored on each media row so the list filter can run in SQL; a filter looks
+    for ``region_tag(region)`` inside it.
+    """
+
+    regions = nextfind_regions(country_codes, original_language)
+    return f"|{'|'.join(regions)}|" if regions else ""
+
+
+def region_tag(region: NextFindRegion) -> str:
+    return f"|{region.value}|"

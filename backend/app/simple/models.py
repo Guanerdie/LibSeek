@@ -17,13 +17,14 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.time import utc_now
 from app.db.base import Base
 from app.models.enums import MediaType
-from app.simple.regions import NextFindRegion, nextfind_regions
+from app.simple.regions import NextFindRegion, nextfind_regions, region_tags
 
 
 def new_id() -> str:
@@ -141,9 +142,22 @@ class LibraryMediaItem(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    # The NextFind regions as "|欧美|日本|", so the list filter runs in SQL
+    # instead of loading the library to derive them.  Always recomputed from
+    # country_codes and original_language by the listener below.
+    region_tags: Mapped[str] = mapped_column(
+        String(64), default="", server_default="", nullable=False
+    )
+
     @property
     def regions(self) -> list[NextFindRegion]:
         return list(nextfind_regions(self.country_codes, self.original_language))
+
+
+@event.listens_for(LibraryMediaItem, "before_insert")
+@event.listens_for(LibraryMediaItem, "before_update")
+def _derive_region_tags(_mapper: object, _connection: object, target: LibraryMediaItem) -> None:
+    target.region_tags = region_tags(target.country_codes, target.original_language)
 
 
 class Episode(Base):

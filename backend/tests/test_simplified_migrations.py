@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from alembic import command
 
@@ -57,6 +57,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     assert "original_language" in library_columns
     assert "search_titles" in library_columns
     assert "imdb_id" in library_columns
+    assert "region_tags" in library_columns
     candidate_columns = {
         column["name"]: column for column in inspector.get_columns("release_candidates")
     }
@@ -150,4 +151,46 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     engine = create_engine(sqlite_url(database, async_driver=False))
     assert inspect(engine).get_table_names() == ["alembic_version"]
     engine.dispose()
+    database.unlink()
+
+
+def test_region_tags_are_backfilled_for_media_already_in_the_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_root = Path(__file__).parents[1]
+    database = backend_root / f".test-migration-{uuid4().hex}.db"
+    monkeypatch.setenv("DATABASE_URL", sqlite_url(database, async_driver=True))
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    command.upgrade(config, "20260909_0022")
+
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.begin() as connection:
+        for media_id, countries, language in (
+            ("tagged", '["JP", "US"]', "ja"),
+            ("untagged", "[]", None),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO library_media (id, source, source_item_id, media_type, title,"
+                    " state, discovered_at, updated_at, country_codes, original_language)"
+                    " VALUES (:id, 'nextfind', :id, 'tv', :id, 'READY',"
+                    " '2026-09-01 00:00:00', '2026-09-01 00:00:00', :countries, :language)"
+                ),
+                {"id": media_id, "countries": countries, "language": language},
+            )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.connect() as connection:
+        tags = dict(connection.execute(text("SELECT id, region_tags FROM library_media")).all())
+    engine.dispose()
+    assert tags == {"tagged": "|欧美|日本|", "untagged": ""}
+
+    command.downgrade(config, "20260909_0022")
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    library_columns = {column["name"] for column in inspect(engine).get_columns("library_media")}
+    engine.dispose()
+    assert "region_tags" not in library_columns
     database.unlink()
