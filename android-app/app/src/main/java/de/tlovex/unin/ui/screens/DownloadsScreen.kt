@@ -22,7 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,7 +51,7 @@ fun DownloadsScreen(
     contentPadding: androidx.compose.foundation.layout.PaddingValues,
     modifier: Modifier = Modifier,
 ) {
-    var page by remember { mutableStateOf(0) }
+    var page by remember { mutableIntStateOf(0) }
     val pageSize = 8
     val totalItems = state.downloads.size
     val pages = pageCount(totalItems, pageSize)

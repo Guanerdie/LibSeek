@@ -22,6 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -58,7 +59,7 @@ fun AutomationScreen(
 ) {
     val policy = state.automationPolicy
     var liveConfirmation by remember { mutableStateOf<LiveAutomationConfirmation?>(null) }
-    var page by remember { mutableStateOf(0) }
+    var page by remember { mutableIntStateOf(0) }
     val pageSize = 8
     val totalItems = state.automationRuns.size
     val pages = pageCount(totalItems, pageSize)

@@ -33,6 +33,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -752,7 +753,7 @@ private fun AccountPasswordCard(state: UninUiState, callbacks: UninCallbacks) {
     var currentPassword by remember { mutableStateOf("") }
     var newPassword by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    var handledChangeCount by remember { mutableStateOf(state.passwordChangeCount) }
+    var handledChangeCount by remember { mutableIntStateOf(state.passwordChangeCount) }
 
     LaunchedEffect(state.passwordChangeCount) {
         if (state.passwordChangeCount != handledChangeCount) {
