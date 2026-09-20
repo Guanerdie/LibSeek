@@ -26,6 +26,7 @@ from app.simple.models import (
     MediaState,
     ReleaseCandidate,
 )
+from app.simple.schemas import AutomationPolicyUpdate
 
 REALITY = 10764
 TALK = 10767
@@ -330,13 +331,13 @@ def test_an_ordinary_series_is_complete() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _library_item(*, genres: list[int]) -> LibraryMediaItem:
+def _library_item(*, genres: list[int], year: int | None = 2026) -> LibraryMediaItem:
     return LibraryMediaItem(
         source_item_id="scope-1",
         media_type=MediaType.TV,
         tmdb_id=1,
         title="Show",
-        year=2026,
+        year=year,
         genre_ids=genres,
         state=MediaState.READY,
     )
@@ -374,3 +375,32 @@ def test_manual_selection_cannot_smuggle_a_variety_show_past_the_switch() -> Non
     policy = _policy(scope_mode="selected", selected_media_ids=[item.id])
 
     assert not _media_in_policy_scope(policy, item)
+
+
+def test_policy_years_are_normalized_for_display_and_storage() -> None:
+    policy = AutomationPolicyUpdate(years=[2024, 2026, 2024, 2025])
+
+    assert policy.years == [2026, 2025, 2024]
+
+
+def test_policy_years_reject_values_outside_media_year_range() -> None:
+    with pytest.raises(ValueError, match="1870 and 2200"):
+        AutomationPolicyUpdate(years=[1869])
+
+
+def test_policy_year_filter_excludes_other_and_unknown_years() -> None:
+    from app.simple.automation import _media_in_policy_scope
+
+    policy = _policy(years=[2026, 2025])
+
+    assert _media_in_policy_scope(policy, _library_item(genres=[18], year=2026))
+    assert not _media_in_policy_scope(policy, _library_item(genres=[18], year=2024))
+    assert not _media_in_policy_scope(policy, _library_item(genres=[18], year=None))
+
+
+def test_empty_policy_year_filter_keeps_all_years() -> None:
+    from app.simple.automation import _media_in_policy_scope
+
+    policy = _policy(years=[])
+
+    assert _media_in_policy_scope(policy, _library_item(genres=[18], year=None))

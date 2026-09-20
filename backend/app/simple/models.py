@@ -367,6 +367,9 @@ class AutomationPolicy(Base):
     auto_identify: Mapped[bool] = mapped_column(default=True, nullable=False)
     scope_mode: Mapped[str] = mapped_column(String(16), default="filters", nullable=False)
     regions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Empty means every release year.  This is a policy scope filter rather
+    # than a media identity constraint, so existing policies remain open.
+    years: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     selected_media_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     site_ids: Mapped[list[str]] = mapped_column(JSON, default=lambda: ["avistaz"], nullable=False)
     media_types: Mapped[list[str]] = mapped_column(

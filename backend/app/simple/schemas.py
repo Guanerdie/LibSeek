@@ -255,6 +255,7 @@ class AutomationPolicyUpdate(BaseModel):
     auto_identify: bool = True
     scope_mode: Literal["filters", "selected"] = "filters"
     regions: list[NextFindRegion] = Field(default_factory=list, max_length=6)
+    years: list[int] = Field(default_factory=list, max_length=100)
     selected_media_ids: list[str] = Field(default_factory=list, max_length=500)
     site_ids: list[str] = Field(default_factory=lambda: ["avistaz"], min_length=1, max_length=10)
     media_types: list[MediaType] = Field(
@@ -300,6 +301,13 @@ class AutomationPolicyUpdate(BaseModel):
     @classmethod
     def normalize_selected_media_ids(cls, values: list[str]) -> list[str]:
         return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @field_validator("years")
+    @classmethod
+    def normalize_years(cls, values: list[int]) -> list[int]:
+        if any(year < 1870 or year > 2200 for year in values):
+            raise ValueError("years must be between 1870 and 2200")
+        return sorted(set(values), reverse=True)
 
     @model_validator(mode="after")
     def require_manual_selection(self) -> AutomationPolicyUpdate:

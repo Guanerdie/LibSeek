@@ -32,6 +32,7 @@ const policy: AutomationPolicy = {
   auto_identify: true,
   scope_mode: 'filters',
   regions: [],
+  years: [2026],
   selected_media_ids: [],
   site_ids: ['avistaz'],
   media_types: ['movie', 'tv'],
@@ -120,7 +121,7 @@ beforeEach(() => {
   mocks.latestRun.mockResolvedValue(null)
   mocks.media.mockResolvedValue({
     items: [], total: 0, page: 1, page_size: 100,
-    filter_options: { media_types: [], regions: [], states: [], years: [] },
+    filter_options: { media_types: [], regions: [], states: [], years: [2026, 2025, 2024] },
   })
 })
 
@@ -188,6 +189,28 @@ describe('automation settings', () => {
         cooldown_tier_3_hours: 96,
       }),
     )
+  })
+
+  it('saves the selected automation years', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.get('input[name="year-2025"]').setValue(true)
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ years: [2026, 2025] }),
+    )
+  })
+
+  it('places the search strategy before the run history', async () => {
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    const form = wrapper.get('form[aria-labelledby="automation-policy-title"]')
+    const history = wrapper.get('.automation-history')
+    expect(form.element.compareDocumentPosition(history.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('leaves variety out of automation unless the switch is on', async () => {

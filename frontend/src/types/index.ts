@@ -314,6 +314,7 @@ export interface AutomationPolicy {
   auto_identify: boolean
   scope_mode: 'filters' | 'selected'
   regions: DailyMediaRegion[]
+  years: number[]
   selected_media_ids: string[]
   site_ids: string[]
   media_types: DailyMediaType[]

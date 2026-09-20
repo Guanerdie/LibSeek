@@ -70,6 +70,10 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     assert automation_job_columns["retry_of_job_id"]["nullable"] is True
     assert automation_job_columns["superseded_at"]["nullable"] is True
     assert automation_job_columns["error_code"]["nullable"] is True
+    automation_policy_columns = {
+        column["name"] for column in inspector.get_columns("automation_policy")
+    }
+    assert "years" in automation_policy_columns
     search_columns = {column["name"]: column for column in inspector.get_columns("searches")}
     assert search_columns["cache_key"]["nullable"] is True
     assert search_columns["cache_expires_at"]["nullable"] is True

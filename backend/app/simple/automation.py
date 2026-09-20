@@ -641,6 +641,8 @@ async def run_automation(
         )
         if not policy.auto_identify or metadata_factory is None:
             statement = statement.where(LibraryMediaItem.tmdb_id.is_not(None))
+        if policy.scope_mode == "filters" and policy.years:
+            statement = statement.where(LibraryMediaItem.year.in_(policy.years))
         if retry_media_ids:
             statement = statement.where(LibraryMediaItem.id.not_in(retry_media_ids))
         if policy.scope_mode == "selected":
@@ -1119,6 +1121,8 @@ def _media_in_policy_scope(policy: AutomationPolicy, media: LibraryMediaItem) ->
         return False
     if policy.scope_mode == "selected":
         return media.id in set(policy.selected_media_ids)
+    if policy.years and media.year not in policy.years:
+        return False
     if not policy.regions:
         return True
     allowed_regions = {NextFindRegion(value) for value in policy.regions}

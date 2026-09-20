@@ -24,6 +24,7 @@ const form = reactive({
   auto_identify: true,
   scope_mode: 'filters' as 'filters' | 'selected',
   regions: [] as DailyMediaRegion[],
+  years: [] as number[],
   selected_media_ids: [] as string[],
   site_ids: ['avistaz'],
   media_types: ['movie', 'tv'] as Array<'movie' | 'tv'>,
@@ -95,6 +96,7 @@ const mediaOptionsTotal = ref(0)
 const mediaOptionsPage = ref(1)
 const mediaOptionsPageSize = 10
 const mediaOptionsLoading = ref(false)
+const yearOptions = ref<number[]>([])
 const mediaQuery = reactive({
   query: '',
   region: '' as DailyMediaRegion | '',
@@ -128,6 +130,7 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.auto_identify = policy.auto_identify
   form.scope_mode = policy.scope_mode
   form.regions = [...policy.regions]
+  form.years = [...policy.years]
   form.selected_media_ids = [...policy.selected_media_ids]
   form.site_ids = [...policy.site_ids]
   form.media_types = [...policy.media_types]
@@ -170,6 +173,9 @@ async function loadMediaOptions(page = 1): Promise<void> {
     mediaOptions.value = response.items
     mediaOptionsTotal.value = response.total
     mediaOptionsPage.value = response.page
+    yearOptions.value = Array.from(new Set([...response.filter_options.years, ...form.years])).sort(
+      (left, right) => right - left,
+    )
   } catch (caught) {
     error.value = message(caught, '无法读取影视选择列表')
   } finally {
@@ -331,6 +337,7 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     auto_identify: form.auto_identify,
     scope_mode: form.scope_mode,
     regions: form.regions,
+    years: form.years,
     selected_media_ids: form.selected_media_ids,
     site_ids: form.site_ids,
     media_types: form.media_types,
@@ -704,7 +711,21 @@ onBeforeUnmount(() => {
           </label>
         </div>
       </div>
-      <div v-else class="automation-media-picker">
+      <div v-if="form.scope_mode === 'filters'" class="filter-heading automation-year-filter">
+        <div>
+          <span class="eyebrow">YEARS</span>
+          <strong>年份范围</strong>
+          <p class="muted">不选择年份时处理全部年份；选择后只处理影视首播年份匹配的项目。</p>
+        </div>
+        <div v-if="yearOptions.length" class="configuration-field-grid automation-year-options">
+          <label v-for="year in yearOptions" :key="year" class="configuration-checkbox">
+            <input v-model="form.years" :name="`year-${year}`" type="checkbox" :value="year" />
+            {{ year }}
+          </label>
+        </div>
+        <p v-else class="muted">当前媒体库还没有可用年份。</p>
+      </div>
+      <div v-if="form.scope_mode !== 'filters'" class="automation-media-picker">
         <div class="filter-heading">
           <div>
             <span class="eyebrow">MANUAL SCOPE</span>
