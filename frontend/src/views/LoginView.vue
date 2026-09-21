@@ -55,7 +55,7 @@ async function submit(): Promise<void> {
 <template>
   <main class="login-page">
     <section class="login-card" aria-labelledby="login-title">
-      <div class="login-brand"><span class="brand-mark">U</span><div><strong>UNIN</strong><small>MEDIA ORCHESTRATOR</small></div></div>
+      <div class="login-brand"><span class="brand-mark">U</span><div><strong>UNIN</strong><small>影视资源编排</small></div></div>
       <span class="eyebrow">LOCAL CONTROL PLANE</span>
       <h1 id="login-title">{{ setupMode ? '创建管理员' : '登录本地管理端' }}</h1>
       <p v-if="setupMode">首次使用只需创建一个本地管理员，密码至少 6 位，随后在管理页面完成连接配置。</p>

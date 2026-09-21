@@ -17,6 +17,9 @@ const primaryNavItems = [
 ]
 
 const isPublicRoute = computed(() => Boolean(route.meta.public))
+const activeNavItem = computed(() =>
+  primaryNavItems.find((item) => route.path === item.to || route.path.startsWith(`${item.to}/`)),
+)
 
 async function logout(): Promise<void> {
   if (await auth.logout()) await router.replace('/login')
@@ -26,34 +29,35 @@ async function logout(): Promise<void> {
 <template>
   <RouterView v-if="isPublicRoute" />
   <div v-else class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <span class="brand-mark">U</span>
-        <div>
-          <strong>UNIN</strong>
-          <small>MEDIA ORCHESTRATOR</small>
-        </div>
-      </div>
-      <nav class="app-nav" aria-label="主导航">
-        <RouterLink
-          v-for="item in primaryNavItems"
-          :key="item.to"
-          class="primary-nav-link"
-          :to="item.to"
-          :aria-label="item.label"
-          :title="item.label"
-        >
-          <span class="nav-icon">{{ item.icon }}</span><span class="nav-label">{{ item.label }}</span>
-        </RouterLink>
-      </nav>
-      <div class="phase-note">
-        <span class="status-dot"></span>
-        <div><strong>{{ auth.principal?.username ?? '日常模式' }}</strong><small>发现 · 选择 · 下载</small></div>
-      </div>
-    </aside>
     <main class="main-content">
       <header class="topbar">
-        <div><span class="eyebrow">UNIN</span><span class="divider">/</span> 影视资源助手</div>
+        <RouterLink class="topbar-brand" to="/library" aria-label="UNIN 工作台">
+          <span class="brand-mark">U</span>
+          <span><strong>UNIN</strong><small>影视资源编排</small></span>
+        </RouterLink>
+        <nav class="topbar-nav" aria-label="主导航">
+          <RouterLink
+            v-for="item in primaryNavItems"
+            :key="item.to"
+            :to="item.to"
+            :aria-label="item.label"
+          >
+            {{ item.to === '/automation' ? '自动化策略' : item.label }}
+          </RouterLink>
+        </nav>
+        <div class="topbar-context">
+          <span class="eyebrow">UNIN · 影视资源</span>
+          <span class="divider">/</span>
+          <strong>{{ activeNavItem?.label ?? '工作台' }}</strong>
+        </div>
+        <div class="topbar-tools">
+          <RouterLink class="topbar-search" to="/library" aria-label="打开缺失影视搜索">
+            <span aria-hidden="true">⌕</span>
+            <span>搜索缺失影视</span>
+            <kbd>Ctrl K</kbd>
+          </RouterLink>
+          <span class="topbar-live"><i></i> 服务正常</span>
+        </div>
         <div class="topbar-actions">
           <div v-if="auth.principal" class="session-summary">
             <span><strong>{{ auth.principal.username }}</strong><small>{{ auth.roleLabel }}</small></span>

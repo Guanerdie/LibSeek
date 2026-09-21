@@ -38,16 +38,16 @@ describe('authenticated navigation', () => {
       },
     })
     expect(
-      wrapper.findAll('.primary-nav-link').map((link) => ({
+      wrapper.findAll('.topbar-nav a').map((link) => ({
         href: link.attributes('href'),
         text: link.text(),
       })),
     ).toEqual([
-      { href: '/library', text: '▦缺失' },
-      { href: '/downloads', text: '↓下载' },
-      { href: '/automation', text: '⟳自动化' },
-      { href: '/monitoring', text: '◔监控' },
-      { href: '/configuration', text: '⚙设置' },
+      { href: '/library', text: '缺失' },
+      { href: '/downloads', text: '下载' },
+      { href: '/automation', text: '自动化策略' },
+      { href: '/monitoring', text: '监控' },
+      { href: '/configuration', text: '设置' },
     ])
     expect(wrapper.find('.nav-disclosure').exists()).toBe(false)
     expect(wrapper.find('a[href="/"]').exists()).toBe(false)
@@ -58,7 +58,7 @@ describe('authenticated navigation', () => {
     expect(wrapper.find('a[href="/qbittorrent"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('admin-user')
     expect(wrapper.text()).toContain('管理员')
-    expect(wrapper.text()).toContain('发现 · 选择 · 下载')
+    expect(wrapper.text()).toContain('影视资源编排')
   })
 
   it('guards protected routes and accepts only safe internal login redirects', async () => {

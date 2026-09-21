@@ -116,6 +116,38 @@ const runProgress = computed(() => {
   if (run.created === 0) return runIsActive.value ? 0 : 100
   return Math.min(100, Math.round((runCompleted.value / run.created) * 100))
 })
+const automationSummary = computed(() => [
+  {
+    label: '策略状态',
+    value: form.enabled ? '已启用' : '已暂停',
+    detail: form.dry_run ? '试运行模式' : '自动提交下载',
+    tone: form.enabled ? 'green' : 'amber',
+    icon: form.enabled ? '✓' : 'Ⅱ',
+  },
+  {
+    label: '搜索范围',
+    value: form.scope_mode === 'filters' ? '规则筛选' : '手动清单',
+    detail: form.scope_mode === 'filters'
+      ? `${form.media_types.length} 种类型 · ${form.years.length ? `${form.years.length} 个年份` : '不限年份'}`
+      : `${form.selected_media_ids.length} 部影视`,
+    tone: 'violet',
+    icon: '⌁',
+  },
+  {
+    label: '每日预算',
+    value: `${form.daily_download_limit} 项`,
+    detail: form.daily_download_gib ? `最多 ${form.daily_download_gib} GiB` : '体积不限',
+    tone: 'cyan',
+    icon: '↓',
+  },
+  {
+    label: '最近执行',
+    value: currentRun.value ? `${runProgress.value}%` : '—',
+    detail: currentRun.value ? formatShanghai(currentRun.value.created_at) : '尚未执行',
+    tone: 'blue',
+    icon: '◷',
+  },
+])
 // Keep the old jobs fallback for older API deployments and unit-test mocks.
 const runsApiAvailable = computed(() => typeof automationApi.runs === 'function')
 
@@ -431,18 +463,27 @@ onBeforeUnmount(() => {
   <section class="page automation-page">
     <PageHeader
       eyebrow="AUTOMATION"
-      title="自动搜索"
-      :description="form.dry_run
-        ? '按策略周期搜索缺失影视并解释候选选择；当前为试运行，不会提交下载。'
-        : '按策略周期搜索并自动提交满足条件的候选；受 qB 写入开关和每日预算限制。'"
+      title="自动化策略"
+      description="把重复的整理工作交给规则，剩下时间留给真正想看的内容。"
     >
       <button class="button primary" :disabled="starting || runIsActive || !form.enabled" @click="run">
-        {{ starting ? '启动中…' : (runIsActive ? '后台执行中…' : (form.dry_run ? '立即试运行' : '立即运行')) }}
+        {{ starting ? '启动中…' : (runIsActive ? '后台执行中…' : '运行策略') }}
       </button>
     </PageHeader>
 
     <PageState :loading="loading" :error="error" />
     <p v-if="feedback" class="configuration-message success">{{ feedback }}</p>
+
+    <div class="summary-grid automation-summary" aria-label="自动化概览">
+      <div v-for="item in automationSummary" :key="item.label" class="summary-card automation-summary-card">
+        <span :class="['summary-icon', `tone-${item.tone}`]">{{ item.icon }}</span>
+        <span>
+          <small>{{ item.label }}</small>
+          <strong>{{ item.value }}</strong>
+          <em>{{ item.detail }}</em>
+        </span>
+      </div>
+    </div>
 
     <article v-if="currentRun" class="panel library-filters automation-run-progress" aria-live="polite">
       <div class="section-heading">
@@ -470,12 +511,12 @@ onBeforeUnmount(() => {
       <p v-if="currentRun.error_message" class="inline-warning">{{ currentRun.error_message }}</p>
     </article>
 
-    <form v-if="!loading" class="panel" aria-labelledby="automation-policy-title" @submit.prevent="save">
+    <form v-if="!loading" class="panel automation-policy-panel" aria-labelledby="automation-policy-title" @submit.prevent="save">
       <div class="section-heading">
         <div><span class="eyebrow">POLICY</span><h2 id="automation-policy-title">搜索策略</h2></div>
         <StatusPill :status="form.enabled ? 'READY' : 'PAUSED'" :label="form.enabled ? '已启用' : '已停用'" />
       </div>
-      <div class="configuration-field-grid">
+      <div class="configuration-field-grid automation-primary-grid">
         <label class="configuration-checkbox">
           <input v-model="form.enabled" name="enabled" type="checkbox" /> 启用自动化策略
         </label>
@@ -585,7 +626,7 @@ onBeforeUnmount(() => {
           </p>
         </div>
       </div>
-      <div class="configuration-field-grid">
+      <div class="configuration-field-grid automation-quality-grid">
         <label>
           画质（分辨率）
           <input v-model.number="form.weight_resolution" name="weight_resolution" type="number" min="0" max="100" />
