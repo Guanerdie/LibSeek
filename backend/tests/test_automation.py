@@ -336,6 +336,43 @@ async def test_recorded_automation_run_persists_run_level_failure(
 
 
 @pytest.mark.asyncio
+async def test_recorded_automation_run_refreshes_nextfind_before_search(
+    session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    nextfind = object()
+
+    def fake_build_nextfind() -> object:
+        calls.append("build")
+        return nextfind
+
+    async def fake_sync_nextfind(_session: AsyncSession, adapter: object) -> None:
+        assert adapter is nextfind
+        calls.append("sync")
+
+    async def fake_close_adapter(adapter: object) -> None:
+        assert adapter is nextfind
+        calls.append("close")
+
+    async def fake_run_automation(*_args: object, **_kwargs: object) -> tuple[str, int, int, int]:
+        calls.append("run")
+        return "run-id", 0, 0, 0
+
+    monkeypatch.setattr(automation_runner, "build_nextfind", fake_build_nextfind)
+    monkeypatch.setattr(automation_runner, "sync_nextfind", fake_sync_nextfind)
+    monkeypatch.setattr(automation_runner, "close_adapter", fake_close_adapter)
+    monkeypatch.setattr(automation, "run_automation", fake_run_automation)
+
+    async with session_factory() as session:
+        await update_policy(session, AutomationPolicyUpdate(enabled=True))
+        run = await automation.create_automation_run(session, trigger="manual")
+        await automation_runner.execute_recorded_automation_run(session, run)
+
+    assert calls == ["build", "sync", "close", "run"]
+
+
+@pytest.mark.asyncio
 async def test_run_level_failure_releases_pending_jobs_for_retry(
     session_factory,
     monkeypatch: pytest.MonkeyPatch,

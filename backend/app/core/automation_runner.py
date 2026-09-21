@@ -176,6 +176,10 @@ async def execute_recorded_automation_run(
 ) -> None:
     run_id = run.id
     try:
+        # Refresh the source of truth immediately before every recorded run.
+        # Scheduled runs used to do this in ``run_scheduled_cycle`` only,
+        # which meant manual runs and retries searched the previous snapshot.
+        await _sync_nextfind_before_automation(session)
         await automation.run_automation(
             session,
             adapter_factory=lambda site_id: build_pt_site(
@@ -207,6 +211,26 @@ async def execute_recorded_automation_run(
             await _persist_automation_run_failure(run_id, message)
         if not isinstance(exc, AppError):
             _logger.exception("Unexpected automation run failure", exc_info=exc)
+
+
+async def _sync_nextfind_before_automation(session: AsyncSession) -> None:
+    """Refresh NextFind once before an automation run starts.
+
+    A failed refresh is recorded and the run continues with the last known
+    snapshot, matching the scheduler's previous behavior.  The adapter is
+    always closed so a failed login or request cannot leak its client.
+    """
+
+    nextfind = None
+    try:
+        nextfind = build_nextfind()
+        await sync_nextfind(session, nextfind)
+    except AppError as exc:
+        session.add(ActivityLog(event="AUTOMATION_SYNC_FAILED", message=exc.message))
+        await session.commit()
+    finally:
+        if nextfind is not None:
+            await close_adapter(nextfind)
 
 
 async def _execute_manual_automation_run(run_id: str) -> None:
@@ -329,19 +353,6 @@ async def run_scheduled_cycle(
         # repeat the fetch on every poll only to be refused the run; the first
         # poll after it finishes picks the cycle up.
         return False
-
-    nextfind = None
-    try:
-        nextfind = build_nextfind()
-        await sync_nextfind(session, nextfind)
-    except AppError as exc:
-        session.add(
-            ActivityLog(event="AUTOMATION_SYNC_FAILED", message=exc.message)
-        )
-        await session.commit()
-    finally:
-        if nextfind is not None:
-            await close_adapter(nextfind)
 
     try:
         run = await automation.create_automation_run(session, trigger="scheduled")
