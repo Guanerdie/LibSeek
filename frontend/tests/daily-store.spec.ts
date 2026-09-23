@@ -80,6 +80,11 @@ const download: DailyDownload = {
   upload_speed: 10_000,
   ratio: 0.1,
   error_message: null,
+  completed_at: null,
+  seeding_seconds: 0,
+  cleanup_state: 'NONE',
+  cleanup_marked_at: null,
+  cleanup_deleted_at: null,
   created_at: '2026-08-22T00:00:00Z',
   updated_at: '2026-08-22T00:01:00Z',
 }

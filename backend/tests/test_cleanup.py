@@ -84,9 +84,11 @@ def _torrent(
     tags: str = "",
     size: int = 20_000,
 ) -> QbTorrent:
+    # Distinct names per hash: two torrents sharing name and save path are what
+    # cross-seed detection looks for, and would silently disqualify each other.
     return QbTorrent(
         hash=info_hash,
-        name="Example.mkv",
+        name=f"Example-{info_hash[:8]}.mkv",
         size=size,
         progress=1,
         ratio=1.5,

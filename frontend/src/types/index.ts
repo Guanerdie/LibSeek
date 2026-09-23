@@ -473,7 +473,7 @@ export interface QuickFillResult {
   rejected: DailyRejectedCandidate[]
 }
 
-export type DownloadCleanupState = 'NONE' | 'MARKED' | 'DELETED' | 'HELD'
+export type DownloadCleanupState = 'NONE' | 'MARKED' | 'DELETED' | 'VANISHED' | 'HELD'
 
 export interface CleanupPreviewEntry {
   download_id: string

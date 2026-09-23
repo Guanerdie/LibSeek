@@ -380,7 +380,7 @@ async function loadCleanupPreview(): Promise<void> {
   cleanupLoading.value = true
   cleanupError.value = null
   try {
-    cleanupPreview.value = await automationApi.cleanupPreview()
+    cleanupPreview.value = await dailyApi.cleanupPreview()
   } catch (caught) {
     cleanupError.value = message(caught, '无法读取清理预览')
   } finally {

@@ -17,12 +17,13 @@ const mocks = vi.hoisted(() => ({
   runStatus: vi.fn(),
   retry: vi.fn(),
   media: vi.fn(),
+  cleanupPreview: vi.fn(),
 }))
 
 vi.mock('../src/api/client', () => ({
   ApiError: class MockApiError extends Error {},
   automationApi: mocks,
-  dailyApi: { media: mocks.media },
+  dailyApi: { media: mocks.media, cleanupPreview: mocks.cleanupPreview },
   statsApi: { scoreDistribution: mocks.scoreDistribution },
 }))
 
@@ -56,6 +57,13 @@ const policy: AutomationPolicy = {
   weight_seeders: 13,
   weight_promotion: 3,
   seeder_floor: 3,
+  cleanup_enabled: false,
+  cleanup_dry_run: true,
+  cleanup_after_days: 10,
+  cleanup_min_seeding_days: 10,
+  cleanup_grace_days: 2,
+  cleanup_require_library_confirmed: true,
+  cleanup_daily_limit: 20,
   updated_at: '2026-08-23T00:00:00Z',
   last_run_at: null,
 }
@@ -454,6 +462,28 @@ describe('automation settings', () => {
 
     expect(mocks.runStatus).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('后台执行中…')
+    wrapper.unmount()
+  })
+
+  it('loads the cleanup preview from the downloads API', async () => {
+    mocks.cleanupPreview.mockResolvedValue({
+      enabled: true,
+      dry_run: true,
+      delete_authorized: false,
+      reclaimable_bytes: 0,
+      items: [],
+    })
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    const button = wrapper.findAll('button').find((item) => item.text() === '查看预览')
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.cleanupPreview).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('当前可清理 0 项')
+    expect(wrapper.text()).toContain('ENABLE_QB_DELETE')
     wrapper.unmount()
   })
 
