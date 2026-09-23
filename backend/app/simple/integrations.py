@@ -29,6 +29,7 @@ from app.schemas.adapters import (
     TorrentCandidate,
     TorrentSearchRequest,
 )
+from app.schemas.qbittorrent import QbTorrent
 from app.services.matching import MatchPreferences, score_torrent_candidate
 from app.services.quality import QualityWeights
 from app.services.torrent_validation import validate_torrent
@@ -41,6 +42,7 @@ from app.simple.models import (
     AutomationPolicy,
     AutomationRunState,
     Download,
+    DownloadCleanupState,
     DownloadState,
     Episode,
     EpisodeState,
@@ -181,6 +183,7 @@ def build_qb(settings: Settings | None = None) -> QbittorrentAdapter:
         password=password,
         allowed_hosts=settings.qb_allowed_hosts,
         enable_write=True,
+        enable_delete=settings.enable_qb_delete,
         allow_insecure_http=settings.qb_allow_insecure_http,
         connect_timeout=settings.external_connect_timeout_seconds,
         read_timeout=settings.external_read_timeout_seconds,
@@ -347,11 +350,25 @@ async def _sync_nextfind_locked(
             episodes_by_media.get(media.id, []),
         )
 
+    confirmed_at = utc_now()
+    # NextFind returns what it managed to read: a pagination loop, a cursor
+    # loop or a page-limit stop all come back as a short list plus a warning.
+    # Treating "absent from that list" as "already in the library" would arm an
+    # irreversible delete for every title the sync failed to read, so a warned
+    # response only updates states and never writes a confirmation.
+    trustworthy_listing = not result.warnings
     for stored_item in stored_items:
-        if (
-            stored_item.source_item_id not in seen
-            and stored_item.state != MediaState.DOWNLOADING
-        ):
+        still_missing = stored_item.source_item_id in seen
+        # Dropping out of the missing list is the one trustworthy "this file is
+        # in the media library now" signal.  It is recorded even while the item
+        # is still seeding -- the state transition below deliberately skips
+        # DOWNLOADING, but the timestamp must not, or a title imported during
+        # its own download would never become eligible for cleanup.
+        if still_missing:
+            stored_item.library_confirmed_at = None
+        elif trustworthy_listing and stored_item.library_confirmed_at is None:
+            stored_item.library_confirmed_at = confirmed_at
+        if not still_missing and stored_item.state != MediaState.DOWNLOADING:
             stored_item.state = MediaState.COMPLETE
             stored_item.attention_reason = None
 
@@ -871,6 +888,13 @@ async def _submit_download_unlocked(
             select(Download).where(
                 Download.info_hash == candidate.info_hash,
                 Download.candidate_id != candidate.id,
+                # A download whose files space reclaim already removed proves
+                # nothing about the disk.  Reusing it would mark the media
+                # COMPLETE and submit nothing, leaving the title permanently
+                # "done" with no file anywhere.
+                Download.cleanup_state.not_in(
+                    (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                ),
             )
         )
         if duplicate is not None:
@@ -905,7 +929,13 @@ async def _submit_download_unlocked(
                     status_code=409,
                 )
             duplicate = await session.scalar(
-                select(Download).where(Download.info_hash == info_hash, Download.id != download.id)
+                select(Download).where(
+                    Download.info_hash == info_hash,
+                    Download.id != download.id,
+                    Download.cleanup_state.not_in(
+                        (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                    ),
+                )
             )
             if duplicate is not None:
                 await session.delete(download)
@@ -1055,6 +1085,7 @@ async def sync_download_statuses(
         download.ratio = max(0, torrent.ratio)
         download.state = _download_state(torrent.state, torrent.progress)
         download.error_message = None
+        _apply_torrent_timers(download, torrent, now=now)
         media = await session.get(LibraryMediaItem, download.media_id)
         if media is not None:
             if torrent.progress >= 1:
@@ -1169,6 +1200,25 @@ async def _supersede_jobs_for_download(session: AsyncSession, download: Download
     stamp = utc_now()
     for job in jobs:
         job.superseded_at = stamp
+
+
+def _apply_torrent_timers(download: Download, torrent: QbTorrent, *, now: datetime) -> None:
+    """Copy qBittorrent's completion time and seeding counter onto the record.
+
+    Both drive the cleanup decision, and keeping a local copy means the numbers
+    survive the torrent being removed from the client.  ``completion_on`` is a
+    Unix timestamp that qBittorrent leaves at 0 (or -1) while a torrent is still
+    downloading, so a finished torrent without one falls back to the time we
+    first saw it finished.
+    """
+
+    download.seeding_seconds = max(0, torrent.seeding_time)
+    if torrent.progress < 1:
+        return
+    if torrent.completion_on > 0:
+        download.completed_at = datetime.fromtimestamp(torrent.completion_on, tz=UTC)
+    elif download.completed_at is None:
+        download.completed_at = now
 
 
 def _download_state(qb_state: str, progress: float) -> DownloadState:

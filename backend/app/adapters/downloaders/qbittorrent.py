@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -27,13 +27,22 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         {
             ("POST", "/api/v2/torrents/add"),
             ("POST", "/api/v2/torrents/createCategory"),
+            ("POST", "/api/v2/torrents/addTags"),
+            ("POST", "/api/v2/torrents/removeTags"),
         }
     )
-    _ALLOWED_REQUESTS = QbittorrentReadOnlyAdapter._ALLOWED_REQUESTS | _WRITE_REQUESTS
+    # Deleting a torrent takes its files with it and cannot be undone, so it is
+    # gated separately from ordinary writes: adding a task must never imply
+    # permission to erase one.
+    _DELETE_REQUESTS = frozenset({("POST", "/api/v2/torrents/delete")})
+    _ALLOWED_REQUESTS = (
+        QbittorrentReadOnlyAdapter._ALLOWED_REQUESTS | _WRITE_REQUESTS | _DELETE_REQUESTS
+    )
     _WEB_API_VERSION = re.compile(
         r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
     )
     _STOPPED_ADD_PARAMETER_SINCE = (2, 11, 0)
+    _MAX_HASHES_PER_CALL = 50
 
     def __init__(
         self,
@@ -43,6 +52,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         password: str,
         allowed_hosts: tuple[str, ...],
         enable_write: bool = False,
+        enable_delete: bool = False,
         allow_insecure_http: bool = False,
         connect_timeout: float = 5,
         read_timeout: float = 30,
@@ -64,6 +74,7 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
             before_request=before_request,
         )
         self.enable_write = enable_write
+        self.enable_delete = enable_delete
 
     def manifest(self) -> AdapterManifest:
         return AdapterManifest(
@@ -96,10 +107,19 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         files: dict[str, tuple[str, bytes, str]] | None = None,
         before_send: Callable[[], Awaitable[None]] | None = None,
     ) -> httpx.Response:
-        if (method.upper(), path) in self._WRITE_REQUESTS and not self.enable_write:
+        request_key = (method.upper(), path)
+        if request_key in self._WRITE_REQUESTS and not self.enable_write:
             raise AppError(
                 "QB_WRITE_DISABLED",
                 "qBittorrent 写入能力默认关闭",
+                status_code=403,
+            )
+        if request_key in self._DELETE_REQUESTS and not (
+            self.enable_write and self.enable_delete
+        ):
+            raise AppError(
+                "QB_DELETE_DISABLED",
+                "qBittorrent 删除能力默认关闭",
                 status_code=403,
             )
         return await super()._request(
@@ -185,6 +205,84 @@ class QbittorrentAdapter(QbittorrentReadOnlyAdapter):
         if self._looks_like_html(response) or response.text.strip() != "Ok.":
             raise self._unknown_outcome()
         return QbAddResult(info_hash=selected_hash, outcome="SUBMITTED")
+
+    _HASH = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+
+    def _hash_payload(self, hashes: Sequence[str]) -> str:
+        normalized: list[str] = []
+        for value in hashes:
+            candidate = value.strip().lower()
+            if self._HASH.fullmatch(candidate) is None:
+                raise AppError(
+                    "QB_INFO_HASH_INVALID",
+                    "info hash 格式无效，已拒绝操作",
+                    status_code=400,
+                )
+            # A v2-only torrent is stored here as its full 64-character hash,
+            # but qBittorrent addresses it by the truncated 40-character id --
+            # the read path already knows this (find_torrents_by_hashes).
+            # Sending only the long form makes tag and delete calls answer 200
+            # while doing nothing at all.
+            for form in (candidate, candidate[:40]) if len(candidate) == 64 else (candidate,):
+                if form not in normalized:
+                    normalized.append(form)
+        if not normalized:
+            raise AppError(
+                "QB_INFO_HASH_REQUIRED", "缺少要操作的 info hash", status_code=400
+            )
+        if len(normalized) > self._MAX_HASHES_PER_CALL:
+            raise AppError(
+                "QB_TOO_MANY_HASHES",
+                "单次操作的种子数量超过上限",
+                status_code=400,
+            )
+        return "|".join(normalized)
+
+    async def add_tags(self, hashes: Sequence[str], tags: Sequence[str]) -> None:
+        """Tag torrents, which is how a pending cleanup becomes visible in qB."""
+
+        if not self._authenticated:
+            raise AppError("QB_NOT_AUTHENTICATED", "qBittorrent SID 会话不存在", status_code=401)
+        cleaned = [tag.strip() for tag in tags if tag.strip()]
+        if not cleaned:
+            return
+        await self._request(
+            "POST",
+            "/api/v2/torrents/addTags",
+            data={"hashes": self._hash_payload(hashes), "tags": ",".join(cleaned)},
+        )
+
+    async def remove_tags(self, hashes: Sequence[str], tags: Sequence[str]) -> None:
+        if not self._authenticated:
+            raise AppError("QB_NOT_AUTHENTICATED", "qBittorrent SID 会话不存在", status_code=401)
+        cleaned = [tag.strip() for tag in tags if tag.strip()]
+        if not cleaned:
+            return
+        await self._request(
+            "POST",
+            "/api/v2/torrents/removeTags",
+            data={"hashes": self._hash_payload(hashes), "tags": ",".join(cleaned)},
+        )
+
+    async def delete_torrents(self, hashes: Sequence[str], *, delete_files: bool) -> None:
+        """Remove torrents from qBittorrent, optionally taking their files.
+
+        qBittorrent answers 200 with an empty body and the call is idempotent,
+        so a timeout needs no ``OUTCOME_UNKNOWN`` dance the way adding does:
+        the next status sync reconciles against the live torrent list, and a
+        repeated delete is harmless.
+        """
+
+        if not self._authenticated:
+            raise AppError("QB_NOT_AUTHENTICATED", "qBittorrent SID 会话不存在", status_code=401)
+        await self._request(
+            "POST",
+            "/api/v2/torrents/delete",
+            data={
+                "hashes": self._hash_payload(hashes),
+                "deleteFiles": "true" if delete_files else "false",
+            },
+        )
 
     async def ensure_category(
         self,

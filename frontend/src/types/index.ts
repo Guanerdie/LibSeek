@@ -304,6 +304,11 @@ export interface DailyDownload {
   upload_speed: number
   ratio: number
   error_message: string | null
+  completed_at: string | null
+  seeding_seconds: number
+  cleanup_state: DownloadCleanupState
+  cleanup_marked_at: string | null
+  cleanup_deleted_at: string | null
   created_at: string
   updated_at: string
 }
@@ -338,6 +343,13 @@ export interface AutomationPolicy {
   weight_seeders: number
   weight_promotion: number
   seeder_floor: number
+  cleanup_enabled: boolean
+  cleanup_dry_run: boolean
+  cleanup_after_days: number
+  cleanup_min_seeding_days: number
+  cleanup_grace_days: number
+  cleanup_require_library_confirmed: boolean
+  cleanup_daily_limit: number
   updated_at: string
   last_run_at: string | null
 }
@@ -459,4 +471,27 @@ export interface QuickFillResult {
   selected_candidate_id: string | null
   download: DailyDownload | null
   rejected: DailyRejectedCandidate[]
+}
+
+export type DownloadCleanupState = 'NONE' | 'MARKED' | 'DELETED' | 'HELD'
+
+export interface CleanupPreviewEntry {
+  download_id: string
+  media_title: string
+  name: string
+  size_bytes: number
+  completed_at: string | null
+  seeding_days: number
+  required_seeding_days: number
+  cleanup_state: DownloadCleanupState
+  deletes_at: string | null
+  blocked_reason: string | null
+}
+
+export interface CleanupPreview {
+  enabled: boolean
+  dry_run: boolean
+  delete_authorized: boolean
+  reclaimable_bytes: number
+  items: CleanupPreviewEntry[]
 }

@@ -7,6 +7,7 @@ import type {
   AutomationRunPage,
   AutomationStats,
   BulkSubscriptionResult,
+  CleanupPreview,
   ConfigurationSnapshot,
   ConfigurationTestResult,
   ConfigurationUpdateRequest,
@@ -249,6 +250,7 @@ export const dailyApi = {
     ),
   syncDownloads: () =>
     request<{ created: number; updated: number }>('/api/downloads/sync', { method: 'POST' }),
+  cleanupPreview: () => request<CleanupPreview>('/api/downloads/cleanup-preview'),
 }
 
 export const automationApi = {

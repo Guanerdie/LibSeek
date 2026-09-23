@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     qb_target_save_path: str | None = None
     qb_plan_tags: tuple[str, ...] = ()
     enable_qb_write: bool = False
+    # Deleting downloaded files is irreversible and is therefore authorised on
+    # its own; ENABLE_QB_WRITE alone never grants it.
+    enable_qb_delete: bool = False
     torrent_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     torrent_max_files: int = Field(default=20_000, ge=1, le=100_000)
     preferred_resolutions: tuple[str, ...] = ("2160p", "1080p")

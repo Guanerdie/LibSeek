@@ -58,6 +58,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     assert "search_titles" in library_columns
     assert "imdb_id" in library_columns
     assert "region_tags" in library_columns
+    assert "library_confirmed_at" in library_columns
     candidate_columns = {
         column["name"]: column for column in inspector.get_columns("release_candidates")
     }
@@ -74,6 +75,38 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         column["name"] for column in inspector.get_columns("automation_policy")
     }
     assert "years" in automation_policy_columns
+    assert {
+        "cleanup_enabled",
+        "cleanup_dry_run",
+        "cleanup_after_days",
+        "cleanup_min_seeding_days",
+        "cleanup_grace_days",
+        "cleanup_require_library_confirmed",
+        "cleanup_daily_limit",
+    } <= automation_policy_columns
+    download_columns = {column["name"] for column in inspector.get_columns("downloads")}
+    assert {
+        "completed_at",
+        "seeding_seconds",
+        "cleanup_state",
+        "cleanup_marked_at",
+        "cleanup_deleted_at",
+    } <= download_columns
+    # SQLite rebuilds the whole table for every batch_alter_table, so the
+    # constraints that were already there have to survive the new ones.
+    policy_checks = {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("automation_policy")
+    }
+    assert {
+        "ck_automation_retry_delay",
+        "ck_automation_attempts",
+        "ck_automation_daily_limit",
+        "ck_automation_cleanup_after_days",
+        "ck_automation_cleanup_min_seeding_days",
+        "ck_automation_cleanup_grace_days",
+        "ck_automation_cleanup_daily_limit",
+    } <= policy_checks
     search_columns = {column["name"]: column for column in inspector.get_columns("searches")}
     assert search_columns["cache_key"]["nullable"] is True
     assert search_columns["cache_expires_at"]["nullable"] is True
@@ -128,6 +161,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     library_columns = {column["name"] for column in inspector.get_columns("library_media")}
     assert "search_titles" not in library_columns
     assert "imdb_id" not in library_columns
+    assert "library_confirmed_at" not in library_columns
     candidate_columns = {
         column["name"] for column in inspector.get_columns("release_candidates")
     }
@@ -140,6 +174,14 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     assert "retry_of_job_id" not in automation_job_columns
     assert "superseded_at" not in automation_job_columns
     assert "error_code" not in automation_job_columns
+    automation_policy_columns = {
+        column["name"] for column in inspector.get_columns("automation_policy")
+    }
+    assert "cleanup_enabled" not in automation_policy_columns
+    assert "cleanup_after_days" not in automation_policy_columns
+    download_columns = {column["name"] for column in inspector.get_columns("downloads")}
+    assert "cleanup_state" not in download_columns
+    assert "completed_at" not in download_columns
     search_columns = {column["name"] for column in inspector.get_columns("searches")}
     assert "cache_key" not in search_columns
     assert "cache_expires_at" not in search_columns

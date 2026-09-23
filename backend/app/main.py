@@ -23,7 +23,8 @@ from app.errors import AppError
 from app.schemas.common import ErrorResponse
 from app.simple import routes as daily
 from app.simple.background import cancel_background_tasks, recover_interrupted_searches
-from app.simple.integrations import build_pt_site
+from app.simple.cleanup import download_cleanup_loop
+from app.simple.integrations import build_pt_site, build_qb, build_qb_readonly
 from app.simple.retention import history_retention_loop
 
 settings = get_settings()
@@ -42,6 +43,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         tasks.append(asyncio.create_task(automation_scheduler_loop(stop)))
     if settings.history_retention_days > 0:
         tasks.append(asyncio.create_task(history_retention_loop(stop)))
+    if settings.enable_qb_delete and settings.enable_qb_write:
+        # The policy still has to be switched on, and stays in dry-run until the
+        # operator turns that off as well; this only starts the watcher.
+        tasks.append(
+            asyncio.create_task(
+                download_cleanup_loop(
+                    stop,
+                    readonly_factory=build_qb_readonly,
+                    write_factory=build_qb,
+                )
+            )
+        )
     if settings.rss_matcher_enabled:
         tasks.append(
             asyncio.create_task(

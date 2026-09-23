@@ -176,8 +176,20 @@ async def _prune_searches(session: AsyncSession, cutoff: datetime) -> tuple[int,
     return searches, candidates
 
 
+#: Irreversible actions keep their audit row forever.  Deleting a torrent and
+#: its files is the only thing UNIN does that cannot be undone, so the record
+#: of what it removed must outlive the ordinary history window.
+_PERMANENT_ACTIVITY_EVENTS = ("DOWNLOAD_CLEANUP_DELETED",)
+
+
 async def _prune_activity(session: AsyncSession, cutoff: datetime) -> int:
-    deleted = await _execute(session, delete(ActivityLog).where(ActivityLog.created_at < cutoff))
+    deleted = await _execute(
+        session,
+        delete(ActivityLog).where(
+            ActivityLog.created_at < cutoff,
+            ActivityLog.event.not_in(_PERMANENT_ACTIVITY_EVENTS),
+        ),
+    )
     await session.commit()
     return deleted
 

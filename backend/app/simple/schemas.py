@@ -9,6 +9,7 @@ from app.models.enums import MediaType
 from app.simple.models import (
     AutomationJobState,
     AutomationRunState,
+    DownloadCleanupState,
     DownloadState,
     EpisodeState,
     MediaState,
@@ -229,8 +230,36 @@ class DownloadView(BaseModel):
     upload_speed: int
     ratio: float
     error_message: str | None
+    completed_at: datetime | None
+    seeding_seconds: int
+    cleanup_state: DownloadCleanupState
+    cleanup_marked_at: datetime | None
+    cleanup_deleted_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class CleanupPreviewEntry(BaseModel):
+    """One row of "this is what the cleanup would touch next"."""
+
+    download_id: str
+    media_title: str
+    name: str
+    size_bytes: int
+    completed_at: datetime | None
+    seeding_days: float
+    required_seeding_days: int
+    cleanup_state: DownloadCleanupState
+    deletes_at: datetime | None
+    blocked_reason: str | None
+
+
+class CleanupPreview(BaseModel):
+    enabled: bool
+    dry_run: bool
+    delete_authorized: bool
+    reclaimable_bytes: int
+    items: list[CleanupPreviewEntry]
 
 
 class DownloadPage(BaseModel):
@@ -288,6 +317,18 @@ class AutomationPolicyUpdate(BaseModel):
     weight_promotion: int = Field(default=3, ge=0, le=100)
     # Seeders below this count as a risk; above it, merely fine.
     seeder_floor: int = Field(default=3, ge=1, le=100)
+    # Space reclaim.  Deleting downloaded files cannot be undone, so the switch
+    # is off, the mode is dry-run, and ENABLE_QB_DELETE gates it besides.
+    cleanup_enabled: bool = False
+    cleanup_dry_run: bool = True
+    # Ten days, not seven: AvistaZ requires seven days of seeding and a client
+    # counts more seeding time than the tracker credits, so the default leaves
+    # headroom instead of sitting exactly on the hit-and-run line.
+    cleanup_after_days: int = Field(default=10, ge=1, le=365)
+    cleanup_min_seeding_days: int = Field(default=10, ge=1, le=365)
+    cleanup_grace_days: int = Field(default=2, ge=0, le=30)
+    cleanup_require_library_confirmed: bool = True
+    cleanup_daily_limit: int = Field(default=20, ge=1, le=500)
 
     @field_validator("site_ids")
     @classmethod

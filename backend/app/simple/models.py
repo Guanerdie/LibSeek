@@ -66,6 +66,19 @@ class DownloadState(StrEnum):
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
 
 
+class DownloadCleanupState(StrEnum):
+    """Where a finished download sits in the space-reclaim flow."""
+
+    NONE = "NONE"
+    MARKED = "MARKED"
+    DELETED = "DELETED"
+    # Gone from the downloader without us deleting it.  Kept apart from DELETED
+    # so the audit trail never claims a reclaim that did not happen, and so the
+    # daily delete budget is not spent on torrents somebody else removed.
+    VANISHED = "VANISHED"
+    HELD = "HELD"
+
+
 class AutomationJobState(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
@@ -130,6 +143,12 @@ class LibraryMediaItem(Base):
         enum_column(MediaState, 24), default=MediaState.MISSING, nullable=False, index=True
     )
     attention_reason: Mapped[str | None] = mapped_column(Text)
+    # When NextFind stopped reporting this title as missing, which is the only
+    # authoritative "it is in the media library now" signal we have.  The state
+    # column is not one: it turns COMPLETE as soon as the download finishes.
+    library_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     last_searched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     search_miss_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_search_at: Mapped[datetime | None] = mapped_column(
@@ -330,6 +349,18 @@ class Download(Base):
     upload_speed: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     ratio: Mapped[float] = mapped_column(Float, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Mirrored from qBittorrent on every status sync so the cleanup query can
+    # run entirely in SQL, and so the numbers survive the torrent's removal.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    seeding_seconds: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    cleanup_state: Mapped[DownloadCleanupState] = mapped_column(
+        enum_column(DownloadCleanupState, 16),
+        default=DownloadCleanupState.NONE,
+        nullable=False,
+        index=True,
+    )
+    cleanup_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleanup_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -350,6 +381,12 @@ class AutomationPolicy(Base):
         CheckConstraint("retry_delay_minutes >= 1", name="ck_automation_retry_delay"),
         CheckConstraint("max_attempts >= 1", name="ck_automation_attempts"),
         CheckConstraint("daily_download_limit >= 1", name="ck_automation_daily_limit"),
+        CheckConstraint("cleanup_after_days >= 1", name="ck_automation_cleanup_after_days"),
+        CheckConstraint(
+            "cleanup_min_seeding_days >= 1", name="ck_automation_cleanup_min_seeding_days"
+        ),
+        CheckConstraint("cleanup_grace_days >= 0", name="ck_automation_cleanup_grace_days"),
+        CheckConstraint("cleanup_daily_limit >= 1", name="ck_automation_cleanup_daily_limit"),
         CheckConstraint(
             "cooldown_tier_1_hours >= 1 AND cooldown_tier_2_hours >= 1 "
             "AND cooldown_tier_3_hours >= 1",
@@ -406,6 +443,15 @@ class AutomationPolicy(Base):
     weight_seeders: Mapped[int] = mapped_column(Integer, default=13, nullable=False)
     weight_promotion: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     seeder_floor: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    # Space reclaim.  Deleting downloaded files is irreversible, so every switch
+    # here is off or conservative by default and ENABLE_QB_DELETE gates it too.
+    cleanup_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    cleanup_dry_run: Mapped[bool] = mapped_column(default=True, nullable=False)
+    cleanup_after_days: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    cleanup_min_seeding_days: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    cleanup_grace_days: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    cleanup_require_library_confirmed: Mapped[bool] = mapped_column(default=True, nullable=False)
+    cleanup_daily_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

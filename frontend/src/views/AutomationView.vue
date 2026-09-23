@@ -11,6 +11,7 @@ import type {
   AutomationJob,
   AutomationPolicy,
   AutomationRun,
+  CleanupPreview,
   DailyMedia,
   DailyMediaRegion,
   DailyMediaType,
@@ -48,6 +49,13 @@ const form = reactive({
   weight_seeders: 13,
   weight_promotion: 3,
   seeder_floor: 3,
+  cleanup_enabled: false,
+  cleanup_dry_run: true,
+  cleanup_after_days: 10,
+  cleanup_min_seeding_days: 10,
+  cleanup_grace_days: 2,
+  cleanup_require_library_confirmed: true,
+  cleanup_daily_limit: 20,
 })
 
 // Presets for the empty-search backoff ladder.  Sites differ in how much
@@ -90,6 +98,9 @@ const saving = ref(false)
 const starting = ref(false)
 const error = ref<string | null>(null)
 const feedback = ref<string | null>(null)
+const cleanupPreview = ref<CleanupPreview | null>(null)
+const cleanupLoading = ref(false)
+const cleanupError = ref<string | null>(null)
 const currentRun = ref<AutomationRun | null>(null)
 const mediaOptions = ref<DailyMedia[]>([])
 const mediaOptionsTotal = ref(0)
@@ -190,6 +201,13 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.weight_seeders = policy.weight_seeders
   form.weight_promotion = policy.weight_promotion
   form.seeder_floor = policy.seeder_floor
+  form.cleanup_enabled = policy.cleanup_enabled
+  form.cleanup_dry_run = policy.cleanup_dry_run
+  form.cleanup_after_days = policy.cleanup_after_days
+  form.cleanup_min_seeding_days = policy.cleanup_min_seeding_days
+  form.cleanup_grace_days = policy.cleanup_grace_days
+  form.cleanup_require_library_confirmed = policy.cleanup_require_library_confirmed
+  form.cleanup_daily_limit = policy.cleanup_daily_limit
 }
 
 async function loadMediaOptions(page = 1): Promise<void> {
@@ -358,6 +376,34 @@ async function save(): Promise<void> {
   }
 }
 
+async function loadCleanupPreview(): Promise<void> {
+  cleanupLoading.value = true
+  cleanupError.value = null
+  try {
+    cleanupPreview.value = await automationApi.cleanupPreview()
+  } catch (caught) {
+    cleanupError.value = message(caught, '无法读取清理预览')
+  } finally {
+    cleanupLoading.value = false
+  }
+}
+
+function formatGib(bytes: number): string {
+  return `${Math.round((bytes / 1024 ** 3) * 10) / 10} GiB`
+}
+
+const cleanupReady = computed(() =>
+  (cleanupPreview.value?.items ?? []).filter((item) => item.blocked_reason === null),
+)
+
+const cleanupBlocked = computed(() =>
+  (cleanupPreview.value?.items ?? []).filter((item) => item.blocked_reason !== null),
+)
+
+const cleanupRiskyDays = computed(
+  () => form.cleanup_after_days < 8 || form.cleanup_min_seeding_days < 8,
+)
+
 async function persistFormPolicy(): Promise<AutomationPolicy> {
   const maxSize = form.max_size_gib ? Number(form.max_size_gib) * 1024 ** 3 : null
   const dailyBytes = form.daily_download_gib
@@ -393,6 +439,13 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     weight_seeders: form.weight_seeders,
     weight_promotion: form.weight_promotion,
     seeder_floor: form.seeder_floor,
+    cleanup_enabled: form.cleanup_enabled,
+    cleanup_dry_run: form.cleanup_dry_run,
+    cleanup_after_days: form.cleanup_after_days,
+    cleanup_min_seeding_days: form.cleanup_min_seeding_days,
+    cleanup_grace_days: form.cleanup_grace_days,
+    cleanup_require_library_confirmed: form.cleanup_require_library_confirmed,
+    cleanup_daily_limit: form.cleanup_daily_limit,
   })
   applyPolicy(policy)
   return policy
@@ -738,6 +791,133 @@ onBeforeUnmount(() => {
             />
           </label>
         </div>
+      </details>
+
+      <details class="advanced-settings">
+        <summary>空间清理（删除已入库资源的种子和文件）</summary>
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">CLEANUP</span>
+            <strong>已入库资源的自动清理</strong>
+            <p class="muted">
+              下载目录和媒体库是两份真实文件，入库之后下载的那份就是多余的。
+              满足条件的种子会先被打上 <code>unin-cleanup</code> 标签继续做种，
+              观察期结束后才连文件一起删除。
+              在 qBittorrent 里手动摘掉这个标签，这个种子就永久保留。
+              <strong>删除不可逆</strong>，并且还需要在服务端设置
+              <code>ENABLE_QB_DELETE=true</code> 才会真正执行。
+            </p>
+          </div>
+        </div>
+        <div class="configuration-field-grid">
+          <label class="configuration-checkbox">
+            <input v-model="form.cleanup_enabled" name="cleanup_enabled" type="checkbox" />
+            启用空间清理
+          </label>
+          <label class="configuration-checkbox">
+            <input v-model="form.cleanup_dry_run" name="cleanup_dry_run" type="checkbox" />
+            演练模式（只记录，不删除）
+          </label>
+          <label class="configuration-checkbox">
+            <input
+              v-model="form.cleanup_require_library_confirmed"
+              name="cleanup_require_library_confirmed"
+              type="checkbox"
+            />
+            必须已确认入库
+          </label>
+          <label>
+            保留天数（下载完成后）
+            <input
+              v-model.number="form.cleanup_after_days"
+              name="cleanup_after_days"
+              type="number"
+              min="1"
+              max="365"
+              :disabled="!form.cleanup_enabled"
+            />
+          </label>
+          <label>
+            最短做种天数
+            <input
+              v-model.number="form.cleanup_min_seeding_days"
+              name="cleanup_min_seeding_days"
+              type="number"
+              min="1"
+              max="365"
+              :disabled="!form.cleanup_enabled"
+            />
+          </label>
+          <label>
+            标记后观察天数
+            <input
+              v-model.number="form.cleanup_grace_days"
+              name="cleanup_grace_days"
+              type="number"
+              min="0"
+              max="30"
+              :disabled="!form.cleanup_enabled"
+            />
+          </label>
+          <label>
+            每日最多清理
+            <input
+              v-model.number="form.cleanup_daily_limit"
+              name="cleanup_daily_limit"
+              type="number"
+              min="1"
+              max="500"
+              :disabled="!form.cleanup_enabled"
+            />
+          </label>
+        </div>
+        <p v-if="cleanupRiskyDays" class="inline-warning">
+          AvistaZ 要求做种满 7 天，而客户端统计的做种时长通常比站点认可的更长。
+          低于 8 天有被记 H&amp;R 的风险，建议保持 10 天。
+        </p>
+        <div class="filter-heading">
+          <div>
+            <strong>清理预览</strong>
+            <p class="muted">开启之前先看一眼它打算删什么。</p>
+          </div>
+          <button
+            type="button"
+            class="button"
+            :disabled="cleanupLoading"
+            @click="loadCleanupPreview"
+          >
+            {{ cleanupLoading ? '读取中…' : '查看预览' }}
+          </button>
+        </div>
+        <p v-if="cleanupError" class="muted">{{ cleanupError }}</p>
+        <template v-else-if="cleanupPreview">
+          <p class="muted">
+            当前可清理 {{ cleanupReady.length }} 项，预计释放
+            {{ formatGib(cleanupPreview.reclaimable_bytes) }}；
+            另有 {{ cleanupBlocked.length }} 项暂不满足条件。
+            <span v-if="!cleanupPreview.delete_authorized">
+              服务端尚未开启 ENABLE_QB_DELETE，当前只会记录不会删除。
+            </span>
+          </p>
+          <ul v-if="cleanupReady.length" class="reason-list">
+            <li v-for="item in cleanupReady" :key="item.download_id">
+              <strong>{{ item.media_title }}</strong>
+              <span class="muted">
+                {{ item.name }} · {{ formatGib(item.size_bytes) }} · 已做种
+                {{ item.seeding_days }} 天（需 {{ item.required_seeding_days }} 天）
+                <template v-if="item.deletes_at">
+                  · 预计 {{ formatShanghai(item.deletes_at) }} 删除
+                </template>
+              </span>
+            </li>
+          </ul>
+          <ul v-if="cleanupBlocked.length" class="reason-list">
+            <li v-for="item in cleanupBlocked" :key="item.download_id">
+              <strong>{{ item.media_title }}</strong>
+              <span class="muted">{{ item.blocked_reason }}</span>
+            </li>
+          </ul>
+        </template>
       </details>
 
       <div v-if="form.scope_mode === 'filters'" class="filter-heading">

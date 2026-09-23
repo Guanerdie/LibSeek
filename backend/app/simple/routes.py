@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import OperatorPrincipal, ViewerPrincipal
 from app.core.automation_runner import queue_manual_automation_run
+from app.core.config import get_settings
 from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.simple import automation, service, stats
+from app.simple import automation, cleanup, service, stats
 from app.simple.background import queue_library_sync, queue_release_search
 from app.simple.integrations import (
     build_nextfind,
@@ -46,6 +47,8 @@ from app.simple.schemas import (
     BulkSubscriptionResult,
     BulkSubscriptionUpdate,
     CandidateView,
+    CleanupPreview,
+    CleanupPreviewEntry,
     DownloadCreate,
     DownloadPage,
     DownloadView,
@@ -427,6 +430,37 @@ async def sync_downloads(session: Session, principal: OperatorPrincipal) -> Sync
     finally:
         await close_adapter(qb)
     return SyncResult(updated=updated)
+
+
+@router.get("/downloads/cleanup-preview", response_model=CleanupPreview)
+async def downloads_cleanup_preview(
+    session: Session, principal: ViewerPrincipal
+) -> CleanupPreview:
+    """Show what space reclaim would touch next, before it is switched on."""
+
+    del principal
+    policy = await automation.get_policy(session)
+    settings = get_settings()
+    qb = build_qb_readonly()
+    try:
+        await qb.authenticate()
+        torrents = await qb.list_torrents()
+    finally:
+        await close_adapter(qb)
+    items = await cleanup.preview_cleanup(session, torrents)
+    return CleanupPreview(
+        enabled=policy.cleanup_enabled,
+        dry_run=(
+            policy.cleanup_dry_run
+            or not settings.enable_qb_delete
+            or not settings.enable_qb_write
+        ),
+        delete_authorized=settings.enable_qb_delete and settings.enable_qb_write,
+        reclaimable_bytes=sum(
+            item.size_bytes for item in items if item.blocked_reason is None
+        ),
+        items=[CleanupPreviewEntry.model_validate(item, from_attributes=True) for item in items],
+    )
 
 
 @router.get("/automation/policy", response_model=AutomationPolicyView)
