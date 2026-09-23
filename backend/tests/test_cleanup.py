@@ -666,9 +666,11 @@ async def test_seeding_counter_is_refreshed_for_completed_downloads(session_fact
 
 
 @pytest.mark.asyncio
-async def test_backlog_without_a_completion_time_is_picked_up(session_factory) -> None:
+async def test_missing_completion_time_is_taken_from_the_client(session_factory) -> None:
+    """The app was down when the torrent finished, so the sync never saw it."""
+
     async with session_factory() as session:
-        download = await _seed(session, source_item_id="backlog", info_hash="8a" * 20)
+        download = await _seed(session, source_item_id="missed-finish", info_hash="8a" * 20)
         download.completed_at = None
         await session.commit()
         await _enable(session)
@@ -707,3 +709,28 @@ async def test_naive_marked_at_is_handled(session_factory) -> None:
         await session.refresh(download)
 
         assert download.cleanup_state == DownloadCleanupState.DELETED
+
+
+@pytest.mark.asyncio
+async def test_held_download_is_neither_cleaned_nor_previewed(session_factory) -> None:
+    """Every download that predates the upgrade starts out HELD."""
+
+    async with session_factory() as session:
+        download = await _seed(
+            session,
+            source_item_id="backlog",
+            info_hash="bb" * 20,
+            cleanup_state=DownloadCleanupState.HELD,
+        )
+        await _enable(session)
+        torrent = _torrent("bb" * 20, seeding_days=60, tags=CLEANUP_TAG)
+        qb = RecordingQb([torrent])
+
+        result = await _run(session, qb)
+        items = await cleanup.preview_cleanup(session, [torrent])
+        await session.refresh(download)
+
+        assert qb.tagged == [] and qb.deleted == []
+        assert result.total == 0
+        assert items == []
+        assert download.cleanup_state == DownloadCleanupState.HELD

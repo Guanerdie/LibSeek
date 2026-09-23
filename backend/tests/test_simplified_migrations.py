@@ -240,3 +240,67 @@ def test_region_tags_are_backfilled_for_media_already_in_the_library(
     engine.dispose()
     assert "region_tags" not in library_columns
     database.unlink()
+
+
+def test_existing_downloads_are_held_back_from_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backlog is the operator's to sort; only new downloads get cleaned up."""
+
+    backend_root = Path(__file__).parents[1]
+    database = backend_root / f".test-migration-{uuid4().hex}.db"
+    monkeypatch.setenv("DATABASE_URL", sqlite_url(database, async_driver=True))
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    command.upgrade(config, "20260920_0024")
+
+    stamp = "2026-09-01 00:00:00"
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO library_media (id, source, source_item_id, media_type, title,"
+                " state, discovered_at, updated_at, country_codes)"
+                " VALUES ('m1', 'nextfind', 'm1', 'movie', 'm1', 'COMPLETE',"
+                " :stamp, :stamp, '[]')"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO searches (id, media_id, site_ids, state, created_at)"
+                " VALUES ('s1', 'm1', '[\"avistaz\"]', 'SUCCEEDED', :stamp)"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO release_candidates (id, search_id, site_id, torrent_id, title,"
+                " season_coverage, episode_coverage, score, reasons, warnings, created_at)"
+                " VALUES ('c1', 's1', 'avistaz', 't1', 'Example', '[]', '[]', 0.9,"
+                " '[]', '[]', :stamp)"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO downloads (id, media_id, candidate_id, name, state, progress,"
+                " download_speed, upload_speed, ratio, info_hash, created_at, updated_at)"
+                " VALUES ('d1', 'm1', 'c1', 'Example.mkv', 'SEEDING', 1, 0, 0, 1.5,"
+                " :hash, :stamp, :stamp)"
+            ),
+            {"stamp": stamp, "hash": "a" * 40},
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.connect() as connection:
+        state = connection.execute(
+            text("SELECT cleanup_state FROM downloads WHERE id = 'd1'")
+        ).scalar_one()
+    engine.dispose()
+    assert state == "HELD"
+
+    command.downgrade(config, "20260920_0024")
+    database.unlink()

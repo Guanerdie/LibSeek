@@ -52,6 +52,13 @@ def upgrade() -> None:
         batch.add_column(sa.Column("cleanup_marked_at", sa.DateTime(timezone=True)))
         batch.add_column(sa.Column("cleanup_deleted_at", sa.DateTime(timezone=True)))
 
+    # Everything downloaded before this revision belongs to the operator, who
+    # sorts that backlog by hand.  Letting the cleanup loose on it could delete
+    # files in the middle of being filed, so every existing download starts out
+    # HELD -- the same state a manually rescued torrent ends up in -- and only
+    # downloads submitted after the upgrade are ever cleaned up automatically.
+    op.execute(sa.text("UPDATE downloads SET cleanup_state = 'HELD'"))
+
     with op.batch_alter_table("automation_policy") as batch:
         batch.add_column(
             sa.Column(

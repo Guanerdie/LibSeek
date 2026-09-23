@@ -212,9 +212,10 @@ def refresh_from_torrent(download: Download, torrent: QbTorrent) -> None:
     ``sync_download_statuses`` skips anything already COMPLETED, and a seeding
     torrent that qBittorrent reports as ``stalledUP`` maps to exactly that, so
     the seeding counter would freeze near zero and the preview would show "0.0
-    days seeded" for a torrent that has been seeding for weeks.  Backlog rows
-    that finished before this feature existed have no completion time at all;
-    filling it in here is what lets them be cleaned up too.
+    days seeded" for a torrent that has been seeding for weeks.  A completion
+    time missed by the sync (the app was down when the torrent finished) is
+    filled in from the client as well.  Downloads that predate this feature
+    never get here: the migration marks them HELD.
     """
 
     download.seeding_seconds = max(0, torrent.seeding_time)
