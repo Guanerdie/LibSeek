@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -34,12 +34,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.core import audit
 from app.core.config import Settings, get_settings
 from app.core.pt_site_rules import effective_hnr_rule
 from app.core.time import utc_now
 from app.db.session import SessionFactory
 from app.errors import AppError
 from app.schemas.qbittorrent import QbTorrent
+from app.simple.integrations import (
+    build_nextfind,
+    close_adapter,
+    library_listing_is_fresh,
+    sync_nextfind,
+)
 from app.simple.models import (
     ActivityLog,
     AutomationPolicy,
@@ -58,7 +65,9 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 CLEANUP_TAG = "unin-cleanup"
 
 _FIRST_RUN_DELAY = timedelta(minutes=10)
-_RUN_INTERVAL = timedelta(hours=6)
+#: A NextFind listing this recent is taken as current, so a cleanup cycle that
+#: follows an automation run or a manual sync does not fetch it twice.
+_LISTING_MAX_AGE = timedelta(minutes=15)
 #: Downloads inspected per cycle.  The loop runs every few hours, so there is
 #: no value in walking a huge library in one pass.
 _SCAN_LIMIT = 500
@@ -274,6 +283,7 @@ def _log(
     *,
     event: str,
     message: str,
+    reason: str | None = None,
     details: dict[str, object] | None = None,
 ) -> None:
     session.add(
@@ -281,13 +291,109 @@ def _log(
             media_id=candidate.media.id,
             event=event,
             message=message,
+            reason=reason,
             details={
                 "download_id": candidate.download.id,
                 "info_hash": candidate.download.info_hash,
+                "name": candidate.download.name,
                 **(details or {}),
             },
         )
     )
+
+
+def _local(value: datetime | None) -> str:
+    if value is None:
+        return "未知"
+    return _as_utc(value).astimezone(_SHANGHAI).strftime("%Y-%m-%d %H:%M")
+
+
+def _eligibility_reason(
+    candidate: CleanupCandidate,
+    policy: AutomationPolicy,
+    decision: CleanupDecision,
+    *,
+    now: datetime,
+) -> str:
+    """Spell out every condition a torrent met, for the activity page."""
+
+    download = candidate.download
+    torrent = candidate.torrent
+    parts: list[str] = []
+    if policy.cleanup_require_library_confirmed:
+        parts.append(f"已确认入库（{_local(candidate.media.library_confirmed_at)}）")
+    else:
+        parts.append("策略未要求入库确认")
+    if download.completed_at is not None:
+        age = (now - _as_utc(download.completed_at)).total_seconds() / _DAY_SECONDS
+        parts.append(f"下载完成已 {age:.1f} 天，保留期 {policy.cleanup_after_days} 天")
+    if torrent is not None:
+        parts.append(
+            f"已做种 {torrent.seeding_time / _DAY_SECONDS:.1f} 天，"
+            f"要求 {decision.required_seeding_days} 天"
+        )
+    parts.append("没有其它种子共用这份文件")
+    return "；".join(parts)
+
+
+def _evidence(candidate: CleanupCandidate, decision: CleanupDecision) -> dict[str, object]:
+    download = candidate.download
+    torrent = candidate.torrent
+    confirmed = candidate.media.library_confirmed_at
+    return {
+        "site_id": candidate.site_id,
+        "size_bytes": torrent.size if torrent is not None else None,
+        "seeding_days": (
+            round(torrent.seeding_time / _DAY_SECONDS, 2) if torrent is not None else None
+        ),
+        "required_seeding_days": decision.required_seeding_days,
+        "completed_at": (
+            _as_utc(download.completed_at).isoformat()
+            if download.completed_at is not None
+            else None
+        ),
+        "library_confirmed_at": (
+            _as_utc(confirmed).isoformat() if confirmed is not None else None
+        ),
+    }
+
+
+async def _has_candidates(session: AsyncSession) -> bool:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Download)
+        .where(
+            Download.info_hash.is_not(None),
+            Download.state.in_(_CLEANABLE_STATES),
+            Download.cleanup_state.in_(_ACTIVE_CLEANUP_STATES),
+        )
+    )
+    return bool(count)
+
+
+async def refresh_library_confirmations(session: AsyncSession) -> None:
+    """Make sure the library confirmations reflect NextFind right now.
+
+    Confirmations are only written when NextFind is synced.  Without a sync a
+    title that has since dropped back out of the library still looks confirmed,
+    and its download would be deleted while it is the only copy left.  Raises
+    when a complete listing cannot be had; the caller must then delete nothing.
+    """
+
+    if library_listing_is_fresh(_LISTING_MAX_AGE):
+        return
+    adapter = build_nextfind()
+    try:
+        await sync_nextfind(session, adapter)
+    finally:
+        await close_adapter(adapter)
+    if not library_listing_is_fresh(_LISTING_MAX_AGE):
+        raise AppError(
+            "NEXTFIND_LISTING_INCOMPLETE",
+            "NextFind 返回的缺失列表不完整",
+            status_code=502,
+            retryable=True,
+        )
 
 
 async def preview_cleanup(
@@ -340,6 +446,7 @@ async def run_cleanup_cycle(
     *,
     readonly_factory: Callable[[], QbittorrentAdapter],
     write_factory: Callable[[], QbittorrentAdapter],
+    library_refresher: Callable[[AsyncSession], Awaitable[None]] | None = None,
     settings: Settings | None = None,
     now: datetime | None = None,
 ) -> CleanupResult:
@@ -358,6 +465,33 @@ async def run_cleanup_cycle(
         or not settings.enable_qb_write
     )
     result = CleanupResult(dry_run=dry_run)
+
+    if (
+        library_refresher is not None
+        and policy.cleanup_require_library_confirmed
+        # Nothing to decide means nothing to confirm; an idle cycle must not
+        # page through the whole missing list.
+        and await _has_candidates(session)
+    ):
+        try:
+            await library_refresher(session)
+        except Exception as exc:
+            # Deleting on confirmations that could not be re-checked is exactly
+            # the mistake the refresh exists to prevent, so the cycle stops.
+            if not isinstance(exc, AppError):
+                _logger.exception("Library confirmation refresh failed")
+            message = exc.message if isinstance(exc, AppError) else "入库确认刷新失败"
+            await session.rollback()
+            session.add(
+                ActivityLog(
+                    event="DOWNLOAD_CLEANUP_SKIPPED",
+                    message=f"无法刷新入库确认，本轮不清理：{message}",
+                    reason="删种前必须先向 NextFind 重新确认入库状态",
+                )
+            )
+            await session.commit()
+            result.skipped.append(f"入库确认刷新失败: {message}")
+            return result
 
     readonly = readonly_factory()
     try:
@@ -415,6 +549,7 @@ async def run_cleanup_cycle(
                     candidate,
                     event="DOWNLOAD_CLEANUP_HELD",
                     message=f"{download.name} 的清理标记已被手动移除，不再自动清理",
+                    reason=f"qBittorrent 中的 {CLEANUP_TAG} 标签被人工摘除",
                 )
                 continue
 
@@ -442,6 +577,8 @@ async def run_cleanup_cycle(
                         candidate,
                         event="DOWNLOAD_CLEANUP_UNMARKED",
                         message=f"{download.name} 已不符合清理条件：{decision.reason}",
+                        reason=decision.reason,
+                        details=_evidence(candidate, decision),
                     )
                 elif decision.reason:
                     result.skipped.append(f"{download.name}: {decision.reason}")
@@ -466,7 +603,11 @@ async def run_cleanup_cycle(
                             f"{download.name} 已标记待清理，"
                             f"{policy.cleanup_grace_days} 天后删除"
                         ),
-                        details={"size_bytes": torrent.size},
+                        reason=_eligibility_reason(candidate, policy, decision, now=now),
+                        details={
+                            **_evidence(candidate, decision),
+                            "grace_days": policy.cleanup_grace_days,
+                        },
                     )
                 result.marked += 1
                 continue
@@ -504,6 +645,7 @@ async def run_cleanup_cycle(
                         candidate,
                         event="DOWNLOAD_CLEANUP_HELD",
                         message=f"{download.name} 的清理标记已被手动移除，不再自动清理",
+                        reason=f"删除前复核时发现 {CLEANUP_TAG} 标签已被人工摘除",
                     )
                     continue
                 await client.delete_torrents([download.info_hash or ""], delete_files=True)
@@ -521,7 +663,17 @@ async def run_cleanup_cycle(
                     candidate,
                     event="DOWNLOAD_CLEANUP_DELETED",
                     message=f"已删除 {download.name} 的种子和文件",
-                    details={"size_bytes": torrent.size},
+                    reason=(
+                        f"标记于 {_local(marked_at)}，观察期 {policy.cleanup_grace_days} 天已过；"
+                        f"删除前复核清理标签仍在；"
+                        f"{_eligibility_reason(candidate, policy, decision, now=now)}"
+                    ),
+                    details={
+                        **_evidence(candidate, decision),
+                        "marked_at": _as_utc(marked_at).isoformat(),
+                        "grace_days": policy.cleanup_grace_days,
+                        "files_deleted": True,
+                    },
                 )
                 # Only a real delete reclaims anything; the dry run counts its
                 # bytes in would_reclaim_bytes instead.
@@ -550,6 +702,53 @@ async def run_cleanup_cycle(
     return result
 
 
+async def set_cleanup_hold(session: AsyncSession, *, download_id: str, held: bool) -> Download:
+    """Keep one download out of automatic cleanup, or let it back in.
+
+    Only the two resting states change hands here.  A torrent already tagged
+    for deletion is rescued inside qBittorrent by removing the tag, so that
+    the client and the database cannot disagree about it; one already deleted
+    has nothing left to hold.
+    """
+
+    download = await session.get(Download, download_id)
+    if download is None:
+        raise AppError("DOWNLOAD_NOT_FOUND", "下载记录不存在", status_code=404)
+    wanted = DownloadCleanupState.HELD if held else DownloadCleanupState.NONE
+    if download.cleanup_state == wanted:
+        return download
+    if download.cleanup_state == DownloadCleanupState.MARKED:
+        raise AppError(
+            "DOWNLOAD_CLEANUP_MARKED",
+            f"该种子已标记待清理，请在 qBittorrent 中摘掉 {CLEANUP_TAG} 标签来保留它",
+            status_code=409,
+        )
+    if download.cleanup_state in (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED):
+        raise AppError(
+            "DOWNLOAD_ALREADY_REMOVED", "该种子已经不在 qBittorrent 中", status_code=409
+        )
+    download.cleanup_state = wanted
+    session.add(
+        ActivityLog(
+            media_id=download.media_id,
+            event="DOWNLOAD_CLEANUP_HELD" if held else "DOWNLOAD_CLEANUP_RELEASED",
+            message=(
+                f"{download.name} 已设为保留，不再自动清理"
+                if held
+                else f"{download.name} 已允许自动清理"
+            ),
+            details={
+                "download_id": download.id,
+                "info_hash": download.info_hash,
+                "name": download.name,
+            },
+        )
+    )
+    await session.commit()
+    await session.refresh(download)
+    return download
+
+
 async def _close(adapter: object) -> None:
     close = getattr(adapter, "aclose", None)
     if close is not None:
@@ -570,16 +769,23 @@ async def download_cleanup_loop(
     readonly_factory: Callable[[], QbittorrentAdapter],
     write_factory: Callable[[], QbittorrentAdapter],
     session_factory: async_sessionmaker[AsyncSession] = SessionFactory,
+    library_refresher: Callable[[AsyncSession], Awaitable[None]] | None = (
+        refresh_library_confirmations
+    ),
 ) -> None:
-    delay = _FIRST_RUN_DELAY
+    # Everything this loop writes to the activity log is the cleanup's doing.
+    audit.bind(actor=audit.CLEANUP, trigger="AUTO")
+    interval = timedelta(minutes=get_settings().cleanup_interval_minutes)
+    delay = min(_FIRST_RUN_DELAY, interval)
     while not await _stopped_within(stop, delay):
-        delay = _RUN_INTERVAL
+        delay = interval
         try:
             async with session_factory() as session:
                 result = await run_cleanup_cycle(
                     session,
                     readonly_factory=readonly_factory,
                     write_factory=write_factory,
+                    library_refresher=library_refresher,
                 )
         except AppError as exc:
             # A downloader that is offline or unconfigured is not worth a stack

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.simple import automation, cleanup, service, stats
+from app.simple import activity, automation, cleanup, service, stats
 from app.simple.background import queue_library_sync, queue_release_search
 from app.simple.integrations import (
     build_nextfind,
@@ -37,6 +37,8 @@ from app.simple.models import (
 )
 from app.simple.regions import NextFindRegion
 from app.simple.schemas import (
+    ActivityPage,
+    ActivityView,
     AutomationJobPage,
     AutomationJobView,
     AutomationOutcomeView,
@@ -47,6 +49,7 @@ from app.simple.schemas import (
     BulkSubscriptionResult,
     BulkSubscriptionUpdate,
     CandidateView,
+    CleanupHoldUpdate,
     CleanupPreview,
     CleanupPreviewEntry,
     DownloadCreate,
@@ -460,6 +463,68 @@ async def downloads_cleanup_preview(
             item.size_bytes for item in items if item.blocked_reason is None
         ),
         items=[CleanupPreviewEntry.model_validate(item, from_attributes=True) for item in items],
+    )
+
+
+@router.put("/downloads/{download_id}/cleanup-hold", response_model=DownloadView)
+async def set_download_cleanup_hold(
+    download_id: str,
+    payload: CleanupHoldUpdate,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> DownloadView:
+    """Keep a download out of automatic cleanup, or let it back in."""
+
+    del principal
+    download = await cleanup.set_cleanup_hold(
+        session, download_id=download_id, held=payload.held
+    )
+    return DownloadView.model_validate(download)
+
+
+@router.get("/activity", response_model=ActivityPage)
+async def activity_log(
+    session: Session,
+    principal: ViewerPrincipal,
+    category: activity.ActivityCategory | None = None,
+    trigger: Literal["MANUAL", "AUTO"] | None = None,
+    query: str | None = Query(default=None, max_length=100),
+    media_id: str | None = Query(default=None, min_length=1, max_length=36),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+) -> ActivityPage:
+    """What was done, when, by whom, and why."""
+
+    del principal
+    rows, total = await activity.list_activity(
+        session,
+        category=category,
+        trigger=trigger,
+        query=query.strip() if query else None,
+        media_id=media_id,
+        page=page,
+        page_size=page_size,
+    )
+    return ActivityPage(
+        items=[
+            ActivityView(
+                id=entry.id,
+                created_at=entry.created_at,
+                event=entry.event,
+                category=activity.category_of(entry.event),
+                message=entry.message,
+                actor=entry.actor,
+                trigger=cast("Literal['MANUAL', 'AUTO'] | None", entry.trigger),
+                reason=entry.reason,
+                details=entry.details or {},
+                media_id=entry.media_id,
+                media_title=title,
+            )
+            for entry, title in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
     )
 
 

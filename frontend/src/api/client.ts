@@ -1,4 +1,6 @@
 import type {
+  ActivityEntry,
+  ActivityQuery,
   AuthSetupStatus,
   AutomationJob,
   AutomationJobPage,
@@ -251,6 +253,27 @@ export const dailyApi = {
   syncDownloads: () =>
     request<{ created: number; updated: number }>('/api/downloads/sync', { method: 'POST' }),
   cleanupPreview: () => request<CleanupPreview>('/api/downloads/cleanup-preview'),
+  // held=true keeps the download out of automatic cleanup; false lets it back in.
+  setCleanupHold: (downloadId: string, held: boolean) =>
+    request<DailyDownload>(`/api/downloads/${encodeURIComponent(downloadId)}/cleanup-hold`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ held }),
+    }),
+}
+
+export const activityApi = {
+  list: (params: ActivityQuery = {}) =>
+    request<Page<ActivityEntry>>(
+      `/api/activity?${queryString({
+        page: params.page ?? 1,
+        page_size: params.pageSize ?? 30,
+        category: params.category,
+        trigger: params.trigger,
+        query: params.query,
+        media_id: params.mediaId,
+      })}`,
+    ),
 }
 
 export const automationApi = {

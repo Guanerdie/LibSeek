@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     # Deleting downloaded files is irreversible and is therefore authorised on
     # its own; ENABLE_QB_WRITE alone never grants it.
     enable_qb_delete: bool = False
+    # How often space reclaim looks for torrents to tag or delete.  Six hours
+    # is plenty in normal use; a short interval is for testing the feature
+    # without waiting a day per step.
+    cleanup_interval_minutes: int = Field(default=360, ge=1, le=7 * 24 * 60)
     torrent_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     torrent_max_files: int = Field(default=20_000, ge=1, le=100_000)
     preferred_resolutions: tuple[str, ...] = ("2160p", "1080p")

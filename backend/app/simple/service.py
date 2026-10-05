@@ -373,7 +373,12 @@ async def queue_download(
                 media_id=media.id,
                 event="DOWNLOAD_QUEUED",
                 message=f"已选择资源：{candidate.title}",
-                details={"site_id": candidate.site_id},
+                details={
+                    "site_id": candidate.site_id,
+                    "candidate_id": candidate.id,
+                    "score": candidate.score,
+                    "size_bytes": candidate.size_bytes,
+                },
             ),
         ]
     )

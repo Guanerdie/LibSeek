@@ -21,6 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core import audit
 from app.core.time import utc_now
 from app.db.base import Base
 from app.models.enums import MediaType
@@ -533,6 +534,26 @@ class ActivityLog(Base):
     event: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     details: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, nullable=False)
+    # Who did it and whether a person or the system decided to.  Stamped from
+    # app.core.audit when the row is created; rows written before these
+    # columns existed have none.
+    actor: Mapped[str | None] = mapped_column(String(120))
+    trigger: Mapped[str | None] = mapped_column(String(16), index=True)
+    reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
+
+
+@event.listens_for(ActivityLog, "init")
+def _stamp_activity(
+    _target: ActivityLog, _args: tuple[object, ...], kwargs: dict[str, object]
+) -> None:
+    context = audit.current()
+    kwargs.setdefault("actor", context.actor)
+    kwargs.setdefault("trigger", context.trigger)
+    if context.reason is not None:
+        kwargs.setdefault("reason", context.reason)
+    if context.details:
+        own = kwargs.get("details")
+        kwargs["details"] = {**context.details, **(own if isinstance(own, dict) else {})}

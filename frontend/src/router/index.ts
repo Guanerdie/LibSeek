@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import type { AuthRole } from '../types'
 import { safeInternalRedirect } from '../utils/navigation'
+import ActivityView from '../views/ActivityView.vue'
 import ConfigurationView from '../views/ConfigurationView.vue'
 import AutomationView from '../views/AutomationView.vue'
 import AutomationRunDetailView from '../views/AutomationRunDetailView.vue'
@@ -28,6 +29,7 @@ const router = createRouter({
     { path: '/library/:id/resources', component: ResourcesView },
     { path: '/downloads', component: DownloadsView },
     { path: '/monitoring', component: MonitoringView },
+    { path: '/activity', component: ActivityView },
     { path: '/automation', component: AutomationView, meta: { requiredRole: 'operator' } },
     { path: '/automation/runs/:runId', component: AutomationRunDetailView, meta: { requiredRole: 'operator' } },
     { path: '/configuration', component: ConfigurationView, meta: { requiredRole: 'admin' } },

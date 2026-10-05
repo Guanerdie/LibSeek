@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.core import audit
 from app.core.config import Settings
 from app.core.time import utc_now
+from app.errors import AppError
 from app.models.enums import MediaType
 from app.schemas.qbittorrent import QbTorrent
 from app.simple import cleanup
 from app.simple.automation import get_policy
 from app.simple.cleanup import CLEANUP_TAG, run_cleanup_cycle
 from app.simple.models import (
+    ActivityLog,
     AutomationPolicy,
     Download,
     DownloadCleanupState,
@@ -736,3 +741,257 @@ async def test_held_download_is_neither_cleaned_nor_previewed(session_factory) -
         assert result.total == 0
         assert items == []
         assert download.cleanup_state == DownloadCleanupState.HELD
+
+
+# ---------------------------------------------------------------------------
+# Library confirmation is refreshed before anything is decided
+# ---------------------------------------------------------------------------
+
+
+async def _run_with_refresh(
+    session: AsyncSession,
+    qb: RecordingQb,
+    refresher: Callable[[AsyncSession], Awaitable[None]],
+) -> cleanup.CleanupResult:
+    return await run_cleanup_cycle(
+        session,
+        readonly_factory=lambda: cast(QbittorrentAdapter, qb),
+        write_factory=lambda: cast(QbittorrentAdapter, qb),
+        library_refresher=refresher,
+        settings=_settings(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_library_refresh_stops_the_whole_cycle(session_factory) -> None:
+    """Stale confirmations must never be acted on."""
+
+    async with session_factory() as session:
+        due = await _seed(
+            session,
+            source_item_id="due",
+            info_hash="c1" * 20,
+            cleanup_state=DownloadCleanupState.MARKED,
+            marked_days_ago=5,
+        )
+        fresh = await _seed(session, source_item_id="fresh", info_hash="c2" * 20)
+        await _enable(session)
+        qb = RecordingQb(
+            [
+                _torrent("c1" * 20, seeding_days=30, tags=CLEANUP_TAG),
+                _torrent("c2" * 20, seeding_days=30),
+            ]
+        )
+
+        async def refresher(_session: AsyncSession) -> None:
+            raise AppError("NEXTFIND_UNAVAILABLE", "NextFind 无法连接", status_code=502)
+
+        result = await _run_with_refresh(session, qb, refresher)
+        await session.refresh(due)
+        await session.refresh(fresh)
+        skipped = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "DOWNLOAD_CLEANUP_SKIPPED")
+            )
+        ).all()
+
+        assert qb.tagged == [] and qb.deleted == []
+        assert result.total == 0
+        assert due.cleanup_state == DownloadCleanupState.MARKED
+        assert fresh.cleanup_state == DownloadCleanupState.NONE
+        assert len(skipped) == 1
+        assert "NextFind 无法连接" in skipped[0].message
+
+
+@pytest.mark.asyncio
+async def test_library_is_refreshed_before_deciding(session_factory) -> None:
+    async with session_factory() as session:
+        download = await _seed(
+            session, source_item_id="late-confirm", info_hash="c3" * 20, library_confirmed=False
+        )
+        await _enable(session)
+        qb = RecordingQb([_torrent("c3" * 20, seeding_days=30)])
+        calls = 0
+
+        async def refresher(refresh_session: AsyncSession) -> None:
+            # What a NextFind sync does when the title has left the missing list.
+            nonlocal calls
+            calls += 1
+            media = await refresh_session.get(LibraryMediaItem, download.media_id)
+            assert media is not None
+            media.library_confirmed_at = utc_now()
+            await refresh_session.commit()
+
+        result = await _run_with_refresh(session, qb, refresher)
+        await session.refresh(download)
+
+        assert calls == 1
+        assert result.marked == 1
+        assert download.cleanup_state == DownloadCleanupState.MARKED
+
+
+@pytest.mark.asyncio
+async def test_idle_cycle_does_not_refresh_the_library(session_factory) -> None:
+    """Held, deleted and unfinished downloads give the cycle nothing to decide."""
+
+    async with session_factory() as session:
+        await _seed(
+            session,
+            source_item_id="held",
+            info_hash="c4" * 20,
+            cleanup_state=DownloadCleanupState.HELD,
+        )
+        await _enable(session)
+        qb = RecordingQb([_torrent("c4" * 20, seeding_days=30)])
+        calls = 0
+
+        async def refresher(_session: AsyncSession) -> None:
+            nonlocal calls
+            calls += 1
+
+        await _run_with_refresh(session, qb, refresher)
+
+        assert calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Every step leaves a record of who did it and why
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_marking_and_deleting_record_actor_and_reason(session_factory) -> None:
+    async with session_factory() as session:
+        marked = await _seed(session, source_item_id="audit-mark", info_hash="d1" * 20)
+        deleted = await _seed(
+            session,
+            source_item_id="audit-delete",
+            info_hash="d2" * 20,
+            cleanup_state=DownloadCleanupState.MARKED,
+            marked_days_ago=5,
+        )
+        await _enable(session)
+        qb = RecordingQb(
+            [
+                _torrent("d1" * 20, seeding_days=30, size=1_000),
+                _torrent("d2" * 20, seeding_days=30, tags=CLEANUP_TAG, size=2_000),
+            ]
+        )
+
+        with audit.scope(actor=audit.CLEANUP, trigger="AUTO"):
+            await _run(session, qb)
+        rows = {
+            row.event: row
+            for row in await session.scalars(
+                select(ActivityLog).where(ActivityLog.event.startswith("DOWNLOAD_CLEANUP_"))
+            )
+        }
+
+        mark_row = rows["DOWNLOAD_CLEANUP_MARKED"]
+        assert mark_row.actor == audit.CLEANUP
+        assert mark_row.trigger == "AUTO"
+        assert mark_row.details["download_id"] == marked.id
+        assert mark_row.details["size_bytes"] == 1_000
+        assert mark_row.details["required_seeding_days"] == 10
+        assert "已确认入库" in (mark_row.reason or "")
+        assert "已做种 30.0 天" in (mark_row.reason or "")
+
+        delete_row = rows["DOWNLOAD_CLEANUP_DELETED"]
+        assert delete_row.actor == audit.CLEANUP
+        assert delete_row.details["download_id"] == deleted.id
+        assert delete_row.details["files_deleted"] is True
+        assert "观察期 2 天已过" in (delete_row.reason or "")
+        assert "删除前复核清理标签仍在" in (delete_row.reason or "")
+
+
+# ---------------------------------------------------------------------------
+# Holding and releasing by hand
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_held_download_can_be_released_and_held_again(session_factory) -> None:
+    async with session_factory() as session:
+        download = await _seed(
+            session,
+            source_item_id="release",
+            info_hash="e1" * 20,
+            cleanup_state=DownloadCleanupState.HELD,
+        )
+
+        with audit.scope(actor="owner", trigger="MANUAL"):
+            released = await cleanup.set_cleanup_hold(
+                session, download_id=download.id, held=False
+            )
+            assert released.cleanup_state == DownloadCleanupState.NONE
+            held = await cleanup.set_cleanup_hold(session, download_id=download.id, held=True)
+            assert held.cleanup_state == DownloadCleanupState.HELD
+        events = [
+            (row.event, row.actor, row.trigger)
+            for row in await session.scalars(
+                select(ActivityLog).order_by(ActivityLog.created_at, ActivityLog.event.desc())
+            )
+        ]
+
+        assert ("DOWNLOAD_CLEANUP_RELEASED", "owner", "MANUAL") in events
+        assert ("DOWNLOAD_CLEANUP_HELD", "owner", "MANUAL") in events
+
+
+@pytest.mark.asyncio
+async def test_marked_download_cannot_be_held_from_the_app(session_factory) -> None:
+    """The tag in qBittorrent is the override; two switches could disagree."""
+
+    async with session_factory() as session:
+        download = await _seed(
+            session,
+            source_item_id="marked-hold",
+            info_hash="e2" * 20,
+            cleanup_state=DownloadCleanupState.MARKED,
+            marked_days_ago=1,
+        )
+
+        with pytest.raises(AppError) as raised:
+            await cleanup.set_cleanup_hold(session, download_id=download.id, held=True)
+
+        assert raised.value.error_code == "DOWNLOAD_CLEANUP_MARKED"
+
+
+# ---------------------------------------------------------------------------
+# The interval is a setting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("minutes", "expected"),
+    [(360, [600.0, 21_600.0]), (20, [600.0, 1_200.0]), (5, [300.0, 300.0])],
+)
+@pytest.mark.asyncio
+async def test_loop_waits_the_configured_interval(
+    monkeypatch: pytest.MonkeyPatch, session_factory, minutes: int, expected: list[float]
+) -> None:
+    waits: list[float] = []
+
+    async def fake_wait(_stop: asyncio.Event, delay: timedelta) -> bool:
+        waits.append(delay.total_seconds())
+        return len(waits) > 1
+
+    async def fake_cycle(*_args: object, **_kwargs: object) -> cleanup.CleanupResult:
+        return cleanup.CleanupResult()
+
+    monkeypatch.setattr(
+        cleanup,
+        "get_settings",
+        lambda: Settings(_env_file=None, cleanup_interval_minutes=minutes),
+    )
+    monkeypatch.setattr(cleanup, "_stopped_within", fake_wait)
+    monkeypatch.setattr(cleanup, "run_cleanup_cycle", fake_cycle)
+    qb = RecordingQb([])
+
+    await cleanup.download_cleanup_loop(
+        asyncio.Event(),
+        readonly_factory=lambda: cast(QbittorrentAdapter, qb),
+        write_factory=lambda: cast(QbittorrentAdapter, qb),
+        session_factory=session_factory,
+    )
+
+    assert waits == expected

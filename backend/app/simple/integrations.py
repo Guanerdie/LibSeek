@@ -226,6 +226,9 @@ class LibrarySyncStatus:
     state: Literal["IDLE", "RUNNING", "SUCCEEDED", "FAILED"] = "IDLE"
     created: int = 0
     updated: int = 0
+    # How many times NextFind said its listing was cut short.  Anything above
+    # zero means "absent from the list" proves nothing.
+    warnings: int = 0
     error_message: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -248,19 +251,41 @@ def mark_library_sync_started() -> None:
     _library_sync.state = "RUNNING"
     _library_sync.created = 0
     _library_sync.updated = 0
+    _library_sync.warnings = 0
     _library_sync.error_message = None
     _library_sync.started_at = utc_now()
     _library_sync.finished_at = None
 
 
 def mark_library_sync_finished(
-    *, created: int = 0, updated: int = 0, error_message: str | None = None
+    *,
+    created: int = 0,
+    updated: int = 0,
+    warnings: int = 0,
+    error_message: str | None = None,
 ) -> None:
     _library_sync.state = "FAILED" if error_message is not None else "SUCCEEDED"
     _library_sync.created = created
     _library_sync.updated = updated
+    _library_sync.warnings = warnings
     _library_sync.error_message = error_message
     _library_sync.finished_at = utc_now()
+
+
+def library_listing_is_fresh(max_age: timedelta) -> bool:
+    """Whether a complete NextFind listing was read recently enough to rely on.
+
+    A listing that came back with warnings is short by an unknown amount, so
+    it never counts, however recent.
+    """
+
+    finished_at = _library_sync.finished_at
+    return (
+        _library_sync.state == "SUCCEEDED"
+        and _library_sync.warnings == 0
+        and finished_at is not None
+        and utc_now() - finished_at <= max_age
+    )
 
 
 def settle_library_sync(error_message: str) -> None:
@@ -281,19 +306,19 @@ async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> t
     async with _nextfind_sync_lock:
         mark_library_sync_started()
         try:
-            created, updated = await _sync_nextfind_locked(session, adapter)
+            created, updated, warnings = await _sync_nextfind_locked(session, adapter)
         except BaseException as exc:
             mark_library_sync_finished(
                 error_message=exc.message if isinstance(exc, AppError) else "缺失影视同步失败"
             )
             raise
-        mark_library_sync_finished(created=created, updated=updated)
+        mark_library_sync_finished(created=created, updated=updated, warnings=warnings)
         return created, updated
 
 
 async def _sync_nextfind_locked(
     session: AsyncSession, adapter: MediaSourceAdapter
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     await adapter.authenticate()
     result = await adapter.list_missing_media()
     stored_items = list(
@@ -357,6 +382,20 @@ async def _sync_nextfind_locked(
     # irreversible delete for every title the sync failed to read, so a warned
     # response only updates states and never writes a confirmation.
     trustworthy_listing = not result.warnings
+    # A confirmation matters to the operator only where a download hangs on
+    # it; logging one row per title would write tens of thousands on the first
+    # sync after an upgrade.
+    media_with_downloads = set(
+        await session.scalars(
+            select(Download.media_id).where(
+                Download.cleanup_state.not_in(
+                    (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                )
+            )
+        )
+    )
+    newly_confirmed = 0
+    revoked = 0
     for stored_item in stored_items:
         still_missing = stored_item.source_item_id in seen
         # Dropping out of the missing list is the one trustworthy "this file is
@@ -365,9 +404,28 @@ async def _sync_nextfind_locked(
         # DOWNLOADING, but the timestamp must not, or a title imported during
         # its own download would never become eligible for cleanup.
         if still_missing:
+            if stored_item.library_confirmed_at is not None:
+                revoked += 1
+                if stored_item.id in media_with_downloads:
+                    session.add(
+                        ActivityLog(
+                            media_id=stored_item.id,
+                            event="LIBRARY_CONFIRMATION_REVOKED",
+                            message=f"{stored_item.title} 重新被 NextFind 报为缺失，入库确认已撤销",
+                        )
+                    )
             stored_item.library_confirmed_at = None
         elif trustworthy_listing and stored_item.library_confirmed_at is None:
             stored_item.library_confirmed_at = confirmed_at
+            newly_confirmed += 1
+            if stored_item.id in media_with_downloads:
+                session.add(
+                    ActivityLog(
+                        media_id=stored_item.id,
+                        event="LIBRARY_CONFIRMED",
+                        message=f"{stored_item.title} 已不在 NextFind 缺失列表中，确认入库",
+                    )
+                )
         if not still_missing and stored_item.state != MediaState.DOWNLOADING:
             stored_item.state = MediaState.COMPLETE
             stored_item.attention_reason = None
@@ -376,11 +434,17 @@ async def _sync_nextfind_locked(
         ActivityLog(
             event="NEXTFIND_SYNCED",
             message=f"NextFind 同步完成：新增 {created}，更新 {updated}",
-            details={"created": created, "updated": updated, "warnings": len(result.warnings)},
+            details={
+                "created": created,
+                "updated": updated,
+                "warnings": len(result.warnings),
+                "newly_confirmed": newly_confirmed,
+                "confirmation_revoked": revoked,
+            },
         )
     )
     await session.commit()
-    return created, updated
+    return created, updated, len(result.warnings)
 
 
 def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None:
@@ -972,6 +1036,20 @@ async def _submit_download_unlocked(
             )
             download.state = DownloadState.QUEUED
             download.info_hash = result.info_hash
+            session.add(
+                ActivityLog(
+                    media_id=download.media_id,
+                    event="DOWNLOAD_SUBMITTED",
+                    message=f"已提交到 qBittorrent：{download.name}",
+                    details={
+                        "download_id": download.id,
+                        "site_id": candidate.site_id,
+                        "info_hash": result.info_hash,
+                        "size_bytes": download.content_size_bytes,
+                        "category": category,
+                    },
+                )
+            )
             await session.commit()
             await session.refresh(download)
             return download
@@ -984,6 +1062,18 @@ async def _submit_download_unlocked(
                 else DownloadState.ERROR
             )
             download.error_message = exc.message
+            session.add(
+                ActivityLog(
+                    media_id=download.media_id,
+                    event="DOWNLOAD_FAILED",
+                    message=f"下载提交失败：{exc.message}",
+                    details={
+                        "download_id": download.id,
+                        "site_id": candidate.site_id,
+                        "error_code": exc.error_code,
+                    },
+                )
+            )
             if download.state == DownloadState.ERROR:
                 media = await session.get(LibraryMediaItem, download.media_id)
                 if media is not None:

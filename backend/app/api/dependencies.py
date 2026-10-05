@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import audit
 from app.core.auth import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
@@ -103,6 +104,9 @@ async def get_current_principal(request: Request, settings: SettingsDep) -> Prin
             "账号配置已变化，请重新登录",
             status_code=401,
         )
+    # Everything this request writes to the activity log -- and every
+    # background task it starts -- is this person's doing.
+    audit.bind(actor=principal.username, trigger="MANUAL")
     return principal
 
 

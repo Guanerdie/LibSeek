@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import MetadataProvider, PtSiteAdapter
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
+from app.core import audit
 from app.core.logging import bind_job_context, clear_job_context, get_logger
 from app.core.time import utc_now
 from app.errors import AppError
@@ -32,6 +33,7 @@ from app.simple.integrations import (
     submit_download,
 )
 from app.simple.models import (
+    ActivityLog,
     AutomationJob,
     AutomationJobState,
     AutomationPolicy,
@@ -171,16 +173,38 @@ async def update_policy(session: AsyncSession, payload: AutomationPolicyUpdate) 
     # These two arrive as enum lists and are stored as their string values;
     # every other field copies across unchanged.
     enum_lists = {"regions", "media_types"}
+    changes: dict[str, object] = {}
     for name in AutomationPolicyUpdate.model_fields:
         if name not in sent:
             continue
         value = getattr(payload, name)
         if name in enum_lists:
             value = [item.value for item in value]
+        previous = getattr(policy, name)
+        if previous != value:
+            changes[name] = {"from": _loggable(previous), "to": _loggable(value)}
         setattr(policy, name, value)
+    if changes:
+        # The policy decides what gets downloaded and deleted unattended, so a
+        # change to it is recorded with the old and new value of each setting.
+        session.add(
+            ActivityLog(
+                event="AUTOMATION_POLICY_UPDATED",
+                message=f"自动化策略已修改 {len(changes)} 项设置",
+                details={"changes": changes},
+            )
+        )
     await session.commit()
     await session.refresh(policy)
     return policy
+
+
+def _loggable(value: object) -> object:
+    """A setting's value, short enough to keep in an activity row."""
+
+    if isinstance(value, list) and len(value) > 20:
+        return f"{len(value)} 项"
+    return value
 
 
 async def set_media_subscription(
@@ -270,16 +294,33 @@ async def quick_fill_media(
     if selected is None:
         return search, None, rejected, None
 
-    download = await submit_download(
-        session,
-        candidate_id=selected.id,
-        # The operator asked for this specific item; the soft-warning
-        # confirmation is the policy's call, exactly as for the scheduler.
-        confirm_warnings=policy.allow_warnings,
-        pt_factory=pt_factory,
-        qb_factory=qb_factory,
-    )
+    # A person asked for this title, but which release to take was the
+    # policy's pick; the record says so.
+    with audit.scope(reason=_selection_reason("一键补齐", selected, len(candidates))):
+        download = await submit_download(
+            session,
+            candidate_id=selected.id,
+            # The operator asked for this specific item; the soft-warning
+            # confirmation is the policy's call, exactly as for the scheduler.
+            confirm_warnings=policy.allow_warnings,
+            pt_factory=pt_factory,
+            qb_factory=qb_factory,
+        )
     return search, selected, rejected, download
+
+
+def _selection_reason(
+    origin: str, candidate: ReleaseCandidate, candidate_count: object
+) -> str:
+    """Why this release, in the words the activity page shows."""
+
+    pool = f"在 {candidate_count} 个候选中" if isinstance(candidate_count, int) else ""
+    parts = [f"{origin}{pool}按策略选中综合评分最高的资源", f"评分 {candidate.score:.2f}"]
+    if candidate.seeders is not None:
+        parts.append(f"做种 {candidate.seeders}")
+    if candidate.resolution:
+        parts.append(candidate.resolution)
+    return "，".join(parts)
 
 
 async def set_media_subscriptions(
@@ -1015,15 +1056,22 @@ async def _execute_job(
 
                 # The selector and the write guard already enforce hard warnings and
                 # the policy's allow_warnings setting for automated submissions.
-                download = await submit_download(
-                    session,
-                    candidate_id=selected.id,
-                    confirm_warnings=True,
-                    pt_factory=pt_factory,
-                    qb_factory=qb_factory,
-                    on_download=link_download,
-                    write_guard=guard_write,
-                )
+                with audit.scope(
+                    trigger="AUTO",
+                    reason=_selection_reason(
+                        "自动化", selected, job.decision.get("candidate_count")
+                    ),
+                    details={"job_id": job_id},
+                ):
+                    download = await submit_download(
+                        session,
+                        candidate_id=selected.id,
+                        confirm_warnings=True,
+                        pt_factory=pt_factory,
+                        qb_factory=qb_factory,
+                        on_download=link_download,
+                        write_guard=guard_write,
+                    )
                 job.download_id = download.id
                 job.decision = {**job.decision, "download_state": download.state.value}
                 await session.commit()

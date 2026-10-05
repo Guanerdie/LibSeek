@@ -13,6 +13,7 @@ const primaryNavItems = [
   { to: '/downloads', label: '下载', icon: '↓' },
   { to: '/automation', label: '自动化', icon: '⟳' },
   { to: '/monitoring', label: '监控', icon: '◔' },
+  { to: '/activity', label: '记录', icon: '☰' },
   { to: '/configuration', label: '设置', icon: '⚙' },
 ]
 

@@ -269,6 +269,35 @@ class DownloadPage(BaseModel):
     page_size: int
 
 
+class CleanupHoldUpdate(BaseModel):
+    # True keeps the download out of automatic cleanup; False lets it back in.
+    held: bool
+
+
+class ActivityView(BaseModel):
+    """One thing that was done: when, by whom, on whose decision, and why."""
+
+    id: str
+    created_at: datetime
+    event: str
+    category: Literal["download", "cleanup", "library", "search", "settings"]
+    message: str
+    # None on rows written before the actor was recorded.
+    actor: str | None
+    trigger: Literal["MANUAL", "AUTO"] | None
+    reason: str | None
+    details: dict[str, object]
+    media_id: str | None
+    media_title: str | None
+
+
+class ActivityPage(BaseModel):
+    items: list[ActivityView]
+    total: int
+    page: int
+    page_size: int
+
+
 class SyncResult(BaseModel):
     created: int = 0
     updated: int = 0

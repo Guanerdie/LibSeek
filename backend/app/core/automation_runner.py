@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.base import PtSiteAdapter
+from app.core import audit
 from app.core.config import get_settings
 from app.core.time import utc_now
 from app.db.session import SessionFactory
@@ -175,25 +176,35 @@ async def execute_recorded_automation_run(
     stop_requested: Callable[[], bool] | None = None,
 ) -> None:
     run_id = run.id
+    scheduled = run.trigger == "scheduled"
     try:
-        # Refresh the source of truth immediately before every recorded run.
-        # Scheduled runs used to do this in ``run_scheduled_cycle`` only,
-        # which meant manual runs and retries searched the previous snapshot.
-        await _sync_nextfind_before_automation(session)
-        await automation.run_automation(
-            session,
-            adapter_factory=lambda site_id: build_pt_site(
-                site_id, allow_torrent_fetch=False
-            ),
-            pt_factory=lambda site_id: build_pt_site(
-                site_id, allow_torrent_fetch=True
-            ),
-            qb_factory=build_qb,
-            metadata_factory=build_tmdb,
-            trigger=run.trigger,
-            stop_requested=stop_requested,
-            run_record=run,
-        )
+        # A person may have pressed the button, but what gets searched and
+        # downloaded from here on is the policy's decision, not theirs.  The
+        # actor stays whoever started the run.
+        with audit.scope(
+            actor=audit.SCHEDULER if scheduled else None,
+            trigger="AUTO",
+            reason="定时自动化运行" if scheduled else "手动启动的自动化运行",
+            details={"run_id": run_id, "run_trigger": run.trigger},
+        ):
+            # Refresh the source of truth immediately before every recorded run.
+            # Scheduled runs used to do this in ``run_scheduled_cycle`` only,
+            # which meant manual runs and retries searched the previous snapshot.
+            await _sync_nextfind_before_automation(session)
+            await automation.run_automation(
+                session,
+                adapter_factory=lambda site_id: build_pt_site(
+                    site_id, allow_torrent_fetch=False
+                ),
+                pt_factory=lambda site_id: build_pt_site(
+                    site_id, allow_torrent_fetch=True
+                ),
+                qb_factory=build_qb,
+                metadata_factory=build_tmdb,
+                trigger=run.trigger,
+                stop_requested=stop_requested,
+                run_record=run,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:

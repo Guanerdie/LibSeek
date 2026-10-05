@@ -295,6 +295,18 @@ export const useDailyStore = defineStore('daily', {
         return false
       }
     },
+    async setCleanupHold(download: DailyDownload, held: boolean): Promise<boolean> {
+      this.downloadsError = null
+      try {
+        const updated = await dailyApi.setCleanupHold(download.id, held)
+        const index = this.downloads.findIndex((item) => item.id === download.id)
+        if (index >= 0) this.downloads[index] = updated
+        return true
+      } catch (error) {
+        this.downloadsError = error instanceof ApiError ? error.message : '无法修改清理设置'
+        return false
+      }
+    },
     async loadDownloads(page?: number): Promise<void> {
       this.downloadsLoading = true
       this.downloadsError = null

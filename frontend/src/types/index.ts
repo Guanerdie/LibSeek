@@ -475,6 +475,34 @@ export interface QuickFillResult {
 
 export type DownloadCleanupState = 'NONE' | 'MARKED' | 'DELETED' | 'VANISHED' | 'HELD'
 
+export type ActivityCategory = 'download' | 'cleanup' | 'library' | 'search' | 'settings'
+export type ActivityTrigger = 'MANUAL' | 'AUTO'
+
+/** One thing that was done: when, by whom, on whose decision, and why. */
+export interface ActivityEntry {
+  id: string
+  created_at: string
+  event: string
+  category: ActivityCategory
+  message: string
+  // null on rows written before the actor was recorded.
+  actor: string | null
+  trigger: ActivityTrigger | null
+  reason: string | null
+  details: Record<string, unknown>
+  media_id: string | null
+  media_title: string | null
+}
+
+export interface ActivityQuery {
+  page?: number
+  pageSize?: number
+  category?: ActivityCategory
+  trigger?: ActivityTrigger
+  query?: string
+  mediaId?: string
+}
+
 export interface CleanupPreviewEntry {
   download_id: string
   media_title: string
