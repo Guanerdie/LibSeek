@@ -475,7 +475,19 @@ export interface QuickFillResult {
 
 export type DownloadCleanupState = 'NONE' | 'MARKED' | 'DELETED' | 'VANISHED' | 'HELD'
 
-export type ActivityCategory = 'download' | 'cleanup' | 'library' | 'search' | 'settings'
+/** The space-reclaim part of the policy, saved on its own page. */
+export type CleanupPolicy = Pick<
+  AutomationPolicy,
+  | 'cleanup_enabled'
+  | 'cleanup_dry_run'
+  | 'cleanup_after_days'
+  | 'cleanup_min_seeding_days'
+  | 'cleanup_grace_days'
+  | 'cleanup_require_library_confirmed'
+  | 'cleanup_daily_limit'
+>
+
+export type ActivityCategory ='download' | 'cleanup' | 'library' | 'search' | 'settings'
 export type ActivityTrigger = 'MANUAL' | 'AUTO'
 
 /** One thing that was done: when, by whom, on whose decision, and why. */

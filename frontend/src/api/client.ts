@@ -9,6 +9,7 @@ import type {
   AutomationRunPage,
   AutomationStats,
   BulkSubscriptionResult,
+  CleanupPolicy,
   CleanupPreview,
   ConfigurationSnapshot,
   ConfigurationTestResult,
@@ -278,7 +279,17 @@ export const activityApi = {
 
 export const automationApi = {
   policy: () => request<AutomationPolicy>('/api/automation/policy'),
-  updatePolicy: (payload: Omit<AutomationPolicy, 'updated_at' | 'last_run_at'>) =>
+  // The server changes only the fields it is sent, so the automation page and
+  // the cleanup page each save their own half and cannot undo the other's.
+  updatePolicy: (
+    payload: Omit<AutomationPolicy, 'updated_at' | 'last_run_at' | keyof CleanupPolicy>,
+  ) =>
+    request<AutomationPolicy>('/api/automation/policy', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  updateCleanupPolicy: (payload: CleanupPolicy) =>
     request<AutomationPolicy>('/api/automation/policy', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

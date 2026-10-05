@@ -470,83 +470,48 @@ describe('automation settings', () => {
     wrapper.unmount()
   })
 
-  it('loads the cleanup preview from the downloads API', async () => {
-    mocks.cleanupPreview.mockResolvedValue({
-      enabled: true,
-      dry_run: true,
-      delete_authorized: false,
-      reclaimable_bytes: 0,
-      items: [],
-    })
+  it('shows one group of settings at a time and saves them all together', async () => {
+    mocks.updatePolicy.mockResolvedValue(policy)
     const wrapper = mount(AutomationView)
     await flushPromises()
 
-    const button = wrapper.findAll('button').find((item) => item.text() === '查看预览')
-    expect(button).toBeDefined()
-    await button!.trigger('click')
+    const panels = () =>
+      wrapper.findAll('.tab-panel').map((panel) => (panel.element as HTMLElement).style.display)
+    expect(wrapper.findAll('.tab-button').map((tab) => tab.text())).toEqual([
+      '基本',
+      '搜索范围',
+      '选种标准',
+      '高级',
+    ])
+    expect(panels()).toEqual(['', 'none', 'none', 'none'])
+
+    await wrapper.findAll('.tab-button')[3]!.trigger('click')
+    expect(panels()).toEqual(['none', 'none', 'none', ''])
+    // A field on a tab that is not showing is still part of what gets saved.
+    await wrapper.find('input[name="interval_minutes"]').setValue(90)
+    await wrapper.findAll('.tab-button')[0]!.trigger('click')
+    await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(mocks.cleanupPreview).toHaveBeenCalledTimes(1)
-    expect(wrapper.text()).toContain('当前可清理 0 项')
-    expect(wrapper.text()).toContain('ENABLE_QB_DELETE')
+    expect(mocks.updatePolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ interval_minutes: 90, weight_resolution: 44 }),
+    )
     wrapper.unmount()
   })
 
-  it('lists held downloads with what releasing them would do, and releases one', async () => {
-    const heldItem = (overrides: Record<string, unknown>) => ({
-      download_id: 'd1',
-      media_title: '蓝色情结',
-      name: 'Blue.Complex.S01.1080p',
-      size_bytes: 2 * 1024 ** 3,
-      completed_at: '2026-09-15T00:00:00Z',
-      seeding_days: 19.6,
-      required_seeding_days: 10,
-      cleanup_state: 'HELD',
-      deletes_at: null,
-      blocked_reason: null,
-      ...overrides,
-    })
-    const preview = (items: unknown[]) => ({
-      enabled: false,
-      dry_run: true,
-      delete_authorized: true,
-      reclaimable_bytes: 0,
-      held_reclaimable_bytes: 2 * 1024 ** 3,
-      items,
-    })
-    mocks.cleanupPreview
-      .mockResolvedValueOnce(
-        preview([
-          heldItem({}),
-          heldItem({
-            download_id: 'd2',
-            media_title: '大物',
-            name: 'Big.Thing.S01',
-            blocked_reason: '尚未确认入库',
-          }),
-        ]),
-      )
-      .mockResolvedValueOnce(preview([heldItem({ cleanup_state: 'NONE' })]))
-    mocks.setCleanupHold.mockResolvedValue({})
+  it('leaves the cleanup settings to the cleanup page', async () => {
+    mocks.updatePolicy.mockResolvedValue(policy)
     const wrapper = mount(AutomationView)
     await flushPromises()
 
-    await wrapper.findAll('button').find((item) => item.text() === '查看预览')!.trigger('click')
+    await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('当前可清理 0 项')
-    expect(wrapper.text()).toContain('保留中 2 项')
-    expect(wrapper.text()).toContain('其中 1 项放行后会被清理，共 2 GiB')
-    expect(wrapper.text()).toContain('尚未确认入库')
-    const release = wrapper.findAll('button').filter((item) => item.text() === '放行')
-    expect(release).toHaveLength(1)
-
-    await release[0]!.trigger('click')
-    await flushPromises()
-
-    expect(mocks.setCleanupHold).toHaveBeenCalledWith('d1', false)
-    expect(wrapper.text()).toContain('当前可清理 1 项')
-    expect(wrapper.text()).toContain('下一轮将被标记')
+    // Sending them from a form loaded earlier would undo a change made there.
+    const sent = mocks.updatePolicy.mock.calls[0]![0] as Record<string, unknown>
+    expect(Object.keys(sent).filter((key) => key.startsWith('cleanup_'))).toEqual([])
+    expect(wrapper.find('input[name="cleanup_enabled"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('空间清理的设置在「清理」页')
     wrapper.unmount()
   })
 

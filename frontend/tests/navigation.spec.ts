@@ -45,6 +45,7 @@ describe('authenticated navigation', () => {
     ).toEqual([
       { href: '/library', text: '缺失' },
       { href: '/downloads', text: '下载' },
+      { href: '/cleanup', text: '清理' },
       { href: '/automation', text: '自动化策略' },
       { href: '/monitoring', text: '监控' },
       { href: '/activity', text: '记录' },

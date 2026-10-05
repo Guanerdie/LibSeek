@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/auth'
 import type { AuthRole } from '../types'
 import { safeInternalRedirect } from '../utils/navigation'
 import ActivityView from '../views/ActivityView.vue'
+import CleanupView from '../views/CleanupView.vue'
 import ConfigurationView from '../views/ConfigurationView.vue'
 import AutomationView from '../views/AutomationView.vue'
 import AutomationRunDetailView from '../views/AutomationRunDetailView.vue'
@@ -28,6 +29,7 @@ const router = createRouter({
     { path: '/library', component: LibraryView },
     { path: '/library/:id/resources', component: ResourcesView },
     { path: '/downloads', component: DownloadsView },
+    { path: '/cleanup', component: CleanupView, meta: { requiredRole: 'operator' } },
     { path: '/monitoring', component: MonitoringView },
     { path: '/activity', component: ActivityView },
     { path: '/automation', component: AutomationView, meta: { requiredRole: 'operator' } },

@@ -11,7 +11,6 @@ import type {
   AutomationJob,
   AutomationPolicy,
   AutomationRun,
-  CleanupPreview,
   DailyMedia,
   DailyMediaRegion,
   DailyMediaType,
@@ -49,14 +48,17 @@ const form = reactive({
   weight_seeders: 13,
   weight_promotion: 3,
   seeder_floor: 3,
-  cleanup_enabled: false,
-  cleanup_dry_run: true,
-  cleanup_after_days: 10,
-  cleanup_min_seeding_days: 10,
-  cleanup_grace_days: 2,
-  cleanup_require_library_confirmed: true,
-  cleanup_daily_limit: 20,
 })
+
+// One kind of decision per tab, so the page shows a handful of fields at a
+// time instead of every setting at once.
+const tabs = [
+  { id: 'basic', label: '基本' },
+  { id: 'scope', label: '搜索范围' },
+  { id: 'quality', label: '选种标准' },
+  { id: 'advanced', label: '高级' },
+] as const
+const activeTab = ref<(typeof tabs)[number]['id']>('basic')
 
 // Presets for the empty-search backoff ladder.  Sites differ in how much
 // repeated searching they tolerate, so the sensible answer is per deployment.
@@ -98,10 +100,6 @@ const saving = ref(false)
 const starting = ref(false)
 const error = ref<string | null>(null)
 const feedback = ref<string | null>(null)
-const cleanupPreview = ref<CleanupPreview | null>(null)
-const cleanupChangingId = ref<string | null>(null)
-const cleanupLoading = ref(false)
-const cleanupError = ref<string | null>(null)
 const currentRun = ref<AutomationRun | null>(null)
 const mediaOptions = ref<DailyMedia[]>([])
 const mediaOptionsTotal = ref(0)
@@ -202,13 +200,6 @@ function applyPolicy(policy: AutomationPolicy): void {
   form.weight_seeders = policy.weight_seeders
   form.weight_promotion = policy.weight_promotion
   form.seeder_floor = policy.seeder_floor
-  form.cleanup_enabled = policy.cleanup_enabled
-  form.cleanup_dry_run = policy.cleanup_dry_run
-  form.cleanup_after_days = policy.cleanup_after_days
-  form.cleanup_min_seeding_days = policy.cleanup_min_seeding_days
-  form.cleanup_grace_days = policy.cleanup_grace_days
-  form.cleanup_require_library_confirmed = policy.cleanup_require_library_confirmed
-  form.cleanup_daily_limit = policy.cleanup_daily_limit
 }
 
 async function loadMediaOptions(page = 1): Promise<void> {
@@ -377,67 +368,6 @@ async function save(): Promise<void> {
   }
 }
 
-async function loadCleanupPreview(): Promise<void> {
-  cleanupLoading.value = true
-  cleanupError.value = null
-  try {
-    cleanupPreview.value = await dailyApi.cleanupPreview()
-  } catch (caught) {
-    cleanupError.value = message(caught, '无法读取清理预览')
-  } finally {
-    cleanupLoading.value = false
-  }
-}
-
-function formatGib(bytes: number): string {
-  return `${Math.round((bytes / 1024 ** 3) * 10) / 10} GiB`
-}
-
-const cleanupReleased = computed(() =>
-  (cleanupPreview.value?.items ?? []).filter((item) => item.cleanup_state !== 'HELD'),
-)
-
-const cleanupHeld = computed(() =>
-  (cleanupPreview.value?.items ?? []).filter((item) => item.cleanup_state === 'HELD'),
-)
-
-const cleanupReady = computed(() =>
-  cleanupReleased.value.filter((item) => item.blocked_reason === null),
-)
-
-const cleanupBlocked = computed(() =>
-  cleanupReleased.value.filter((item) => item.blocked_reason !== null),
-)
-
-// Held downloads judged as if released: what a release would lead to.
-const cleanupHeldReady = computed(() =>
-  cleanupHeld.value
-    .filter((item) => item.blocked_reason === null)
-    .sort((a, b) => a.size_bytes - b.size_bytes),
-)
-
-const cleanupHeldBlocked = computed(() =>
-  cleanupHeld.value.filter((item) => item.blocked_reason !== null),
-)
-
-async function setCleanupHold(downloadId: string, held: boolean): Promise<void> {
-  if (cleanupChangingId.value) return
-  cleanupChangingId.value = downloadId
-  cleanupError.value = null
-  try {
-    await dailyApi.setCleanupHold(downloadId, held)
-    cleanupPreview.value = await dailyApi.cleanupPreview()
-  } catch (caught) {
-    cleanupError.value = message(caught, '无法修改清理设置')
-  } finally {
-    cleanupChangingId.value = null
-  }
-}
-
-const cleanupRiskyDays = computed(
-  () => form.cleanup_after_days < 8 || form.cleanup_min_seeding_days < 8,
-)
-
 async function persistFormPolicy(): Promise<AutomationPolicy> {
   const maxSize = form.max_size_gib ? Number(form.max_size_gib) * 1024 ** 3 : null
   const dailyBytes = form.daily_download_gib
@@ -473,13 +403,6 @@ async function persistFormPolicy(): Promise<AutomationPolicy> {
     weight_seeders: form.weight_seeders,
     weight_promotion: form.weight_promotion,
     seeder_floor: form.seeder_floor,
-    cleanup_enabled: form.cleanup_enabled,
-    cleanup_dry_run: form.cleanup_dry_run,
-    cleanup_after_days: form.cleanup_after_days,
-    cleanup_min_seeding_days: form.cleanup_min_seeding_days,
-    cleanup_grace_days: form.cleanup_grace_days,
-    cleanup_require_library_confirmed: form.cleanup_require_library_confirmed,
-    cleanup_daily_limit: form.cleanup_daily_limit,
   })
   applyPolicy(policy)
   return policy
@@ -603,76 +526,191 @@ onBeforeUnmount(() => {
         <div><span class="eyebrow">POLICY</span><h2 id="automation-policy-title">搜索策略</h2></div>
         <StatusPill :status="form.enabled ? 'READY' : 'PAUSED'" :label="form.enabled ? '已启用' : '已停用'" />
       </div>
-      <div class="configuration-field-grid automation-primary-grid">
-        <label class="configuration-checkbox">
-          <input v-model="form.enabled" name="enabled" type="checkbox" /> 启用自动化策略
-        </label>
-        <label class="configuration-checkbox">
-          <input v-model="form.dry_run" name="dry_run" type="checkbox" /> 仅试运行，不提交下载
-        </label>
-        <label class="configuration-checkbox">
-          <input v-model="form.auto_identify" name="auto_identify" type="checkbox" /> 自动识别缺少 TMDB ID 的影视
-        </label>
-        <label>
-          自动化范围
-          <select v-model="form.scope_mode" name="scope_mode">
-            <option value="filters">按类型和地区规则</option>
-            <option value="selected">只处理手动选择的影视</option>
-          </select>
-          <span class="field-hint scope-hint">
-            <template v-if="form.scope_mode === 'selected'">
-              当前追更清单里有
-              <strong>{{ form.selected_media_ids.length }}</strong> 部；在影视详情页点「追这部」增减。
-            </template>
-            <template v-else>
-              追更清单（{{ form.selected_media_ids.length }} 部）在这个模式下不生效。
-            </template>
-          </span>
-        </label>
-        <fieldset class="configuration-checkbox">
-          <legend>影视类型</legend>
-          <label><input v-model="form.media_types" type="checkbox" value="movie" /> 电影</label>
-          <label><input v-model="form.media_types" type="checkbox" value="tv" /> 电视剧</label>
-        </fieldset>
-        <label class="score-field">
-          最低评分
-          <input
-            v-model.number="form.minimum_score"
-            name="minimum_score"
-            type="number"
-            min="0"
-            max="1"
-            step="0.05"
-          />
-          <span v-if="scorePassing" class="field-hint score-hint">
-            最近 {{ scoreDistribution?.window_days }} 天的
-            {{ scorePassing.total }} 个候选里，约
-            <strong>{{ scorePassing.passing }}</strong> 个（{{
-              Math.round(scorePassing.rate * 100)
-            }}%）能过这条线
-          </span>
-          <span v-if="scoreDistribution && scoreDistribution.total > 0" class="score-chart">
-            <span
-              v-for="bucket in scoreDistribution.buckets"
-              :key="bucket.low"
-              class="score-bar"
-              :class="{ 'is-passing': bucket.high > form.minimum_score }"
-              :style="{ height: `${Math.round((bucket.count / scoreChartMax) * 100)}%` }"
-              :title="`${bucket.low.toFixed(2)} ~ ${bucket.high.toFixed(2)}：${bucket.count} 个`"
-            />
-          </span>
-          <span v-if="scoreDistribution && scoreDistribution.total > 0" class="score-axis">
-            <span>0</span><span>0.5</span><span>1.0</span>
-          </span>
-        </label>
-        <label>
-          每日自动下载数量
-          <input v-model.number="form.daily_download_limit" name="daily_download_limit" type="number" min="1" max="100" />
-        </label>
+
+      <div class="tab-bar" role="tablist" aria-label="策略设置分组">
+        <button
+          v-for="tab in tabs"
+          :key="tab.id"
+          type="button"
+          role="tab"
+          class="tab-button"
+          :class="{ active: activeTab === tab.id }"
+          :aria-selected="activeTab === tab.id"
+          @click="activeTab = tab.id"
+        >
+          {{ tab.label }}
+        </button>
       </div>
 
-      <details class="advanced-settings">
-        <summary>更多设置（做种数、体积、重试、执行间隔）</summary>
+      <!-- v-show, not v-if: a field on a hidden tab still belongs to the form
+           and is saved with it. -->
+      <div v-show="activeTab === 'basic'" class="tab-panel" role="tabpanel">
+        <div class="configuration-field-grid automation-primary-grid">
+          <label class="configuration-checkbox">
+            <input v-model="form.enabled" name="enabled" type="checkbox" /> 启用自动化策略
+          </label>
+          <label class="configuration-checkbox">
+            <input v-model="form.dry_run" name="dry_run" type="checkbox" /> 仅试运行，不提交下载
+          </label>
+          <label class="score-field">
+            最低评分
+            <input
+              v-model.number="form.minimum_score"
+              name="minimum_score"
+              type="number"
+              min="0"
+              max="1"
+              step="0.05"
+            />
+            <span v-if="scorePassing" class="field-hint score-hint">
+              最近 {{ scoreDistribution?.window_days }} 天的
+              {{ scorePassing.total }} 个候选里，约
+              <strong>{{ scorePassing.passing }}</strong> 个（{{
+                Math.round(scorePassing.rate * 100)
+              }}%）能过这条线
+            </span>
+            <span v-if="scoreDistribution && scoreDistribution.total > 0" class="score-chart">
+              <span
+                v-for="bucket in scoreDistribution.buckets"
+                :key="bucket.low"
+                class="score-bar"
+                :class="{ 'is-passing': bucket.high > form.minimum_score }"
+                :style="{ height: `${Math.round((bucket.count / scoreChartMax) * 100)}%` }"
+                :title="`${bucket.low.toFixed(2)} ~ ${bucket.high.toFixed(2)}：${bucket.count} 个`"
+              />
+            </span>
+            <span v-if="scoreDistribution && scoreDistribution.total > 0" class="score-axis">
+              <span>0</span><span>0.5</span><span>1.0</span>
+            </span>
+          </label>
+          <label>
+            每日自动下载数量
+            <input v-model.number="form.daily_download_limit" name="daily_download_limit" type="number" min="1" max="100" />
+            <span class="field-hint">每天最多自动提交这么多个下载。</span>
+          </label>
+        </div>
+        <p class="muted">
+          当前站点：AvistaZ。真实下载还要求部署环境启用 ENABLE_QB_WRITE。
+        </p>
+      </div>
+
+      <div v-show="activeTab === 'scope'" class="tab-panel" role="tabpanel">
+        <div class="configuration-field-grid automation-primary-grid">
+          <label>
+            自动化范围
+            <select v-model="form.scope_mode" name="scope_mode">
+              <option value="filters">按类型和地区规则</option>
+              <option value="selected">只处理手动选择的影视</option>
+            </select>
+            <span class="field-hint scope-hint">
+              <template v-if="form.scope_mode === 'selected'">
+                当前追更清单里有
+                <strong>{{ form.selected_media_ids.length }}</strong> 部；在影视详情页点「追这部」增减。
+              </template>
+              <template v-else>
+                追更清单（{{ form.selected_media_ids.length }} 部）在这个模式下不生效。
+              </template>
+            </span>
+          </label>
+          <fieldset class="configuration-checkbox">
+            <legend>影视类型</legend>
+            <label><input v-model="form.media_types" type="checkbox" value="movie" /> 电影</label>
+            <label><input v-model="form.media_types" type="checkbox" value="tv" /> 电视剧</label>
+          </fieldset>
+        </div>
+        <div v-if="form.scope_mode === 'filters'" class="filter-heading">
+          <div>
+            <span class="eyebrow">REGIONS</span>
+            <strong>地区范围</strong>
+            <p class="muted">不选择地区时处理全部地区；可同时选择多个地区。</p>
+          </div>
+          <div class="configuration-field-grid">
+            <label v-for="region in regionOptions" :key="region" class="configuration-checkbox">
+              <input v-model="form.regions" type="checkbox" :value="region" /> {{ region }}
+            </label>
+          </div>
+        </div>
+        <div v-if="form.scope_mode === 'filters'" class="filter-heading automation-year-filter">
+          <div>
+            <span class="eyebrow">YEARS</span>
+            <strong>年份范围</strong>
+            <p class="muted">不选择年份时处理全部年份；选择后只处理影视首播年份匹配的项目。</p>
+          </div>
+          <div v-if="yearOptions.length" class="configuration-field-grid automation-year-options">
+            <label v-for="year in yearOptions" :key="year" class="configuration-checkbox">
+              <input v-model="form.years" :name="`year-${year}`" type="checkbox" :value="year" />
+              {{ year }}
+            </label>
+          </div>
+          <p v-else class="muted">当前媒体库还没有可用年份。</p>
+        </div>
+        <div v-if="form.scope_mode !== 'filters'" class="automation-media-picker">
+          <div class="filter-heading">
+            <div>
+              <span class="eyebrow">MANUAL SCOPE</span>
+              <strong>手动选择影视</strong>
+            </div>
+            <span class="muted">已选择 {{ form.selected_media_ids.length }} 项</span>
+          </div>
+          <div class="filter-grid">
+            <label>
+              关键词
+              <input v-model="mediaQuery.query" type="search" placeholder="中文名、原名" />
+            </label>
+            <label>
+              类型
+              <select v-model="mediaQuery.mediaType">
+                <option value="">全部类型</option>
+                <option value="movie">电影</option>
+                <option value="tv">电视剧</option>
+              </select>
+            </label>
+            <label>
+              地区
+              <select v-model="mediaQuery.region">
+                <option value="">全部地区</option>
+                <option v-for="region in regionOptions" :key="region" :value="region">{{ region }}</option>
+              </select>
+            </label>
+            <button class="button secondary" type="button" :disabled="mediaOptionsLoading" @click="loadMediaOptions(1)">
+              {{ mediaOptionsLoading ? '查询中…' : '查询影视' }}
+            </button>
+          </div>
+          <p class="muted">当前查询 {{ mediaOptionsTotal }} 项；每页显示 {{ mediaOptionsPageSize }} 项，可用关键词继续缩小范围。</p>
+          <div class="download-stack automation-media-options">
+            <label v-for="item in mediaOptions" :key="item.id" class="download-card configuration-checkbox">
+              <input
+                type="checkbox"
+                :checked="form.selected_media_ids.includes(item.id)"
+                @change="toggleMedia(item.id)"
+              />
+              <span>
+                <strong>{{ item.title }}</strong>
+                <small class="muted">
+                  {{ item.media_type === 'tv' ? '电视剧' : '电影' }} · {{ item.year ?? '年份未知' }} ·
+                  {{ item.regions.length ? item.regions.join(' / ') : '地区未知' }}
+                </small>
+              </span>
+            </label>
+          </div>
+          <Pagination
+            :page="mediaOptionsPage"
+            :total="mediaOptionsTotal"
+            :page-size="mediaOptionsPageSize"
+            label="影视选择分页"
+            @change="changeMediaOptionsPage"
+          />
+        </div>
+      </div>
+
+      <div v-show="activeTab === 'quality'" class="tab-panel" role="tabpanel">
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">LIMITS</span>
+            <strong>硬性条件</strong>
+            <p class="muted">不满足这些条件的资源直接排除，不参与评分。</p>
+          </div>
+        </div>
         <div class="configuration-field-grid">
           <label>
             最低做种数
@@ -682,13 +720,60 @@ onBeforeUnmount(() => {
             最大体积（GiB，留空不限）
             <input v-model="form.max_size_gib" type="number" min="0.1" step="0.1" />
           </label>
-          <label>
-            每日自动下载体积（GiB，留空不限）
-            <input v-model="form.daily_download_gib" type="number" min="0.1" step="0.1" />
-          </label>
           <label class="configuration-checkbox">
             <input v-model="form.allow_warnings" type="checkbox" /> 允许选择带风险提示的候选
           </label>
+        </div>
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">QUALITY</span>
+            <strong>怎么算「好资源」</strong>
+            <p class="muted">
+              这些数字只看相对大小，不用加到 100。评分只衡量资源本身好不好——
+              是不是这部片由匹配规则单独把关，不再混进分数里。
+            </p>
+          </div>
+        </div>
+        <div class="configuration-field-grid automation-quality-grid">
+          <label>
+            画质（分辨率）
+            <input v-model.number="form.weight_resolution" name="weight_resolution" type="number" min="0" max="100" />
+          </label>
+          <label>
+            体积（越大越好）
+            <input v-model.number="form.weight_size" name="weight_size" type="number" min="0" max="100" />
+          </label>
+          <label>
+            片源（Remux &gt; 蓝光 &gt; WEB-DL）
+            <input v-model.number="form.weight_source" name="weight_source" type="number" min="0" max="100" />
+          </label>
+          <label>
+            做种数
+            <input v-model.number="form.weight_seeders" name="weight_seeders" type="number" min="0" max="100" />
+          </label>
+          <label>
+            免费 / 促销
+            <input v-model.number="form.weight_promotion" name="weight_promotion" type="number" min="0" max="100" />
+          </label>
+          <label>
+            做种数够用线
+            <input v-model.number="form.seeder_floor" name="seeder_floor" type="number" min="1" max="100" />
+            <span class="field-hint">
+              低于这个数算有风险；到了就够，再多加分很少。
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div v-show="activeTab === 'advanced'" class="tab-panel" role="tabpanel">
+        <div class="filter-heading">
+          <div>
+            <span class="eyebrow">SCHEDULE</span>
+            <strong>执行与重试</strong>
+            <p class="muted">多久运行一次，失败后怎么重试，每天最多下载多大。</p>
+          </div>
+        </div>
+        <div class="configuration-field-grid">
           <label>
             执行间隔（分钟）
             <input v-model.number="form.interval_minutes" name="interval_minutes" type="number" min="5" max="1440" />
@@ -701,50 +786,14 @@ onBeforeUnmount(() => {
             最大尝试次数
             <input v-model.number="form.max_attempts" type="number" min="1" max="10" />
           </label>
+          <label>
+            每日自动下载体积（GiB，留空不限）
+            <input v-model="form.daily_download_gib" type="number" min="0.1" step="0.1" />
+          </label>
+          <label class="configuration-checkbox">
+            <input v-model="form.auto_identify" name="auto_identify" type="checkbox" /> 自动识别缺少 TMDB ID 的影视
+          </label>
         </div>
-      </details>
-      <div class="filter-heading">
-        <div>
-          <span class="eyebrow">QUALITY</span>
-          <strong>怎么算「好资源」</strong>
-          <p class="muted">
-            这些数字只看相对大小，不用加到 100。评分只衡量资源本身好不好——
-            是不是这部片由匹配规则单独把关，不再混进分数里。
-          </p>
-        </div>
-      </div>
-      <div class="configuration-field-grid automation-quality-grid">
-        <label>
-          画质（分辨率）
-          <input v-model.number="form.weight_resolution" name="weight_resolution" type="number" min="0" max="100" />
-        </label>
-        <label>
-          体积（越大越好）
-          <input v-model.number="form.weight_size" name="weight_size" type="number" min="0" max="100" />
-        </label>
-        <label>
-          片源（Remux &gt; 蓝光 &gt; WEB-DL）
-          <input v-model.number="form.weight_source" name="weight_source" type="number" min="0" max="100" />
-        </label>
-        <label>
-          做种数
-          <input v-model.number="form.weight_seeders" name="weight_seeders" type="number" min="0" max="100" />
-        </label>
-        <label>
-          免费 / 促销
-          <input v-model.number="form.weight_promotion" name="weight_promotion" type="number" min="0" max="100" />
-        </label>
-        <label>
-          做种数够用线
-          <input v-model.number="form.seeder_floor" name="seeder_floor" type="number" min="1" max="100" />
-          <span class="field-hint">
-            低于这个数算有风险；到了就够，再多加分很少。
-          </span>
-        </label>
-      </div>
-
-      <details class="advanced-settings">
-        <summary>空搜索退避与综艺</summary>
         <div class="filter-heading">
           <div>
             <span class="eyebrow">COOLDOWN</span>
@@ -825,273 +874,10 @@ onBeforeUnmount(() => {
             />
           </label>
         </div>
-      </details>
-
-      <details class="advanced-settings">
-        <summary>空间清理（删除已入库资源的种子和文件）</summary>
-        <div class="filter-heading">
-          <div>
-            <span class="eyebrow">CLEANUP</span>
-            <strong>已入库资源的自动清理</strong>
-            <p class="muted">
-              下载目录和媒体库是两份真实文件，入库之后下载的那份就是多余的。
-              满足条件的种子会先被打上 <code>unin-cleanup</code> 标签继续做种，
-              观察期结束后才连文件一起删除。
-              在 qBittorrent 里手动摘掉这个标签，这个种子就永久保留。
-              <strong>删除不可逆</strong>，并且还需要在服务端设置
-              <code>ENABLE_QB_DELETE=true</code> 才会真正执行。
-            </p>
-          </div>
-        </div>
-        <div class="configuration-field-grid">
-          <label class="configuration-checkbox">
-            <input v-model="form.cleanup_enabled" name="cleanup_enabled" type="checkbox" />
-            启用空间清理
-          </label>
-          <label class="configuration-checkbox">
-            <input v-model="form.cleanup_dry_run" name="cleanup_dry_run" type="checkbox" />
-            演练模式（只记录，不删除）
-          </label>
-          <label class="configuration-checkbox">
-            <input
-              v-model="form.cleanup_require_library_confirmed"
-              name="cleanup_require_library_confirmed"
-              type="checkbox"
-            />
-            必须已确认入库
-          </label>
-          <label>
-            保留天数（下载完成后）
-            <input
-              v-model.number="form.cleanup_after_days"
-              name="cleanup_after_days"
-              type="number"
-              min="1"
-              max="365"
-              :disabled="!form.cleanup_enabled"
-            />
-          </label>
-          <label>
-            最短做种天数
-            <input
-              v-model.number="form.cleanup_min_seeding_days"
-              name="cleanup_min_seeding_days"
-              type="number"
-              min="1"
-              max="365"
-              :disabled="!form.cleanup_enabled"
-            />
-          </label>
-          <label>
-            标记后观察天数
-            <input
-              v-model.number="form.cleanup_grace_days"
-              name="cleanup_grace_days"
-              type="number"
-              min="0"
-              max="30"
-              :disabled="!form.cleanup_enabled"
-            />
-          </label>
-          <label>
-            每日最多清理
-            <input
-              v-model.number="form.cleanup_daily_limit"
-              name="cleanup_daily_limit"
-              type="number"
-              min="1"
-              max="500"
-              :disabled="!form.cleanup_enabled"
-            />
-          </label>
-        </div>
-        <p v-if="cleanupRiskyDays" class="inline-warning">
-          AvistaZ 要求做种满 7 天，而客户端统计的做种时长通常比站点认可的更长。
-          低于 8 天有被记 H&amp;R 的风险，建议保持 10 天。
-        </p>
-        <div class="filter-heading">
-          <div>
-            <strong>清理预览</strong>
-            <p class="muted">开启之前先看一眼它打算删什么。</p>
-          </div>
-          <button
-            type="button"
-            class="button"
-            :disabled="cleanupLoading"
-            @click="loadCleanupPreview"
-          >
-            {{ cleanupLoading ? '读取中…' : '查看预览' }}
-          </button>
-        </div>
-        <p v-if="cleanupError" class="inline-warning">{{ cleanupError }}</p>
-        <template v-if="cleanupPreview">
-          <p class="muted">
-            当前可清理 {{ cleanupReady.length }} 项，预计释放
-            {{ formatGib(cleanupPreview.reclaimable_bytes) }}；
-            另有 {{ cleanupBlocked.length }} 项暂不满足条件。
-            <span v-if="!cleanupPreview.delete_authorized">
-              服务端尚未开启 ENABLE_QB_DELETE，当前只会记录不会删除。
-            </span>
-          </p>
-          <ul v-if="cleanupReady.length" class="cleanup-list">
-            <li v-for="item in cleanupReady" :key="item.download_id">
-              <span>
-                <strong>{{ item.media_title }}</strong>
-                <span class="muted">
-                  {{ item.name }} · {{ formatGib(item.size_bytes) }} · 已做种
-                  {{ item.seeding_days }} 天（需 {{ item.required_seeding_days }} 天）
-                  <template v-if="item.cleanup_state === 'MARKED'">
-                    · 已标记<template v-if="item.deletes_at">，预计 {{ formatShanghai(item.deletes_at) }} 删除</template>
-                  </template>
-                  <template v-else> · 下一轮将被标记</template>
-                </span>
-              </span>
-              <button
-                v-if="item.cleanup_state === 'NONE'"
-                type="button"
-                class="button secondary small"
-                :disabled="cleanupChangingId !== null"
-                @click="setCleanupHold(item.download_id, true)"
-              >
-                保留
-              </button>
-            </li>
-          </ul>
-          <ul v-if="cleanupBlocked.length" class="cleanup-list">
-            <li v-for="item in cleanupBlocked" :key="item.download_id">
-              <span>
-                <strong>{{ item.media_title }}</strong>
-                <span class="muted">{{ item.name }} · {{ item.blocked_reason }}</span>
-              </span>
-            </li>
-          </ul>
-
-          <template v-if="cleanupHeld.length">
-            <p class="muted cleanup-held-heading">
-              <strong>保留中 {{ cleanupHeld.length }} 项</strong>，不会被自动清理。
-              其中 {{ cleanupHeldReady.length }} 项放行后会被清理，共
-              {{ formatGib(cleanupPreview.held_reclaimable_bytes ?? 0) }}；
-              {{ cleanupHeldBlocked.length }} 项即使放行也不满足条件。
-              放行前请先确认媒体库里那一份完好。
-            </p>
-            <ul v-if="cleanupHeldReady.length" class="cleanup-list">
-              <li v-for="item in cleanupHeldReady" :key="item.download_id">
-                <span>
-                  <strong>{{ item.media_title }}</strong>
-                  <span class="muted">
-                    {{ item.name }} · {{ formatGib(item.size_bytes) }} · 已做种
-                    {{ item.seeding_days }} 天（需 {{ item.required_seeding_days }} 天）
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  class="button secondary small"
-                  :disabled="cleanupChangingId !== null"
-                  @click="setCleanupHold(item.download_id, false)"
-                >
-                  {{ cleanupChangingId === item.download_id ? '放行中…' : '放行' }}
-                </button>
-              </li>
-            </ul>
-            <ul v-if="cleanupHeldBlocked.length" class="cleanup-list">
-              <li v-for="item in cleanupHeldBlocked" :key="item.download_id">
-                <span>
-                  <strong>{{ item.media_title }}</strong>
-                  <span class="muted">{{ item.name }} · {{ item.blocked_reason }}</span>
-                </span>
-              </li>
-            </ul>
-          </template>
-        </template>
-      </details>
-
-      <div v-if="form.scope_mode === 'filters'" class="filter-heading">
-        <div>
-          <span class="eyebrow">REGIONS</span>
-          <strong>地区范围</strong>
-          <p class="muted">不选择地区时处理全部地区；可同时选择多个地区。</p>
-        </div>
-        <div class="configuration-field-grid">
-          <label v-for="region in regionOptions" :key="region" class="configuration-checkbox">
-            <input v-model="form.regions" type="checkbox" :value="region" /> {{ region }}
-          </label>
-        </div>
       </div>
-      <div v-if="form.scope_mode === 'filters'" class="filter-heading automation-year-filter">
-        <div>
-          <span class="eyebrow">YEARS</span>
-          <strong>年份范围</strong>
-          <p class="muted">不选择年份时处理全部年份；选择后只处理影视首播年份匹配的项目。</p>
-        </div>
-        <div v-if="yearOptions.length" class="configuration-field-grid automation-year-options">
-          <label v-for="year in yearOptions" :key="year" class="configuration-checkbox">
-            <input v-model="form.years" :name="`year-${year}`" type="checkbox" :value="year" />
-            {{ year }}
-          </label>
-        </div>
-        <p v-else class="muted">当前媒体库还没有可用年份。</p>
-      </div>
-      <div v-if="form.scope_mode !== 'filters'" class="automation-media-picker">
-        <div class="filter-heading">
-          <div>
-            <span class="eyebrow">MANUAL SCOPE</span>
-            <strong>手动选择影视</strong>
-          </div>
-          <span class="muted">已选择 {{ form.selected_media_ids.length }} 项</span>
-        </div>
-        <div class="filter-grid">
-          <label>
-            关键词
-            <input v-model="mediaQuery.query" type="search" placeholder="中文名、原名" />
-          </label>
-          <label>
-            类型
-            <select v-model="mediaQuery.mediaType">
-              <option value="">全部类型</option>
-              <option value="movie">电影</option>
-              <option value="tv">电视剧</option>
-            </select>
-          </label>
-          <label>
-            地区
-            <select v-model="mediaQuery.region">
-              <option value="">全部地区</option>
-              <option v-for="region in regionOptions" :key="region" :value="region">{{ region }}</option>
-            </select>
-          </label>
-          <button class="button secondary" type="button" :disabled="mediaOptionsLoading" @click="loadMediaOptions(1)">
-            {{ mediaOptionsLoading ? '查询中…' : '查询影视' }}
-          </button>
-        </div>
-        <p class="muted">当前查询 {{ mediaOptionsTotal }} 项；每页显示 {{ mediaOptionsPageSize }} 项，可用关键词继续缩小范围。</p>
-        <div class="download-stack automation-media-options">
-          <label v-for="item in mediaOptions" :key="item.id" class="download-card configuration-checkbox">
-            <input
-              type="checkbox"
-              :checked="form.selected_media_ids.includes(item.id)"
-              @change="toggleMedia(item.id)"
-            />
-            <span>
-              <strong>{{ item.title }}</strong>
-              <small class="muted">
-                {{ item.media_type === 'tv' ? '电视剧' : '电影' }} · {{ item.year ?? '年份未知' }} ·
-                {{ item.regions.length ? item.regions.join(' / ') : '地区未知' }}
-              </small>
-            </span>
-          </label>
-        </div>
-        <Pagination
-          :page="mediaOptionsPage"
-          :total="mediaOptionsTotal"
-          :page-size="mediaOptionsPageSize"
-          label="影视选择分页"
-          @change="changeMediaOptionsPage"
-        />
-      </div>
-      <p class="muted">
-        当前站点：AvistaZ；媒体类型：电影和电视剧。真实下载还要求部署环境启用 ENABLE_QB_WRITE。
-      </p>
+
       <div class="filter-actions">
+        <span class="muted">空间清理的设置在<RouterLink to="/cleanup">「清理」页</RouterLink>。</span>
         <button class="button primary" type="submit" :disabled="saving">
           {{ saving ? '保存中…' : '保存策略' }}
         </button>
