@@ -132,9 +132,14 @@ describe('cleanup page', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('保存后将开始真正删除')
+    expect(wrapper.text()).not.toContain('有未保存的修改')
+    expect(wrapper.find('button[type="submit"]').attributes('disabled')).toBeDefined()
     await wrapper.find('input[name="cleanup_enabled"]').setValue(true)
     await wrapper.find('input[name="cleanup_dry_run"]').setValue(false)
     expect(wrapper.text()).toContain('保存后将开始真正删除')
+    // Ticking a box is not saving it.
+    expect(wrapper.text()).toContain('有未保存的修改')
+    expect(cards(wrapper)[0]).toContain('未启用')
 
     await wrapper.find('form').trigger('submit')
     await flushPromises()
@@ -151,6 +156,11 @@ describe('cleanup page', () => {
     expect(cards(wrapper)[0]).toContain('正在运行')
     expect(wrapper.text()).toContain('下一轮标记')
     expect(wrapper.text()).not.toContain('保存后将开始真正删除')
+    expect(wrapper.text()).not.toContain('有未保存的修改')
+
+    // The settings come before the lists they govern.
+    const headings = wrapper.findAll('h2').map((heading) => heading.text())
+    expect(headings).toEqual(['设置', '待删除', '保留中', '最近的清理记录'])
   })
 
   it('says deletion is not authorised when the server switch is off', async () => {

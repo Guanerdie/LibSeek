@@ -365,6 +365,8 @@ body{color:var(--text);font-size:13px;line-height:1.55;background:var(--bg)}
 .cleanup-panel h2{margin:0 0 4px;font-size:18px}
 .cleanup-panel .section-heading p{margin:0;font-size:12px;line-height:1.6}
 .cleanup-panel code{padding:1px 5px;border-radius:5px;background:var(--surface);font-size:11px}
+.cleanup-save{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.cleanup-unsaved{padding:6px 12px;border-radius:999px;color:var(--warning);background:#f5eee3;font-size:12px;font-weight:700}
 .cleanup-empty{margin:0;padding:18px;border-radius:12px;background:var(--surface);text-align:center}
 .cleanup-row-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .cleanup-recent-meta{flex:0 0 auto;white-space:nowrap}

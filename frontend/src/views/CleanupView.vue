@@ -159,6 +159,15 @@ const status = computed(() => {
   return { value: '未授权删除', detail: '服务端未开启 ENABLE_QB_DELETE', tone: 'dry' }
 })
 
+// A ticked box changes nothing until it is saved; say so while they differ.
+const dirty = computed(() => {
+  const current = saved.value
+  if (current === null) return false
+  return (Object.keys(current) as Array<keyof CleanupPolicy>).some(
+    (key) => form[key] !== current[key],
+  )
+})
+
 // Saving this form would start real deletion where there was none.
 const armsDeletion = computed(
   () => form.cleanup_enabled && !form.cleanup_dry_run && !deleting.value,
@@ -216,6 +225,76 @@ onMounted(() => void load())
       </div>
 
       <p v-if="previewError" class="inline-warning">{{ previewError }}</p>
+
+      <form class="panel cleanup-panel" @submit.prevent="save">
+        <div class="section-heading">
+          <div>
+            <h2>设置</h2>
+            <p class="muted">
+              删除不可逆。真正删除需要同时满足：启用、关闭演练模式、服务端开启
+              <code>ENABLE_QB_DELETE</code>{{ preview && !preview.delete_authorized ? '（当前未开启）' : '' }}。
+            </p>
+          </div>
+        </div>
+        <div class="configuration-field-grid cleanup-switches">
+          <label class="configuration-checkbox">
+            <input v-model="form.cleanup_enabled" name="cleanup_enabled" type="checkbox" />
+            启用空间清理
+          </label>
+          <label class="configuration-checkbox">
+            <input v-model="form.cleanup_dry_run" name="cleanup_dry_run" type="checkbox" />
+            演练模式（只记录，不删除）
+          </label>
+          <label class="configuration-checkbox">
+            <input
+              v-model="form.cleanup_require_library_confirmed"
+              name="cleanup_require_library_confirmed"
+              type="checkbox"
+            />
+            必须已确认入库
+          </label>
+        </div>
+        <div class="configuration-field-grid cleanup-numbers">
+          <label>
+            保留天数（下载完成后）
+            <input v-model.number="form.cleanup_after_days" name="cleanup_after_days" type="number" min="1" max="365" />
+          </label>
+          <label>
+            最短做种天数
+            <input
+              v-model.number="form.cleanup_min_seeding_days"
+              name="cleanup_min_seeding_days"
+              type="number"
+              min="1"
+              max="365"
+            />
+          </label>
+          <label>
+            标记后观察天数
+            <input v-model.number="form.cleanup_grace_days" name="cleanup_grace_days" type="number" min="0" max="30" />
+          </label>
+          <label>
+            每日最多删除
+            <input v-model.number="form.cleanup_daily_limit" name="cleanup_daily_limit" type="number" min="1" max="500" />
+          </label>
+        </div>
+        <p v-if="riskyDays" class="inline-warning">
+          AvistaZ 要求做种满 7 天，而客户端统计的做种时长通常比站点认可的更长。
+          低于 8 天有被记 H&amp;R 的风险，建议保持 10 天。
+        </p>
+        <p v-if="armsDeletion" class="inline-warning">
+          保存后将开始真正删除：「待删除」里的 {{ marked.length + queued.length }} 项会在下一轮被标记，观察期后删除。
+        </p>
+        <div class="filter-actions cleanup-save">
+          <span v-if="dirty" class="cleanup-unsaved" role="status">
+            有未保存的修改，点「保存设置」后才生效
+          </span>
+          <span v-else class="muted">当前显示的就是正在生效的设置</span>
+          <button class="button primary" type="submit" :disabled="saving || !dirty">
+            {{ saving ? '保存中…' : '保存设置' }}
+          </button>
+        </div>
+      </form>
 
       <article class="panel cleanup-panel">
         <div class="section-heading">
@@ -320,72 +399,6 @@ onMounted(() => void load())
           </ul>
         </details>
       </article>
-
-      <form class="panel cleanup-panel" @submit.prevent="save">
-        <div class="section-heading">
-          <div>
-            <h2>设置</h2>
-            <p class="muted">
-              删除不可逆。真正删除需要同时满足：启用、关闭演练模式、服务端开启
-              <code>ENABLE_QB_DELETE</code>{{ preview && !preview.delete_authorized ? '（当前未开启）' : '' }}。
-            </p>
-          </div>
-        </div>
-        <div class="configuration-field-grid cleanup-switches">
-          <label class="configuration-checkbox">
-            <input v-model="form.cleanup_enabled" name="cleanup_enabled" type="checkbox" />
-            启用空间清理
-          </label>
-          <label class="configuration-checkbox">
-            <input v-model="form.cleanup_dry_run" name="cleanup_dry_run" type="checkbox" />
-            演练模式（只记录，不删除）
-          </label>
-          <label class="configuration-checkbox">
-            <input
-              v-model="form.cleanup_require_library_confirmed"
-              name="cleanup_require_library_confirmed"
-              type="checkbox"
-            />
-            必须已确认入库
-          </label>
-        </div>
-        <div class="configuration-field-grid cleanup-numbers">
-          <label>
-            保留天数（下载完成后）
-            <input v-model.number="form.cleanup_after_days" name="cleanup_after_days" type="number" min="1" max="365" />
-          </label>
-          <label>
-            最短做种天数
-            <input
-              v-model.number="form.cleanup_min_seeding_days"
-              name="cleanup_min_seeding_days"
-              type="number"
-              min="1"
-              max="365"
-            />
-          </label>
-          <label>
-            标记后观察天数
-            <input v-model.number="form.cleanup_grace_days" name="cleanup_grace_days" type="number" min="0" max="30" />
-          </label>
-          <label>
-            每日最多删除
-            <input v-model.number="form.cleanup_daily_limit" name="cleanup_daily_limit" type="number" min="1" max="500" />
-          </label>
-        </div>
-        <p v-if="riskyDays" class="inline-warning">
-          AvistaZ 要求做种满 7 天，而客户端统计的做种时长通常比站点认可的更长。
-          低于 8 天有被记 H&amp;R 的风险，建议保持 10 天。
-        </p>
-        <p v-if="armsDeletion" class="inline-warning">
-          保存后将开始真正删除：「待删除」里的 {{ marked.length + queued.length }} 项会在下一轮被标记，观察期后删除。
-        </p>
-        <div class="filter-actions">
-          <button class="button primary" type="submit" :disabled="saving">
-            {{ saving ? '保存中…' : '保存设置' }}
-          </button>
-        </div>
-      </form>
 
       <article class="panel cleanup-panel">
         <div class="section-heading">
