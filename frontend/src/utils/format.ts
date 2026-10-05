@@ -1,3 +1,15 @@
+/** Parse a timestamp from the API.
+ *
+ * The server keeps every time in UTC, but SQLite hands them back without an
+ * offset and they reach the browser as `2026-10-05T04:45:57`.  JavaScript
+ * reads an offset-less date-time as local time, which showed every time on
+ * the site eight hours early for a browser in China.
+ */
+export function parseApiTime(value: string): Date {
+  const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+  return new Date(value.includes('T') && !hasOffset ? `${value}Z` : value)
+}
+
 export function formatShanghai(value: string | null | undefined): string {
   if (!value) return '—'
   return new Intl.DateTimeFormat('zh-CN', {
@@ -9,7 +21,7 @@ export function formatShanghai(value: string | null | undefined): string {
     minute: '2-digit',
     second: '2-digit',
     hour12: false,
-  }).format(new Date(value))
+  }).format(parseApiTime(value))
 }
 
 const regionNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' })

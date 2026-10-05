@@ -7,7 +7,12 @@ import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
 import type { DailyCandidate } from '../types'
-import { candidateReasonLabel, candidateWarningLabel, statusLabel } from '../utils/format'
+import {
+  candidateReasonLabel,
+  candidateWarningLabel,
+  parseApiTime,
+  statusLabel,
+} from '../utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -132,7 +137,7 @@ async function quickFill(): Promise<void> {
 }
 
 function outcomeTime(iso: string): string {
-  const parsed = new Date(iso)
+  const parsed = parseApiTime(iso)
   return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString()
 }
 
