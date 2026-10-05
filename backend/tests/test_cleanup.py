@@ -885,6 +885,31 @@ async def test_library_is_refreshed_before_deciding(session_factory) -> None:
 
 
 @pytest.mark.asyncio
+async def test_marked_time_is_taken_after_the_library_refresh(
+    monkeypatch: pytest.MonkeyPatch, session_factory
+) -> None:
+    """The refresh takes minutes; the grace period must not start before it."""
+
+    start = datetime(2026, 10, 5, 15, 55, tzinfo=UTC)
+    clock = {"now": start}
+    monkeypatch.setattr(cleanup, "utc_now", lambda: clock["now"])
+    async with session_factory() as session:
+        download = await _seed(session, source_item_id="slow-refresh", info_hash="c5" * 20)
+        await _enable(session)
+        qb = RecordingQb([_torrent("c5" * 20, seeding_days=30)])
+
+        async def refresher(_session: AsyncSession) -> None:
+            clock["now"] = start + timedelta(minutes=5)
+
+        await _run_with_refresh(session, qb, refresher)
+        await session.refresh(download)
+
+        assert download.cleanup_state == DownloadCleanupState.MARKED
+        assert download.cleanup_marked_at is not None
+        assert download.cleanup_marked_at.replace(tzinfo=UTC) == start + timedelta(minutes=5)
+
+
+@pytest.mark.asyncio
 async def test_idle_cycle_does_not_refresh_the_library(session_factory) -> None:
     """Held, deleted and unfinished downloads give the cycle nothing to decide."""
 

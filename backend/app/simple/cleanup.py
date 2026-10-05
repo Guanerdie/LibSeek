@@ -475,6 +475,7 @@ async def run_cleanup_cycle(
     now: datetime | None = None,
 ) -> CleanupResult:
     settings = settings or get_settings()
+    clock_is_fixed = now is not None
     now = now or utc_now()
     policy = await session.get(AutomationPolicy, "default")
     if policy is None or not policy.cleanup_enabled:
@@ -516,6 +517,11 @@ async def run_cleanup_cycle(
             await session.commit()
             result.skipped.append(f"入库确认刷新失败: {message}")
             return result
+        if not clock_is_fixed:
+            # The refresh pages through the whole missing list and takes
+            # minutes.  Tags and deletions happen after it, and their recorded
+            # times -- which the grace period is counted from -- must say so.
+            now = utc_now()
 
     readonly = readonly_factory()
     try:
