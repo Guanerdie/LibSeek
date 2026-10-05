@@ -1,569 +1,200 @@
-# LibSeek 部署与维护指南
+# UNIN 部署与更新手册
 
-> 项目GitHub: https://github.com/Guanerdie/LibSeek
-> 生产服务器: 见本地 `~/.ssh/config` 的 `libseek-prod` 别名（本仓库公开，不记录真实地址）
-> 更新日期: 2026-09-02
+> 仓库：https://github.com/Guanerdie/LibSeek（**公开仓库**，本文不记录服务器地址、用户名和任何凭据）
+> 主线分支：`codex/simplified-mvp`
+> 更新日期：2026-10-05（按当天一次真实上线的过程核对过）
 
 ---
 
-## 服务器信息
+## 1. 生产环境现状
 
-**服务器地址**: 不写在仓库里。本仓库是公开的，公开 SSH 目标会被扫描器直接拿去爆破。
-真实地址放在本地 `~/.ssh/config`（Windows 为 `C:\Users\<用户名>\.ssh\config`）：
+| 项目 | 值 |
+|---|---|
+| 代码目录 | `/opt/unin`（git 检出，分支 `codex/simplified-mvp`） |
+| 部署方式 | Docker Compose，项目名 `unin`，配置文件 `/opt/unin/compose.yaml` |
+| 服务 | `api`（FastAPI，`127.0.0.1:8000`）、`frontend`（Nginx，`127.0.0.1:9527`） |
+| 数据库 | SQLite，容器内 `/var/lib/unin/unin.db` |
+| 数据卷 | `unin_unin_data`，宿主机路径 `/var/lib/docker/volumes/unin_unin_data/_data` |
+| 数据卷内容 | `unin.db`、`auth/`（管理员登录信息）、`integrations/`（页面上保存的连接配置） |
+| 环境变量 | `/opt/unin/.env`（不进版本库）；`DATABASE_URL=` 留空表示使用默认的 SQLite |
+| 对外入口 | 宿主机 Nginx 反向代理到 `127.0.0.1:9527`，配置见 `deploy/nginx.unin.tlovex.de.conf` |
+| 备份目录 | `/opt/unin/backups/` |
+
+要点：
+
+- `api` 容器启动时会先执行 `alembic upgrade head`，**数据库迁移是自动的**，不需要手动跑。
+- 服务名是 `api`，不是 `backend`。
+- 调度器只支持单个 Uvicorn 进程，不要给 `api` 加 `--workers`。
+
+## 2. 连接服务器
+
+服务器地址和登录信息放在本机的 `~/.ssh/config`（Windows 为 `C:\Users\<用户名>\.ssh\config`），不要写进仓库：
 
 ```sshconfig
 Host libseek-prod
-    HostName <生产服务器 IP 或域名>
+    HostName <服务器 IP 或域名>
     User <用户名>
-    IdentityFile ~/.ssh/libseek_deploy
+    Port <端口>
+    IdentityFile <私钥路径>
+    IdentitiesOnly yes
 ```
 
-**SSH登录**: 私钥存放在本地 `~/.ssh`，不要放进项目目录。
-**连接方式**:
+私钥不要放在项目目录里。下文的命令都在服务器上的 `/opt/unin` 目录执行。
+
+## 3. 更新到新版本
+
+上线前先在本地跑通检查（见 `README.md` 的「本地开发」一节），并把代码推到 `codex/simplified-mvp`。
+
+### 3.1 上线前检查（只读）
+
 ```bash
-ssh libseek-prod
+cd /opt/unin
+git status -sb                 # 被跟踪的文件应当没有改动
+git log --oneline -1           # 记下当前提交，回滚要用
+docker compose ps              # 两个服务都应是 healthy
+grep '^DATABASE_URL=' .env     # 留空或没有这一行 = SQLite
+df -h /var/lib/docker          # 确认磁盘空间
 ```
 
-> 下文所有 `<PROD_HOST>` 占位符，按需替换为你自己的地址或直接用上面的 Host 别名。
+### 3.2 保留旧镜像，拉代码，构建
 
----
+这一步旧服务照常运行。把 `<标签>` 换成本次上线的名字，例如 `pre-cleanup`。
 
-## 当前部署架构
-
-### 推测的部署方式
-
-基于项目结构，生产环境应该采用以下方式之一：
-
-#### 方式1: Docker Compose（推荐）
 ```bash
-# 项目目录结构
-/opt/libseek/
-├── compose.yaml
-├── .env
-├── backend/
-├── frontend/
-└── data/          # SQLite数据库或持久化卷
+docker tag unin-api unin-api:<标签>
+docker tag unin-frontend unin-frontend:<标签>
+git pull --ff-only
+docker compose build api frontend
 ```
 
-#### 方式2: 直接运行
-```bash
-# 后端
-cd /opt/libseek/backend
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+必须先打标签再构建：构建会覆盖 `unin-api` 和 `unin-frontend` 这两个镜像名。
 
-# 前端
-cd /opt/libseek/frontend
-npm run build
-# 使用Nginx托管dist/
+### 3.3 停 api，备份数据
+
+从这里开始网站暂时不可用。先停 `api` 再备份，保证 SQLite 文件是一致的。
+
+```bash
+docker compose stop api
+tar czf backups/unin-data-$(date +%Y%m%d)-<标签>.tgz \
+  --exclude='unin.db.backup-*' \
+  -C /var/lib/docker/volumes/unin_unin_data/_data .
+ls -lh backups/
 ```
 
----
+**确认备份文件存在且大小不为 0 再继续。**
 
-## 部署流程
-
-### 初次部署
-
-#### 1. 服务器环境准备
+### 3.4 启动新版本
 
 ```bash
-# 登录服务器
-ssh libseek-prod
+docker compose up -d
+docker compose ps              # 等两个服务都变成 healthy
+```
 
-# 安装Docker和Docker Compose（如果用方式1）
-sudo apt update
-sudo apt install -y docker.io docker-compose-plugin
+### 3.5 上线后核对
 
-# 克隆项目
+```bash
+docker compose exec api alembic current        # 应为本次的最新迁移版本，带 (head)
+docker compose logs api --tail 50              # 没有 Traceback / ERROR
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/health   # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9527/             # 200
+```
+
+然后在浏览器里登录，确认列表能加载，本次改动涉及的页面能正常使用。
+
+## 4. 回滚
+
+顺序是**先恢复数据库，再换回旧代码**。新代码的迁移已经改过表结构，旧代码不能直接用新数据库。
+
+```bash
+cd /opt/unin
+docker compose stop
+rm -f /var/lib/docker/volumes/unin_unin_data/_data/unin.db*
+tar xzf backups/<备份文件>.tgz -C /var/lib/docker/volumes/unin_unin_data/_data
+git reset --hard <上线前的提交>
+docker tag unin-api:<标签> unin-api
+docker tag unin-frontend:<标签> unin-frontend
+docker compose up -d
+```
+
+注意：
+
+- 这会用备份覆盖当前数据库，上线之后产生的数据会丢失。
+- `rm -f .../unin.db*` 会连同数据卷里名为 `unin.db.backup-*` 的旧备份一起删掉。需要保留的话先把它们移到 `backups/`。
+- 用旧镜像启动时不要加 `--build`。
+
+## 5. 空间清理功能的启用节奏
+
+2026-10-05 上线（提交 `f93b949`，迁移 `20260923_0025`）。真正删除需要三项同时满足：
+
+1. `.env` 中 `ENABLE_QB_WRITE=true`
+2. `.env` 中 `ENABLE_QB_DELETE=true`
+3. 自动化页「空间清理」里打开「启用空间清理」，并关闭「演练模式」
+
+启用步骤：
+
+1. **演练一周**：不设置 `ENABLE_QB_DELETE`，在页面上启用清理并保持演练模式，用「查看预览」确认它打算删的内容合理。
+2. **小量开启**：在 `.env` 中加 `ENABLE_QB_DELETE=true`，执行 `docker compose up -d api` 使其生效；页面上把「每日最多清理」设为 3，关闭演练模式。
+3. **恢复正常**：稳定后把每日上限改回 20。
+
+已知行为：
+
+- 升级时已经存在的下载全部是 `HELD`，不会被清理，也不会出现在预览里。只有升级后新提交的下载才会进入清理流程。
+- 清理分两阶段：先打 `unin-cleanup` 标签，观察期结束、且标签还在，才连同文件一起删除。在 qBittorrent 里摘掉这个标签，该种子就永久保留。
+- `HELD` / `DELETED` 状态目前无法在界面上改回，只能直接改数据库。
+
+查看各状态的下载数量：
+
+```bash
+docker compose exec api python -c "import sqlite3;c=sqlite3.connect('file:/var/lib/unin/unin.db?mode=ro',uri=True);print(c.execute('select cleanup_state,count(*) from downloads group by 1').fetchall())"
+```
+
+## 6. 日常维护
+
+```bash
+docker compose ps                         # 服务状态
+docker compose logs -f api                # 实时日志
+docker compose logs api --tail 100        # 最近 100 行
+docker compose exec api printenv ENABLE_QB_WRITE ENABLE_QB_DELETE   # 生效中的开关
+```
+
+修改 `.env` 之后要重新创建容器才生效：
+
+```bash
+docker compose up -d api
+```
+
+历史记录（自动化运行、搜索结果、活动日志）由应用按 `HISTORY_RETENTION_DAYS` 自动清理，不需要手动删数据库里的行。
+
+`backups/` 和数据卷里的旧备份不会自动清理，确认不再需要后手动删除。
+
+## 7. 首次部署
+
+```bash
 cd /opt
-sudo git clone https://github.com/Guanerdie/LibSeek.git libseek
-cd libseek
-
-# 配置环境变量
-sudo cp .env.example .env
-sudo nano .env
+git clone -b codex/simplified-mvp https://github.com/Guanerdie/LibSeek.git unin
+cd unin
+cp .env.example .env        # 按注释填写；各类连接也可以启动后在「设置」页保存
+docker compose up --build -d
 ```
 
-#### 2. 配置 .env 文件
-
-关键配置项：
-```ini
-# NextFind（缺失来源）
-NEXTFIND_USERNAME=your_username
-NEXTFIND_PASSWORD=your_password
-
-# TMDB（影视元数据）
-TMDB_API_KEY=your_tmdb_api_key
-
-# PT站点（至少配置一个）
-AVISTAZ_API_KEY=your_avistaz_key
-# 或
-NEXUSPHP_SITES='[{"name":"站点名","base_url":"https://...","username":"...","passkey":"..."}]'
-
-# qBittorrent（下载器）
-QBITTORRENT_BASE_URL=http://your-qb-server:8080
-QBITTORRENT_USERNAME=admin
-QBITTORRENT_PASSWORD=adminadmin
-ENABLE_QB_WRITE=true  # 允许提交下载
-
-# 认证（生产环境必须修改）
-AUTH_USERNAME=admin
-AUTH_PASSWORD=your_secure_password
-AUTH_SESSION_SIGNING_KEY=your_random_secret_key
-
-# 自动化调度
-AUTOMATION_SCHEDULER_ENABLED=true
-AUTOMATION_SCHEDULER_CRON=0 3 * * *  # 每天凌晨3点运行
-```
-
-#### 3. 启动服务
-
-**方式1: Docker Compose**
-```bash
-sudo docker compose up -d
-
-# 查看日志
-sudo docker compose logs -f
-
-# 检查运行状态
-sudo docker compose ps
-```
-
-**方式2: 直接运行**
-```bash
-# 后端
-cd backend
-uv sync
-uv run alembic upgrade head
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 &
-
-# 前端
-cd ../frontend
-npm install
-npm run build
-sudo cp -r dist/* /var/www/libseek/
-```
-
-#### 4. 配置反向代理（Nginx）
-
-```nginx
-# /etc/nginx/sites-available/libseek
-server {
-    listen 80;
-    server_name <PROD_HOST>;  # 生产服务器 IP 或域名
-
-    # 前端
-    location / {
-        root /var/www/libseek;
-        try_files $uri $uri/ /index.html;
-    }
-
-    # 后端API
-    location /api {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/libseek /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-#### 5. 配置HTTPS（可选但推荐）
-
-```bash
-sudo apt install certbot python3-certbot-nginx
-sudo certbot --nginx -d your-domain.com
-```
-
----
-
-## 日常维护
-
-### 更新代码
-
-```bash
-# 登录服务器
-ssh libseek-prod
-cd /opt/libseek
-
-# 拉取最新代码
-sudo git fetch origin
-sudo git pull origin main
-
-# 如果有数据库迁移
-cd backend
-sudo docker compose exec backend uv run alembic upgrade head
-# 或直接运行方式
-uv run alembic upgrade head
-
-# 重启服务
-sudo docker compose down
-sudo docker compose up -d --build
-
-# 查看启动日志
-sudo docker compose logs -f backend
-```
-
-### 应用本次搜索冷却优化
-
-```bash
-cd /opt/libseek
-
-# 1. 拉取最新代码（包含迁移文件）
-sudo git pull origin main
-
-# 2. 应用数据库迁移
-sudo docker compose exec backend uv run alembic upgrade head
-# 预期输出：
-# INFO  [alembic.runtime.migration] Running upgrade ... -> 20260902_0013
-
-# 3. 重启服务（应用新逻辑）
-sudo docker compose restart backend
-
-# 4. 验证迁移成功
-sudo docker compose exec backend uv run alembic current
-# 应该显示：20260902_0013 (head)
-
-# 5. 检查日志（观察首次自动化运行）
-sudo docker compose logs -f backend | grep "search_cooldown\|next_search_at"
-```
-
-### 回滚到上一个版本
-
-```bash
-cd /opt/libseek
-
-# 1. 回滚代码
-sudo git log --oneline -5  # 查看最近提交
-sudo git reset --hard <commit-hash>
-
-# 2. 回滚数据库
-sudo docker compose exec backend uv run alembic downgrade -1
-
-# 3. 重启服务
-sudo docker compose restart
-```
-
-### 查看日志
-
-```bash
-# 实时日志
-sudo docker compose logs -f
-
-# 只看后端
-sudo docker compose logs -f backend
-
-# 最近100行
-sudo docker compose logs --tail=100 backend
-
-# 查看错误日志
-sudo docker compose logs backend | grep ERROR
-```
-
-### 备份数据库
-
-```bash
-# SQLite数据库通常在
-sudo docker compose exec backend ls -la /app/data/
-
-# 备份
-sudo docker compose exec backend cp /app/data/libseek.db /app/data/backup-$(date +%Y%m%d).db
-
-# 或从宿主机复制
-sudo docker cp libseek-backend-1:/app/data/libseek.db ./backup-$(date +%Y%m%d).db
-```
-
-### 清理旧数据
-
-```bash
-# 进入后端容器
-sudo docker compose exec backend bash
-
-# 连接数据库
-sqlite3 /app/data/libseek.db
-
-# 清理90天前的活动日志
-DELETE FROM activity_log WHERE created_at < datetime('now', '-90 days');
-
-# 清理已完成的下载记录（保留种子数据）
-DELETE FROM download WHERE state = 'COMPLETED' AND updated_at < datetime('now', '-30 days');
-
-# 退出
-.quit
-exit
-```
-
----
-
-## 监控和告警
-
-### 健康检查
-
-```bash
-# 检查服务状态
-curl http://<PROD_HOST>/api/health
-
-# 预期响应
-{"status":"ok","version":"0.9.0"}
-```
-
-### 关键指标
-
-**需要监控的指标**：
-1. **自动化成功率**
-   ```sql
-   SELECT
-     COUNT(*) FILTER (WHERE state = 'SUCCEEDED') * 100.0 / COUNT(*) as success_rate
-   FROM automation_run
-   WHERE created_at > datetime('now', '-7 days');
-   ```
-
-2. **搜索冷却分布**
-   ```sql
-   SELECT
-     search_miss_count,
-     COUNT(*) as count,
-     AVG((julianday(next_search_at) - julianday('now')) * 24) as avg_hours_until_next
-   FROM library_media
-   WHERE next_search_at IS NOT NULL
-   GROUP BY search_miss_count;
-   ```
-
-3. **下载队列积压**
-   ```sql
-   SELECT state, COUNT(*)
-   FROM download
-   WHERE state IN ('QUEUED', 'DOWNLOADING')
-   GROUP BY state;
-   ```
-
-### 告警脚本（可选）
-
-```bash
-#!/bin/bash
-# /opt/libseek/monitor.sh
-
-# 检查后端是否响应
-if ! curl -sf http://localhost:8000/api/health > /dev/null; then
-    echo "Backend is down!" | mail -s "LibSeek Alert" admin@example.com
-fi
-
-# 检查是否有失败的自动化运行
-FAILED=$(sudo docker compose exec -T backend sqlite3 /app/data/libseek.db \
-  "SELECT COUNT(*) FROM automation_run WHERE state='FAILED' AND created_at > datetime('now','-1 hour');")
-
-if [ "$FAILED" -gt 0 ]; then
-    echo "Found $FAILED failed automation runs in the last hour" | \
-      mail -s "LibSeek Automation Failed" admin@example.com
-fi
-```
-
-添加到crontab:
-```bash
-crontab -e
-# 每10分钟检查一次
-*/10 * * * * /opt/libseek/monitor.sh
-```
-
----
-
-## 性能优化（生产环境）
-
-### 1. 数据库优化
-
-**迁移到PostgreSQL**（处理大数据量时）
-```yaml
-# compose.yaml 添加
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: libseek
-      POSTGRES_USER: libseek
-      POSTGRES_PASSWORD: secure_password
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
-```
-
-修改 `.env`:
-```ini
-DATABASE_URL=postgresql+asyncpg://libseek:secure_password@postgres:5432/libseek
-```
-
-### 2. 增加工作进程
-
-```yaml
-# compose.yaml
-services:
-  backend:
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-### 3. 调整自动化并发
-
-```ini
-# .env
-AUTOMATION_MAX_PARALLEL_JOBS=10  # 根据服务器性能调整
-```
-
----
-
-## 故障排查
-
-### 常见问题
-
-#### 1. 自动化不运行
-
-**检查**：
-```bash
-# 查看配置
-sudo docker compose exec backend env | grep AUTOMATION
-
-# 查看日志
-sudo docker compose logs backend | grep "scheduler"
-```
-
-**解决**：
-```ini
-# .env 中确保
-AUTOMATION_SCHEDULER_ENABLED=true
-```
-
-#### 2. PT站搜索失败
-
-**检查**：
-```bash
-# 查看最近的搜索错误
-sudo docker compose exec backend sqlite3 /app/data/libseek.db \
-  "SELECT * FROM activity_log WHERE action LIKE '%search%' AND level='ERROR' ORDER BY created_at DESC LIMIT 10;"
-```
-
-**可能原因**：
-- API Key过期
-- 站点Cookie失效（NexusPHP站点）
-- 触发反爬限制
-
-#### 3. 下载提交失败
-
-**检查**：
-```bash
-# 测试qBittorrent连接
-curl -u admin:password http://your-qb-server:8080/api/v2/app/version
-```
-
-**解决**：
-```ini
-# .env 中确认
-ENABLE_QB_WRITE=true
-QBITTORRENT_BASE_URL=http://correct-address:8080
-```
-
-#### 4. 内存占用过高
-
-**检查**：
-```bash
-# 查看容器资源使用
-sudo docker stats
-
-# 限制内存
-sudo docker compose down
-```
-
-修改 `compose.yaml`:
-```yaml
-services:
-  backend:
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-```
-
----
-
-## 安全建议
-
-### 1. 防火墙配置
-
-```bash
-# 只开放必要端口
-sudo ufw allow 22/tcp   # SSH
-sudo ufw allow 80/tcp   # HTTP
-sudo ufw allow 443/tcp  # HTTPS
-sudo ufw enable
-
-# 限制SSH登录IP（如果有固定IP）
-sudo ufw allow from YOUR_IP to any port 22
-```
-
-### 2. 定期更新密码
-
-```bash
-# 修改认证密码
-sudo nano /opt/libseek/.env
-# 修改 AUTH_PASSWORD 和 AUTH_SESSION_SIGNING_KEY
-
-# 重启服务
-sudo docker compose restart backend
-```
-
-### 3. 日志审计
-
-```bash
-# 查看登录日志
-sudo docker compose logs backend | grep "auth_login"
-
-# 查看异常API调用
-sudo docker compose logs backend | grep "401\|403"
-```
-
----
-
-## 版本发布检查清单
-
-每次更新生产环境前：
-
-- [ ] 在本地/测试环境验证功能
-- [ ] 备份生产数据库
-- [ ] 查看Git提交日志，确认改动范围
-- [ ] 检查是否有数据库迁移（`backend/alembic/versions/`）
-- [ ] 预估停机时间（通常<1分钟）
-- [ ] 准备回滚方案（记录当前commit hash）
-- [ ] 更新后验证核心功能：
-  - [ ] 用户登录
-  - [ ] 影视列表加载
-  - [ ] 搜索资源
-  - [ ] 自动化运行（如果在运行时间）
-- [ ] 观察日志5分钟，确保无错误
-
----
-
-## 相关链接
-
-- **项目主页**: https://github.com/Guanerdie/LibSeek
-- **问题反馈**: https://github.com/Guanerdie/LibSeek/issues
-- **FastAPI文档**: https://fastapi.tiangolo.com/
-- **Vue 3文档**: https://vuejs.org/
-- **TMDB API**: https://developers.themoviedb.org/
-- **qBittorrent WebAPI**: https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API
-
----
-
-## 联系信息
-
-**维护者**: [从项目README中获取]
-**技术支持**: [设置Issue或讨论区]
-
----
-
-**最后更新**: 2026-09-02
-**文档版本**: 1.0
+- 首次打开页面时创建本地管理员。
+- 宿主机 Nginx 参考 `deploy/nginx.unin.tlovex.de.conf`，证书用 certbot 申请。
+- 部署并检查完成后，再设置 `AUTOMATION_SCHEDULER_ENABLED=true` 打开调度器；自动化策略还需要在页面上单独启用。
+- 需要 PostgreSQL 时叠加 `deploy/compose.postgres.yaml`，见 `README.md`。上文的备份和回滚步骤只适用于 SQLite。
+
+## 8. 安全注意事项
+
+- 仓库是公开的。服务器地址、用户名、密码、token、私钥都不要写进任何会被提交的文件。仓库已配置 gitleaks（`.gitleaks.toml`、`.pre-commit-config.yaml`）。
+- 生产服务器的 IP 曾被提交进 git 历史，应视为已公开：禁用密码登录，只允许密钥；建议安装 fail2ban，并改用非 root 用户登录。
+- `api` 和 `frontend` 只监听 `127.0.0.1`，对外只经过宿主机 Nginx 的 443 端口。
+
+## 9. 上线检查清单
+
+- [ ] 本地测试全部通过，代码已推到 `codex/simplified-mvp`
+- [ ] 记下服务器当前的提交
+- [ ] 旧镜像已打标签
+- [ ] `api` 已停止，数据卷已备份，备份文件大小正常
+- [ ] 新版本启动后两个服务都是 healthy
+- [ ] `alembic current` 是预期版本
+- [ ] 日志没有报错，健康检查返回 200
+- [ ] 浏览器里登录、列表、本次改动的页面都正常

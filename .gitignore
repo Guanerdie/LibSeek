@@ -34,6 +34,10 @@ id_rsa*
 id_ed25519*
 .env.deploy
 .env.*.local
+.ssh/
+
+# Claude Code 的本机设置
+.claude/
 
 # 本地开发产物
 backend/unin.db
