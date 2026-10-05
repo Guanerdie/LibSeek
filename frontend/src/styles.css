@@ -326,6 +326,31 @@ body{color:var(--text);font-size:13px;line-height:1.55;background:var(--bg)}
 .automation-policy-panel>.filter-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:16px;border-top:1px solid var(--line)}
 .automation-policy-panel>.filter-actions a{color:var(--accent);text-decoration:none}
 .automation-policy-panel .tab-panel>.filter-heading{display:grid;grid-template-columns:minmax(180px,.75fr) minmax(0,1.25fr);gap:20px;padding:16px;border-radius:12px;background:var(--surface)}
+/* Automation page, single column.  Side by side, the tabbed form ended well
+   above a ten-card history list and left half the page blank. */
+.automation-page{grid-template-columns:minmax(0,1fr);grid-template-areas:"header" "state" "feedback" "summary" "run" "policy" "history";gap:20px}
+.automation-page>.automation-history{height:auto;min-height:0}
+.automation-policy-panel .tab-panel>.configuration-field-grid{grid-template-columns:repeat(4,minmax(0,1fr));align-items:start}
+.automation-policy-panel .tab-panel>.automation-quality-grid{grid-template-columns:repeat(6,minmax(0,1fr))}
+.automation-policy-panel .tab-panel>.configuration-field-grid>.configuration-checkbox{min-height:70px;padding:12px;border:1px solid var(--line);border-radius:11px;background:var(--surface)}
+.automation-policy-panel .tab-panel>.filter-heading>.configuration-field-grid:not(.automation-year-options){grid-template-columns:repeat(6,minmax(0,1fr))}
+.automation-policy-panel .automation-media-options{grid-template-columns:repeat(3,minmax(0,1fr))}
+/* A heading with nothing beside it is a plain section title, not a half-empty box. */
+.automation-policy-panel .tab-panel>.filter-heading:has(>div:only-child){grid-template-columns:1fr;padding:6px 0 0;background:none}
+.automation-policy-panel .tab-panel>.filter-heading:has(>div:only-child) p{margin:2px 0 0}
+.automation-run-list{gap:0}
+.automation-history .automation-run-card{grid-template-columns:minmax(210px,1fr) minmax(0,2fr) auto auto;align-items:center;gap:8px 20px;padding:12px 0}
+.automation-history .automation-run-card:first-child{padding-top:0}
+.automation-run-progress{gap:8px;padding:16px 24px}
+.automation-run-progress h2{margin:2px 0 0;font-size:16px}
+.automation-run-progress p{margin:0}
+.automation-run-when{display:grid;gap:1px;min-width:0}
+.automation-run-when strong{color:var(--text);font-size:13px;font-variant-numeric:tabular-nums}
+.automation-run-when .muted{font-size:12px}
+.automation-run-card .button{text-decoration:none;white-space:nowrap}
+.automation-run-error{grid-column:1/-1;margin:0}
+@media(max-width:1100px){.automation-policy-panel .tab-panel>.configuration-field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.automation-policy-panel .tab-panel>.automation-quality-grid,.automation-policy-panel .tab-panel>.filter-heading>.configuration-field-grid:not(.automation-year-options){grid-template-columns:repeat(3,minmax(0,1fr))}.automation-policy-panel .automation-media-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.automation-policy-panel .tab-panel>.configuration-field-grid,.automation-policy-panel .automation-media-options{grid-template-columns:1fr}.automation-policy-panel .tab-panel>.automation-quality-grid,.automation-policy-panel .tab-panel>.filter-heading>.configuration-field-grid:not(.automation-year-options){grid-template-columns:repeat(2,minmax(0,1fr))}.automation-run-card{grid-template-columns:minmax(0,1fr) auto}.automation-run-counts{grid-column:1/-1;grid-row:2}}
 /* Cleanup page. */
 .cleanup-page{display:grid;gap:20px}
 .cleanup-page>.page-header{margin-bottom:6px}

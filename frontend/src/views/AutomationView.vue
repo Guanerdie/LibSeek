@@ -894,14 +894,11 @@ onBeforeUnmount(() => {
         <p v-if="runsLoading" class="muted">正在读取执行记录…</p>
         <p v-else-if="runs.length === 0" class="muted">尚未执行自动搜索。</p>
         <div v-else class="automation-run-list">
-          <article v-for="(runItem, index) in runs" :key="runItem.id" class="automation-run-card">
-            <div class="automation-run-card-main">
-              <div>
-                <span class="eyebrow">第 {{ (runsPage - 1) * runsPageSize + index + 1 }} 次执行</span>
-                <h3>{{ runItem.trigger === 'scheduled' ? '周期自动搜索' : '手动自动搜索' }}</h3>
-                <p class="muted">{{ formatShanghai(runItem.created_at) }}</p>
-              </div>
-              <StatusPill :status="runItem.state" />
+          <!-- One line per run: the list is for scanning, the detail page for reading. -->
+          <article v-for="runItem in runs" :key="runItem.id" class="automation-run-card">
+            <div class="automation-run-when">
+              <strong>{{ formatShanghai(runItem.created_at) }}</strong>
+              <span class="muted">{{ runItem.trigger === 'scheduled' ? '周期自动搜索' : '手动自动搜索' }}</span>
             </div>
             <div class="automation-run-counts">
               <strong>共 {{ runItem.created }} 项</strong>
@@ -909,10 +906,13 @@ onBeforeUnmount(() => {
               <span v-if="runItem.failed" class="danger-text">失败 {{ runItem.failed }} 项</span>
               <span v-if="runItem.deferred" class="warning-text">等待 {{ runItem.deferred }} 项</span>
             </div>
-            <p v-if="runItem.error_message" class="inline-warning">{{ runItem.error_message }}</p>
+            <StatusPill :status="runItem.state" />
             <RouterLink class="button secondary small" :to="`/automation/runs/${runItem.id}`">
               查看任务详情
             </RouterLink>
+            <p v-if="runItem.error_message" class="inline-warning automation-run-error">
+              {{ runItem.error_message }}
+            </p>
           </article>
         </div>
         <Pagination
