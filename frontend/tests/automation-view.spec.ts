@@ -18,12 +18,17 @@ const mocks = vi.hoisted(() => ({
   retry: vi.fn(),
   media: vi.fn(),
   cleanupPreview: vi.fn(),
+  setCleanupHold: vi.fn(),
 }))
 
 vi.mock('../src/api/client', () => ({
   ApiError: class MockApiError extends Error {},
   automationApi: mocks,
-  dailyApi: { media: mocks.media, cleanupPreview: mocks.cleanupPreview },
+  dailyApi: {
+    media: mocks.media,
+    cleanupPreview: mocks.cleanupPreview,
+    setCleanupHold: mocks.setCleanupHold,
+  },
   statsApi: { scoreDistribution: mocks.scoreDistribution },
 }))
 
@@ -484,6 +489,64 @@ describe('automation settings', () => {
     expect(mocks.cleanupPreview).toHaveBeenCalledTimes(1)
     expect(wrapper.text()).toContain('当前可清理 0 项')
     expect(wrapper.text()).toContain('ENABLE_QB_DELETE')
+    wrapper.unmount()
+  })
+
+  it('lists held downloads with what releasing them would do, and releases one', async () => {
+    const heldItem = (overrides: Record<string, unknown>) => ({
+      download_id: 'd1',
+      media_title: '蓝色情结',
+      name: 'Blue.Complex.S01.1080p',
+      size_bytes: 2 * 1024 ** 3,
+      completed_at: '2026-09-15T00:00:00Z',
+      seeding_days: 19.6,
+      required_seeding_days: 10,
+      cleanup_state: 'HELD',
+      deletes_at: null,
+      blocked_reason: null,
+      ...overrides,
+    })
+    const preview = (items: unknown[]) => ({
+      enabled: false,
+      dry_run: true,
+      delete_authorized: true,
+      reclaimable_bytes: 0,
+      held_reclaimable_bytes: 2 * 1024 ** 3,
+      items,
+    })
+    mocks.cleanupPreview
+      .mockResolvedValueOnce(
+        preview([
+          heldItem({}),
+          heldItem({
+            download_id: 'd2',
+            media_title: '大物',
+            name: 'Big.Thing.S01',
+            blocked_reason: '尚未确认入库',
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(preview([heldItem({ cleanup_state: 'NONE' })]))
+    mocks.setCleanupHold.mockResolvedValue({})
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    await wrapper.findAll('button').find((item) => item.text() === '查看预览')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('当前可清理 0 项')
+    expect(wrapper.text()).toContain('保留中 2 项')
+    expect(wrapper.text()).toContain('其中 1 项放行后会被清理，共 2 GiB')
+    expect(wrapper.text()).toContain('尚未确认入库')
+    const release = wrapper.findAll('button').filter((item) => item.text() === '放行')
+    expect(release).toHaveLength(1)
+
+    await release[0]!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setCleanupHold).toHaveBeenCalledWith('d1', false)
+    expect(wrapper.text()).toContain('当前可清理 1 项')
+    expect(wrapper.text()).toContain('下一轮将被标记')
     wrapper.unmount()
   })
 

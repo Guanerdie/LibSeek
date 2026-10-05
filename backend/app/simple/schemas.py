@@ -259,6 +259,9 @@ class CleanupPreview(BaseModel):
     dry_run: bool
     delete_authorized: bool
     reclaimable_bytes: int
+    # What releasing every eligible held download would free.  Held items are
+    # in ``items`` with cleanup_state HELD and are never touched as they are.
+    held_reclaimable_bytes: int = 0
     items: list[CleanupPreviewEntry]
 
 

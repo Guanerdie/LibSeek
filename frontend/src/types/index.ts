@@ -521,5 +521,8 @@ export interface CleanupPreview {
   dry_run: boolean
   delete_authorized: boolean
   reclaimable_bytes: number
+  // What releasing every eligible held download would free.  Held items sit
+  // in `items` with cleanup_state 'HELD'.
+  held_reclaimable_bytes?: number
   items: CleanupPreviewEntry[]
 }

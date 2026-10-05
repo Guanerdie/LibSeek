@@ -30,6 +30,7 @@ from app.simple.integrations import (
 )
 from app.simple.models import (
     AutomationJob,
+    DownloadCleanupState,
     DownloadState,
     LibraryMediaItem,
     MediaState,
@@ -450,7 +451,7 @@ async def downloads_cleanup_preview(
         torrents = await qb.list_torrents()
     finally:
         await close_adapter(qb)
-    items = await cleanup.preview_cleanup(session, torrents)
+    items = await cleanup.preview_cleanup(session, torrents, include_held=True)
     return CleanupPreview(
         enabled=policy.cleanup_enabled,
         dry_run=(
@@ -460,7 +461,16 @@ async def downloads_cleanup_preview(
         ),
         delete_authorized=settings.enable_qb_delete and settings.enable_qb_write,
         reclaimable_bytes=sum(
-            item.size_bytes for item in items if item.blocked_reason is None
+            item.size_bytes
+            for item in items
+            if item.blocked_reason is None
+            and item.cleanup_state != DownloadCleanupState.HELD
+        ),
+        held_reclaimable_bytes=sum(
+            item.size_bytes
+            for item in items
+            if item.blocked_reason is None
+            and item.cleanup_state == DownloadCleanupState.HELD
         ),
         items=[CleanupPreviewEntry.model_validate(item, from_attributes=True) for item in items],
     )

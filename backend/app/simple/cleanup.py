@@ -237,7 +237,10 @@ def _torrent_tags(torrent: QbTorrent) -> set[str]:
 
 
 async def _load_candidates(
-    session: AsyncSession, torrents: dict[str, QbTorrent]
+    session: AsyncSession,
+    torrents: dict[str, QbTorrent],
+    *,
+    cleanup_states: Sequence[DownloadCleanupState] = _ACTIVE_CLEANUP_STATES,
 ) -> list[CleanupCandidate]:
     rows = await session.execute(
         select(Download, LibraryMediaItem, ReleaseCandidate.site_id)
@@ -246,7 +249,7 @@ async def _load_candidates(
         .where(
             Download.info_hash.is_not(None),
             Download.state.in_(_CLEANABLE_STATES),
-            Download.cleanup_state.in_(_ACTIVE_CLEANUP_STATES),
+            Download.cleanup_state.in_(cleanup_states),
         )
         .order_by(Download.completed_at.asc())
         .limit(_SCAN_LIMIT)
@@ -397,9 +400,19 @@ async def refresh_library_confirmations(session: AsyncSession) -> None:
 
 
 async def preview_cleanup(
-    session: AsyncSession, torrents: Sequence[QbTorrent], *, now: datetime | None = None
+    session: AsyncSession,
+    torrents: Sequence[QbTorrent],
+    *,
+    now: datetime | None = None,
+    include_held: bool = False,
 ) -> list[CleanupPreviewItem]:
-    """What the next cycles would touch, so the operator can look before enabling."""
+    """What the next cycles would touch, so the operator can look before enabling.
+
+    With ``include_held`` the held downloads still present in qBittorrent are
+    listed too, judged as if they had been released.  That is how the operator
+    sees what releasing one would lead to before doing it; nothing here ever
+    changes a held download.
+    """
 
     now = now or utc_now()
     policy = await session.get(AutomationPolicy, "default")
@@ -408,8 +421,19 @@ async def preview_cleanup(
     by_hash = {
         identity: torrent for torrent in torrents for identity in torrent.identity_hashes
     }
+    candidates = await _load_candidates(session, by_hash)
+    if include_held:
+        candidates += [
+            held
+            for held in await _load_candidates(
+                session, by_hash, cleanup_states=(DownloadCleanupState.HELD,)
+            )
+            # A held download whose torrent is gone has nothing left to
+            # release; listing it would bury the ones that matter.
+            if held.torrent is not None
+        ]
     items: list[CleanupPreviewItem] = []
-    for candidate in await _load_candidates(session, by_hash):
+    for candidate in candidates:
         if candidate.torrent is not None:
             refresh_from_torrent(candidate.download, candidate.torrent)
         decision = evaluate(candidate, policy, now=now, torrents=torrents)

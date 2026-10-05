@@ -99,6 +99,7 @@ const starting = ref(false)
 const error = ref<string | null>(null)
 const feedback = ref<string | null>(null)
 const cleanupPreview = ref<CleanupPreview | null>(null)
+const cleanupChangingId = ref<string | null>(null)
 const cleanupLoading = ref(false)
 const cleanupError = ref<string | null>(null)
 const currentRun = ref<AutomationRun | null>(null)
@@ -392,13 +393,46 @@ function formatGib(bytes: number): string {
   return `${Math.round((bytes / 1024 ** 3) * 10) / 10} GiB`
 }
 
+const cleanupReleased = computed(() =>
+  (cleanupPreview.value?.items ?? []).filter((item) => item.cleanup_state !== 'HELD'),
+)
+
+const cleanupHeld = computed(() =>
+  (cleanupPreview.value?.items ?? []).filter((item) => item.cleanup_state === 'HELD'),
+)
+
 const cleanupReady = computed(() =>
-  (cleanupPreview.value?.items ?? []).filter((item) => item.blocked_reason === null),
+  cleanupReleased.value.filter((item) => item.blocked_reason === null),
 )
 
 const cleanupBlocked = computed(() =>
-  (cleanupPreview.value?.items ?? []).filter((item) => item.blocked_reason !== null),
+  cleanupReleased.value.filter((item) => item.blocked_reason !== null),
 )
+
+// Held downloads judged as if released: what a release would lead to.
+const cleanupHeldReady = computed(() =>
+  cleanupHeld.value
+    .filter((item) => item.blocked_reason === null)
+    .sort((a, b) => a.size_bytes - b.size_bytes),
+)
+
+const cleanupHeldBlocked = computed(() =>
+  cleanupHeld.value.filter((item) => item.blocked_reason !== null),
+)
+
+async function setCleanupHold(downloadId: string, held: boolean): Promise<void> {
+  if (cleanupChangingId.value) return
+  cleanupChangingId.value = downloadId
+  cleanupError.value = null
+  try {
+    await dailyApi.setCleanupHold(downloadId, held)
+    cleanupPreview.value = await dailyApi.cleanupPreview()
+  } catch (caught) {
+    cleanupError.value = message(caught, '无法修改清理设置')
+  } finally {
+    cleanupChangingId.value = null
+  }
+}
 
 const cleanupRiskyDays = computed(
   () => form.cleanup_after_days < 8 || form.cleanup_min_seeding_days < 8,
@@ -889,8 +923,8 @@ onBeforeUnmount(() => {
             {{ cleanupLoading ? '读取中…' : '查看预览' }}
           </button>
         </div>
-        <p v-if="cleanupError" class="muted">{{ cleanupError }}</p>
-        <template v-else-if="cleanupPreview">
+        <p v-if="cleanupError" class="inline-warning">{{ cleanupError }}</p>
+        <template v-if="cleanupPreview">
           <p class="muted">
             当前可清理 {{ cleanupReady.length }} 项，预计释放
             {{ formatGib(cleanupPreview.reclaimable_bytes) }}；
@@ -899,24 +933,75 @@ onBeforeUnmount(() => {
               服务端尚未开启 ENABLE_QB_DELETE，当前只会记录不会删除。
             </span>
           </p>
-          <ul v-if="cleanupReady.length" class="reason-list">
+          <ul v-if="cleanupReady.length" class="cleanup-list">
             <li v-for="item in cleanupReady" :key="item.download_id">
-              <strong>{{ item.media_title }}</strong>
-              <span class="muted">
-                {{ item.name }} · {{ formatGib(item.size_bytes) }} · 已做种
-                {{ item.seeding_days }} 天（需 {{ item.required_seeding_days }} 天）
-                <template v-if="item.deletes_at">
-                  · 预计 {{ formatShanghai(item.deletes_at) }} 删除
-                </template>
+              <span>
+                <strong>{{ item.media_title }}</strong>
+                <span class="muted">
+                  {{ item.name }} · {{ formatGib(item.size_bytes) }} · 已做种
+                  {{ item.seeding_days }} 天（需 {{ item.required_seeding_days }} 天）
+                  <template v-if="item.cleanup_state === 'MARKED'">
+                    · 已标记<template v-if="item.deletes_at">，预计 {{ formatShanghai(item.deletes_at) }} 删除</template>
+                  </template>
+                  <template v-else> · 下一轮将被标记</template>
+                </span>
+              </span>
+              <button
+                v-if="item.cleanup_state === 'NONE'"
+                type="button"
+                class="button secondary small"
+                :disabled="cleanupChangingId !== null"
+                @click="setCleanupHold(item.download_id, true)"
+              >
+                保留
+              </button>
+            </li>
+          </ul>
+          <ul v-if="cleanupBlocked.length" class="cleanup-list">
+            <li v-for="item in cleanupBlocked" :key="item.download_id">
+              <span>
+                <strong>{{ item.media_title }}</strong>
+                <span class="muted">{{ item.name }} · {{ item.blocked_reason }}</span>
               </span>
             </li>
           </ul>
-          <ul v-if="cleanupBlocked.length" class="reason-list">
-            <li v-for="item in cleanupBlocked" :key="item.download_id">
-              <strong>{{ item.media_title }}</strong>
-              <span class="muted">{{ item.blocked_reason }}</span>
-            </li>
-          </ul>
+
+          <template v-if="cleanupHeld.length">
+            <p class="muted cleanup-held-heading">
+              <strong>保留中 {{ cleanupHeld.length }} 项</strong>，不会被自动清理。
+              其中 {{ cleanupHeldReady.length }} 项放行后会被清理，共
+              {{ formatGib(cleanupPreview.held_reclaimable_bytes ?? 0) }}；
+              {{ cleanupHeldBlocked.length }} 项即使放行也不满足条件。
+              放行前请先确认媒体库里那一份完好。
+            </p>
+            <ul v-if="cleanupHeldReady.length" class="cleanup-list">
+              <li v-for="item in cleanupHeldReady" :key="item.download_id">
+                <span>
+                  <strong>{{ item.media_title }}</strong>
+                  <span class="muted">
+                    {{ item.name }} · {{ formatGib(item.size_bytes) }} · 已做种
+                    {{ item.seeding_days }} 天（需 {{ item.required_seeding_days }} 天）
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  class="button secondary small"
+                  :disabled="cleanupChangingId !== null"
+                  @click="setCleanupHold(item.download_id, false)"
+                >
+                  {{ cleanupChangingId === item.download_id ? '放行中…' : '放行' }}
+                </button>
+              </li>
+            </ul>
+            <ul v-if="cleanupHeldBlocked.length" class="cleanup-list">
+              <li v-for="item in cleanupHeldBlocked" :key="item.download_id">
+                <span>
+                  <strong>{{ item.media_title }}</strong>
+                  <span class="muted">{{ item.name }} · {{ item.blocked_reason }}</span>
+                </span>
+              </li>
+            </ul>
+          </template>
         </template>
       </details>
 

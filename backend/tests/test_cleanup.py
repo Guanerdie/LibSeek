@@ -743,6 +743,60 @@ async def test_held_download_is_neither_cleaned_nor_previewed(session_factory) -
         assert download.cleanup_state == DownloadCleanupState.HELD
 
 
+@pytest.mark.asyncio
+async def test_preview_can_show_what_releasing_a_held_download_would_do(
+    session_factory,
+) -> None:
+    """The operator picks what to release from this list; looking changes nothing."""
+
+    async with session_factory() as session:
+        deletable = await _seed(
+            session,
+            source_item_id="held-deletable",
+            info_hash="f1" * 20,
+            cleanup_state=DownloadCleanupState.HELD,
+        )
+        # Finished before the feature existed: no completion time was stored.
+        deletable.completed_at = None
+        await _seed(
+            session,
+            source_item_id="held-unfiled",
+            info_hash="f2" * 20,
+            library_confirmed=False,
+            cleanup_state=DownloadCleanupState.HELD,
+        )
+        await _seed(
+            session,
+            source_item_id="held-gone",
+            info_hash="f3" * 20,
+            cleanup_state=DownloadCleanupState.HELD,
+        )
+        await session.commit()
+        await _enable(session)
+        ready = _torrent("f1" * 20, seeding_days=30, size=7_000)
+        ready = ready.model_copy(
+            update={"completion_on": int((utc_now() - timedelta(days=30)).timestamp())}
+        )
+        torrents = [ready, _torrent("f2" * 20, seeding_days=30)]
+
+        items = await cleanup.preview_cleanup(session, torrents, include_held=True)
+        by_name = {item.download_id: item for item in items}
+
+        # The torrent that left qBittorrent is not worth a line.
+        assert len(items) == 2
+        would_delete = by_name[deletable.id]
+        assert would_delete.cleanup_state == DownloadCleanupState.HELD
+        assert would_delete.blocked_reason is None
+        assert would_delete.size_bytes == 7_000
+        blocked = next(item for item in items if item.download_id != deletable.id)
+        assert blocked.blocked_reason == "尚未确认入库"
+
+        await session.rollback()
+        await session.refresh(deletable)
+        assert deletable.cleanup_state == DownloadCleanupState.HELD
+        assert deletable.completed_at is None
+
+
 # ---------------------------------------------------------------------------
 # Library confirmation is refreshed before anything is decided
 # ---------------------------------------------------------------------------
