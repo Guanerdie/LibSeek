@@ -497,6 +497,49 @@ async def test_a_title_reported_missing_again_loses_its_confirmation(session_fac
 
 
 @pytest.mark.asyncio
+async def test_a_film_and_a_series_sharing_one_id_do_not_fail_the_sync(session_factory) -> None:
+    """TMDB numbers films and series separately; NextFind passes the number on."""
+
+    class _Colliding(_FakeNextFind):
+        async def list_missing_media(self) -> MediaDiscoveryResult:
+            stamp = datetime(2026, 9, 1, tzinfo=UTC)
+            return MediaDiscoveryResult(
+                items=[
+                    MediaItemData(
+                        source="nextfind",
+                        source_item_id="nextfind:777",
+                        media_type=media_type,
+                        tmdb_id=777,
+                        title=title,
+                        identity_confidence=IdentityConfidence.HIGH,
+                        metadata_status=MetadataStatus.RESOLVED,
+                        discovered_at=stamp,
+                        updated_at=stamp,
+                    )
+                    for media_type, title in (
+                        (MediaType.MOVIE, "Same Number Film"),
+                        (MediaType.TV, "Same Number Series"),
+                    )
+                ]
+            )
+
+    async with session_factory() as session:
+        await sync_nextfind(session, _Colliding(missing=[]))  # type: ignore[arg-type]
+        rows = (await session.scalars(select(LibraryMediaItem))).all()
+        synced = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "NEXTFIND_SYNCED")
+            )
+        ).one()
+
+        assert [row.source_item_id for row in rows] == ["nextfind:777"]
+        # Still on the missing list under either title, so never confirmed.
+        assert rows[0].library_confirmed_at is None
+        assert synced.details["id_collisions"] == 1
+        assert synced.details["created"] == 1
+
+
+@pytest.mark.asyncio
 async def test_a_short_listing_confirms_nothing_and_is_not_fresh(session_factory) -> None:
     async with session_factory() as session:
         media = await _media(session, "unread", "Unread Title")

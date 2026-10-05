@@ -97,6 +97,7 @@ const detailLabels: Record<string, string> = {
   warnings: '列表读取警告',
   newly_confirmed: '新确认入库',
   confirmation_revoked: '撤销入库确认',
+  id_collisions: '电影与剧集同号',
   markable: '可标记',
   deletable: '可删除',
   would_reclaim_bytes: '预计释放',

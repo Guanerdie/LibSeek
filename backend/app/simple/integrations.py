@@ -341,14 +341,24 @@ async def _sync_nextfind_locked(
         episodes_by_media.setdefault(episode.media_id, []).append(episode)
 
     seen: set[str] = set()
-    discovered: list[tuple[LibraryMediaItem, list[str]]] = []
+    # Keyed by object so that a title listed twice is reconciled once, with
+    # the entry that was applied last.
+    discovered: dict[int, tuple[LibraryMediaItem, list[str]]] = {}
+    listed: set[tuple[str, str]] = set()
     created = 0
     updated = 0
+    id_collisions = 0
     for source_item in result.items:
         seen.add(source_item.source_item_id)
-        existing = stored_by_source_id.get(
-            (source_item.source, source_item.source_item_id)
-        )
+        key = (source_item.source, source_item.source_item_id)
+        if key in listed:
+            # NextFind's id is the TMDB id, and TMDB numbers films and series
+            # separately, so a film and a series can arrive under one id.
+            # They share a row here; when both were new this used to insert
+            # the row twice and fail the whole sync on the unique constraint.
+            id_collisions += 1
+        listed.add(key)
+        existing = stored_by_source_id.get(key)
         if existing is None:
             existing = LibraryMediaItem(
                 source=source_item.source,
@@ -358,16 +368,17 @@ async def _sync_nextfind_locked(
                 discovered_at=source_item.discovered_at,
             )
             session.add(existing)
+            stored_by_source_id[key] = existing
             created += 1
         else:
             updated += 1
         _apply_discovery_item(existing, source_item)
-        discovered.append((existing, source_item.missing_episodes or []))
+        discovered[id(existing)] = (existing, source_item.missing_episodes or [])
 
     # Assign IDs for all newly discovered media in one database round trip, then
     # reconcile episodes from the preloaded collection without per-item SELECTs.
     await session.flush()
-    for media, missing_episodes in discovered:
+    for media, missing_episodes in discovered.values():
         _replace_missing_episodes_from_collection(
             session,
             media.id,
@@ -440,6 +451,7 @@ async def _sync_nextfind_locked(
                 "warnings": len(result.warnings),
                 "newly_confirmed": newly_confirmed,
                 "confirmation_revoked": revoked,
+                "id_collisions": id_collisions,
             },
         )
     )
