@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
@@ -50,6 +50,7 @@ from app.simple.integrations import (
 from app.simple.models import (
     ActivityLog,
     AutomationPolicy,
+    CleanupHoldReason,
     Download,
     DownloadCleanupState,
     DownloadState,
@@ -121,13 +122,22 @@ class CleanupResult:
     held: int = 0
     unmarked: int = 0
     vanished: int = 0
+    # Backlog downloads let into the flow by the policy rather than by hand.
+    released: int = 0
     would_reclaim_bytes: int = 0
     reclaimed_bytes: int = 0
     skipped: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
-        return self.marked + self.deleted + self.held + self.unmarked + self.vanished
+        return (
+            self.marked
+            + self.deleted
+            + self.held
+            + self.unmarked
+            + self.vanished
+            + self.released
+        )
 
 
 @dataclass(frozen=True)
@@ -142,6 +152,7 @@ class CleanupPreviewItem:
     cleanup_state: DownloadCleanupState
     deletes_at: datetime | None
     blocked_reason: str | None
+    hold_reason: str | None = None
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -241,16 +252,20 @@ async def _load_candidates(
     torrents: dict[str, QbTorrent],
     *,
     cleanup_states: Sequence[DownloadCleanupState] = _ACTIVE_CLEANUP_STATES,
+    hold_reason: CleanupHoldReason | None = None,
 ) -> list[CleanupCandidate]:
+    filters: list[ColumnElement[bool]] = [
+        Download.info_hash.is_not(None),
+        Download.state.in_(_CLEANABLE_STATES),
+        Download.cleanup_state.in_(cleanup_states),
+    ]
+    if hold_reason is not None:
+        filters.append(Download.cleanup_hold_reason == hold_reason.value)
     rows = await session.execute(
         select(Download, LibraryMediaItem, ReleaseCandidate.site_id)
         .join(LibraryMediaItem, LibraryMediaItem.id == Download.media_id)
         .join(ReleaseCandidate, ReleaseCandidate.id == Download.candidate_id)
-        .where(
-            Download.info_hash.is_not(None),
-            Download.state.in_(_CLEANABLE_STATES),
-            Download.cleanup_state.in_(cleanup_states),
-        )
+        .where(*filters)
         .order_by(Download.completed_at.asc())
         .limit(_SCAN_LIMIT)
     )
@@ -374,6 +389,38 @@ async def _has_candidates(session: AsyncSession) -> bool:
     return bool(count)
 
 
+async def _backlog_in_client(
+    session: AsyncSession, readonly_factory: Callable[[], QbittorrentAdapter]
+) -> bool:
+    """Whether any backlog download still has a torrent to release.
+
+    Most of the backlog has usually been removed from qBittorrent by hand
+    already.  Those rows stay held for good, and they alone must not make every
+    cycle fetch the whole NextFind listing.
+    """
+
+    hashes = {
+        (info_hash or "").casefold()
+        for info_hash in await session.scalars(
+            select(Download.info_hash).where(
+                Download.info_hash.is_not(None),
+                Download.state.in_(_CLEANABLE_STATES),
+                Download.cleanup_state == DownloadCleanupState.HELD,
+                Download.cleanup_hold_reason == CleanupHoldReason.BACKLOG.value,
+            )
+        )
+    }
+    if not hashes:
+        return False
+    readonly = readonly_factory()
+    try:
+        await readonly.authenticate()
+        torrents = await readonly.list_torrents()
+    finally:
+        await _close(readonly)
+    return any(torrent.identity_hashes & hashes for torrent in torrents)
+
+
 async def refresh_library_confirmations(session: AsyncSession) -> None:
     """Make sure the library confirmations reflect NextFind right now.
 
@@ -460,6 +507,7 @@ async def preview_cleanup(
                 cleanup_state=download.cleanup_state,
                 deletes_at=deletes_at,
                 blocked_reason=decision.reason,
+                hold_reason=download.cleanup_hold_reason,
             )
         )
     return items
@@ -496,7 +544,13 @@ async def run_cleanup_cycle(
         and policy.cleanup_require_library_confirmed
         # Nothing to decide means nothing to confirm; an idle cycle must not
         # page through the whole missing list.
-        and await _has_candidates(session)
+        and (
+            await _has_candidates(session)
+            or (
+                policy.cleanup_release_backlog
+                and await _backlog_in_client(session, readonly_factory)
+            )
+        )
     ):
         try:
             await library_refresher(session)
@@ -534,7 +588,43 @@ async def run_cleanup_cycle(
         identity: torrent for torrent in torrents for identity in torrent.identity_hashes
     }
     candidates = await _load_candidates(session, by_hash)
-    if not candidates:
+    if policy.cleanup_release_backlog:
+        # Only the downloads that were held wholesale when the feature arrived.
+        # One the operator chose to keep stays kept whatever this switch says.
+        for held in await _load_candidates(
+            session,
+            by_hash,
+            cleanup_states=(DownloadCleanupState.HELD,),
+            hold_reason=CleanupHoldReason.BACKLOG,
+        ):
+            if held.torrent is None:
+                continue
+            refresh_from_torrent(held.download, held.torrent)
+            decision = evaluate(held, policy, now=now, torrents=torrents)
+            if not decision.eligible:
+                continue
+            if dry_run:
+                result.marked += 1
+                result.would_reclaim_bytes += held.torrent.size
+                continue
+            held.download.cleanup_state = DownloadCleanupState.NONE
+            held.download.cleanup_hold_reason = None
+            result.released += 1
+            _log(
+                session,
+                held,
+                event="DOWNLOAD_CLEANUP_RELEASED",
+                message=f"{held.download.name} 满足全部清理条件，已自动放行",
+                reason=(
+                    "策略开启了「自动放行存量」；"
+                    f"{_eligibility_reason(held, policy, decision, now=now)}"
+                ),
+                details=_evidence(held, decision),
+            )
+            # Released and judged in the same cycle, so it is tagged below
+            # rather than twenty minutes or six hours from now.
+            candidates.append(held)
+    if not candidates and not result.marked:
         return result
 
     writer: QbittorrentAdapter | None = None
@@ -572,6 +662,7 @@ async def run_cleanup_cycle(
                 and CLEANUP_TAG not in _torrent_tags(torrent)
             ):
                 download.cleanup_state = DownloadCleanupState.HELD
+                download.cleanup_hold_reason = CleanupHoldReason.TAG_REMOVED.value
                 download.cleanup_marked_at = None
                 result.held += 1
                 _log(
@@ -668,6 +759,7 @@ async def run_cleanup_cycle(
                     continue
                 if CLEANUP_TAG not in _torrent_tags(current):
                     download.cleanup_state = DownloadCleanupState.HELD
+                    download.cleanup_hold_reason = CleanupHoldReason.TAG_REMOVED.value
                     download.cleanup_marked_at = None
                     result.held += 1
                     _log(
@@ -758,6 +850,9 @@ async def set_cleanup_hold(session: AsyncSession, *, download_id: str, held: boo
             "DOWNLOAD_ALREADY_REMOVED", "该种子已经不在 qBittorrent 中", status_code=409
         )
     download.cleanup_state = wanted
+    # A hold placed here is the operator's own decision, which automatic
+    # release of the backlog must never undo.
+    download.cleanup_hold_reason = CleanupHoldReason.MANUAL.value if held else None
     session.add(
         ActivityLog(
             media_id=download.media_id,
@@ -777,6 +872,27 @@ async def set_cleanup_hold(session: AsyncSession, *, download_id: str, held: boo
     await session.commit()
     await session.refresh(download)
     return download
+
+
+async def set_cleanup_holds(
+    session: AsyncSession, *, download_ids: Sequence[str], held: bool
+) -> tuple[int, list[tuple[str, str]]]:
+    """Hold or release several downloads; one that cannot change is reported, not fatal."""
+
+    changed = 0
+    skipped: list[tuple[str, str]] = []
+    wanted = DownloadCleanupState.HELD if held else DownloadCleanupState.NONE
+    for download_id in dict.fromkeys(download_ids):
+        before = await session.get(Download, download_id)
+        already = before is not None and before.cleanup_state == wanted
+        try:
+            await set_cleanup_hold(session, download_id=download_id, held=held)
+        except AppError as exc:
+            skipped.append((download_id, exc.message))
+            continue
+        if not already:
+            changed += 1
+    return changed, skipped
 
 
 async def _close(adapter: object) -> None:

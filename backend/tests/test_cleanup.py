@@ -25,6 +25,7 @@ from app.simple.cleanup import CLEANUP_TAG, run_cleanup_cycle
 from app.simple.models import (
     ActivityLog,
     AutomationPolicy,
+    CleanupHoldReason,
     Download,
     DownloadCleanupState,
     DownloadState,
@@ -1074,3 +1075,223 @@ async def test_loop_waits_the_configured_interval(
     )
 
     assert waits == expected
+
+
+# ---------------------------------------------------------------------------
+# Releasing the backlog automatically, and in bulk
+# ---------------------------------------------------------------------------
+
+
+async def _held(
+    session: AsyncSession,
+    *,
+    source_item_id: str,
+    info_hash: str,
+    reason: CleanupHoldReason,
+    library_confirmed: bool = True,
+) -> Download:
+    download = await _seed(
+        session,
+        source_item_id=source_item_id,
+        info_hash=info_hash,
+        library_confirmed=library_confirmed,
+        cleanup_state=DownloadCleanupState.HELD,
+    )
+    download.cleanup_hold_reason = reason.value
+    await session.commit()
+    return download
+
+
+@pytest.mark.asyncio
+async def test_backlog_is_released_and_tagged_once_it_qualifies(session_factory) -> None:
+    async with session_factory() as session:
+        ready = await _held(
+            session,
+            source_item_id="backlog-ready",
+            info_hash="a1" * 20,
+            reason=CleanupHoldReason.BACKLOG,
+        )
+        unfiled = await _held(
+            session,
+            source_item_id="backlog-unfiled",
+            info_hash="a2" * 20,
+            reason=CleanupHoldReason.BACKLOG,
+            library_confirmed=False,
+        )
+        await _enable(session, cleanup_release_backlog=True)
+        qb = RecordingQb(
+            [_torrent("a1" * 20, seeding_days=30), _torrent("a2" * 20, seeding_days=30)]
+        )
+
+        with audit.scope(actor=audit.CLEANUP, trigger="AUTO"):
+            result = await _run(session, qb)
+        await session.refresh(ready)
+        await session.refresh(unfiled)
+        released = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "DOWNLOAD_CLEANUP_RELEASED")
+            )
+        ).one()
+
+        assert result.released == 1 and result.marked == 1
+        assert ready.cleanup_state == DownloadCleanupState.MARKED
+        assert ready.cleanup_hold_reason is None
+        assert qb.tagged == [(["a1" * 20], [CLEANUP_TAG])]
+        assert qb.deleted == [], "release only tags; the grace period still applies"
+        # Not in the library yet: stays exactly as it was.
+        assert unfiled.cleanup_state == DownloadCleanupState.HELD
+        assert unfiled.cleanup_hold_reason == CleanupHoldReason.BACKLOG.value
+        assert (released.actor, released.trigger) == (audit.CLEANUP, "AUTO")
+        assert "自动放行存量" in (released.reason or "")
+
+
+@pytest.mark.parametrize("reason", [CleanupHoldReason.MANUAL, CleanupHoldReason.TAG_REMOVED])
+@pytest.mark.asyncio
+async def test_a_hold_the_operator_chose_is_never_released_automatically(
+    session_factory, reason: CleanupHoldReason
+) -> None:
+    async with session_factory() as session:
+        kept = await _held(
+            session, source_item_id=f"kept-{reason.value}", info_hash="a3" * 20, reason=reason
+        )
+        await _enable(session, cleanup_release_backlog=True)
+        qb = RecordingQb([_torrent("a3" * 20, seeding_days=60)])
+
+        result = await _run(session, qb)
+        await session.refresh(kept)
+
+        assert result.total == 0
+        assert qb.tagged == [] and qb.deleted == []
+        assert kept.cleanup_state == DownloadCleanupState.HELD
+        assert kept.cleanup_hold_reason == reason.value
+
+
+@pytest.mark.asyncio
+async def test_backlog_stays_held_while_the_switch_is_off(session_factory) -> None:
+    async with session_factory() as session:
+        backlog = await _held(
+            session,
+            source_item_id="switch-off",
+            info_hash="a4" * 20,
+            reason=CleanupHoldReason.BACKLOG,
+        )
+        await _enable(session)
+        qb = RecordingQb([_torrent("a4" * 20, seeding_days=60)])
+
+        result = await _run(session, qb)
+        await session.refresh(backlog)
+
+        assert result.total == 0 and qb.tagged == []
+        assert backlog.cleanup_state == DownloadCleanupState.HELD
+
+
+@pytest.mark.asyncio
+async def test_dry_run_reports_the_backlog_without_releasing_it(session_factory) -> None:
+    async with session_factory() as session:
+        backlog = await _held(
+            session,
+            source_item_id="dry-backlog",
+            info_hash="a5" * 20,
+            reason=CleanupHoldReason.BACKLOG,
+        )
+        await _enable(session, cleanup_release_backlog=True, cleanup_dry_run=True)
+        qb = RecordingQb([_torrent("a5" * 20, seeding_days=60, size=9_000)])
+
+        result = await _run(session, qb)
+        await session.refresh(backlog)
+
+        assert result.dry_run and result.marked == 1 and result.released == 0
+        assert result.would_reclaim_bytes == 9_000
+        assert qb.tagged == []
+        assert backlog.cleanup_state == DownloadCleanupState.HELD
+        assert backlog.cleanup_hold_reason == CleanupHoldReason.BACKLOG.value
+
+
+@pytest.mark.asyncio
+async def test_backlog_gone_from_the_client_does_not_trigger_a_refresh(session_factory) -> None:
+    """Most of a backlog was deleted by hand long ago; it must not cost a sync per cycle."""
+
+    async with session_factory() as session:
+        await _held(
+            session,
+            source_item_id="long-gone",
+            info_hash="a6" * 20,
+            reason=CleanupHoldReason.BACKLOG,
+        )
+        await _enable(session, cleanup_release_backlog=True)
+        calls = 0
+
+        async def refresher(_session: AsyncSession) -> None:
+            nonlocal calls
+            calls += 1
+
+        await _run_with_refresh(session, RecordingQb([]), refresher)
+        assert calls == 0
+
+        await _run_with_refresh(
+            session, RecordingQb([_torrent("a6" * 20, seeding_days=60)]), refresher
+        )
+        assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_pulling_the_tag_and_holding_by_hand_record_why(session_factory) -> None:
+    async with session_factory() as session:
+        tagged = await _seed(
+            session,
+            source_item_id="tag-pulled",
+            info_hash="a7" * 20,
+            cleanup_state=DownloadCleanupState.MARKED,
+            marked_days_ago=1,
+        )
+        by_hand = await _seed(session, source_item_id="by-hand", info_hash="a8" * 20)
+        await _enable(session)
+
+        await _run(session, RecordingQb([_torrent("a7" * 20, seeding_days=30, tags="")]))
+        await cleanup.set_cleanup_hold(session, download_id=by_hand.id, held=True)
+        await session.refresh(tagged)
+        await session.refresh(by_hand)
+
+        assert tagged.cleanup_hold_reason == CleanupHoldReason.TAG_REMOVED.value
+        assert by_hand.cleanup_hold_reason == CleanupHoldReason.MANUAL.value
+
+        released = await cleanup.set_cleanup_hold(session, download_id=by_hand.id, held=False)
+        assert released.cleanup_hold_reason is None
+
+
+@pytest.mark.asyncio
+async def test_several_downloads_are_released_in_one_call(session_factory) -> None:
+    async with session_factory() as session:
+        first = await _held(
+            session, source_item_id="bulk-1", info_hash="b1" * 20, reason=CleanupHoldReason.BACKLOG
+        )
+        second = await _held(
+            session, source_item_id="bulk-2", info_hash="b2" * 20, reason=CleanupHoldReason.BACKLOG
+        )
+        already = await _seed(session, source_item_id="bulk-3", info_hash="b3" * 20)
+        deleted = await _seed(
+            session,
+            source_item_id="bulk-4",
+            info_hash="b4" * 20,
+            cleanup_state=DownloadCleanupState.DELETED,
+        )
+
+        with audit.scope(actor="owner", trigger="MANUAL"):
+            changed, skipped = await cleanup.set_cleanup_holds(
+                session,
+                download_ids=[first.id, second.id, already.id, deleted.id, "no-such-id", first.id],
+                held=False,
+            )
+        await session.refresh(first)
+        await session.refresh(second)
+        rows = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "DOWNLOAD_CLEANUP_RELEASED")
+            )
+        ).all()
+
+        assert changed == 2
+        assert {download_id for download_id, _ in skipped} == {deleted.id, "no-such-id"}
+        assert first.cleanup_state == second.cleanup_state == DownloadCleanupState.NONE
+        # One row per download actually released, each under the operator's name.
+        assert len(rows) == 2 and {row.actor for row in rows} == {"owner"}

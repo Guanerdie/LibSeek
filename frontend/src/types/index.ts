@@ -350,6 +350,8 @@ export interface AutomationPolicy {
   cleanup_grace_days: number
   cleanup_require_library_confirmed: boolean
   cleanup_daily_limit: number
+  // Let downloads that predate space reclaim into it once they qualify.
+  cleanup_release_backlog: boolean
   updated_at: string
   last_run_at: string | null
 }
@@ -485,7 +487,13 @@ export type CleanupPolicy = Pick<
   | 'cleanup_grace_days'
   | 'cleanup_require_library_confirmed'
   | 'cleanup_daily_limit'
+  | 'cleanup_release_backlog'
 >
+
+export interface CleanupHoldBulkResult {
+  changed: number
+  skipped: Array<{ download_id: string; reason: string }>
+}
 
 export type ActivityCategory ='download' | 'cleanup' | 'library' | 'search' | 'settings'
 export type ActivityTrigger = 'MANUAL' | 'AUTO'
@@ -526,6 +534,9 @@ export interface CleanupPreviewEntry {
   cleanup_state: DownloadCleanupState
   deletes_at: string | null
   blocked_reason: string | null
+  // Why a HELD download is held: BACKLOG, or MANUAL / TAG_REMOVED when the
+  // operator chose to keep it.
+  hold_reason?: 'BACKLOG' | 'MANUAL' | 'TAG_REMOVED' | null
 }
 
 export interface CleanupPreview {

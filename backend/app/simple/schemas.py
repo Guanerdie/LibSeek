@@ -252,6 +252,9 @@ class CleanupPreviewEntry(BaseModel):
     cleanup_state: DownloadCleanupState
     deletes_at: datetime | None
     blocked_reason: str | None
+    # BACKLOG (held wholesale when the feature arrived), MANUAL or TAG_REMOVED
+    # (the operator chose to keep it); None unless cleanup_state is HELD.
+    hold_reason: str | None = None
 
 
 class CleanupPreview(BaseModel):
@@ -275,6 +278,21 @@ class DownloadPage(BaseModel):
 class CleanupHoldUpdate(BaseModel):
     # True keeps the download out of automatic cleanup; False lets it back in.
     held: bool
+
+
+class CleanupHoldBulkUpdate(BaseModel):
+    download_ids: list[str] = Field(min_length=1, max_length=500)
+    held: bool
+
+
+class CleanupHoldSkipped(BaseModel):
+    download_id: str
+    reason: str
+
+
+class CleanupHoldBulkResult(BaseModel):
+    changed: int
+    skipped: list[CleanupHoldSkipped] = Field(default_factory=list)
 
 
 class ActivityView(BaseModel):
@@ -361,6 +379,8 @@ class AutomationPolicyUpdate(BaseModel):
     cleanup_grace_days: int = Field(default=2, ge=0, le=30)
     cleanup_require_library_confirmed: bool = True
     cleanup_daily_limit: int = Field(default=20, ge=1, le=500)
+    # Let downloads that predate space reclaim into it once they qualify.
+    cleanup_release_backlog: bool = False
 
     @field_validator("site_ids")
     @classmethod

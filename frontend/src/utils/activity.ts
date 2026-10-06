@@ -120,6 +120,7 @@ const policyFieldLabels: Record<string, string> = {
   cleanup_grace_days: '标记后观察天数',
   cleanup_require_library_confirmed: '必须已确认入库',
   cleanup_daily_limit: '每日最多清理',
+  cleanup_release_backlog: '自动放行存量',
   daily_download_limit: '每日自动下载数量',
   minimum_score: '最低评分',
   scope_mode: '自动化范围',

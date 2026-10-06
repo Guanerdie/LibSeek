@@ -50,6 +50,9 @@ from app.simple.schemas import (
     BulkSubscriptionResult,
     BulkSubscriptionUpdate,
     CandidateView,
+    CleanupHoldBulkResult,
+    CleanupHoldBulkUpdate,
+    CleanupHoldSkipped,
     CleanupHoldUpdate,
     CleanupPreview,
     CleanupPreviewEntry,
@@ -490,6 +493,27 @@ async def set_download_cleanup_hold(
         session, download_id=download_id, held=payload.held
     )
     return DownloadView.model_validate(download)
+
+
+@router.post("/downloads/cleanup-hold", response_model=CleanupHoldBulkResult)
+async def set_download_cleanup_holds(
+    payload: CleanupHoldBulkUpdate,
+    session: Session,
+    principal: OperatorPrincipal,
+) -> CleanupHoldBulkResult:
+    """Hold or release several downloads at once."""
+
+    del principal
+    changed, skipped = await cleanup.set_cleanup_holds(
+        session, download_ids=payload.download_ids, held=payload.held
+    )
+    return CleanupHoldBulkResult(
+        changed=changed,
+        skipped=[
+            CleanupHoldSkipped(download_id=download_id, reason=reason)
+            for download_id, reason in skipped
+        ],
+    )
 
 
 @router.get("/activity", response_model=ActivityPage)

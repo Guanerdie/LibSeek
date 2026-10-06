@@ -80,6 +80,19 @@ class DownloadCleanupState(StrEnum):
     HELD = "HELD"
 
 
+class CleanupHoldReason(StrEnum):
+    """Why a download is HELD, which decides whether it may ever be released
+    without the operator doing it by hand."""
+
+    # Already there when space reclaim was introduced.  Nobody chose to keep
+    # these; they were held so the feature could not surprise anyone.
+    BACKLOG = "BACKLOG"
+    # The operator said "keep this one", in the app or by pulling the cleanup
+    # tag off in qBittorrent.  Never released automatically.
+    MANUAL = "MANUAL"
+    TAG_REMOVED = "TAG_REMOVED"
+
+
 class AutomationJobState(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
@@ -360,6 +373,8 @@ class Download(Base):
         nullable=False,
         index=True,
     )
+    # Set while cleanup_state is HELD; see CleanupHoldReason.
+    cleanup_hold_reason: Mapped[str | None] = mapped_column(String(16))
     cleanup_marked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cleanup_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -453,6 +468,9 @@ class AutomationPolicy(Base):
     cleanup_grace_days: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     cleanup_require_library_confirmed: Mapped[bool] = mapped_column(default=True, nullable=False)
     cleanup_daily_limit: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    # Let the downloads that predate space reclaim into it on their own once
+    # they meet every condition, instead of waiting to be released one by one.
+    cleanup_release_backlog: Mapped[bool] = mapped_column(default=False, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False

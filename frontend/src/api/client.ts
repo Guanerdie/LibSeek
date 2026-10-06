@@ -9,6 +9,7 @@ import type {
   AutomationRunPage,
   AutomationStats,
   BulkSubscriptionResult,
+  CleanupHoldBulkResult,
   CleanupPolicy,
   CleanupPreview,
   ConfigurationSnapshot,
@@ -260,6 +261,12 @@ export const dailyApi = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ held }),
+    }),
+  setCleanupHolds: (downloadIds: string[], held: boolean) =>
+    request<CleanupHoldBulkResult>('/api/downloads/cleanup-hold', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ download_ids: downloadIds, held }),
     }),
 }
 

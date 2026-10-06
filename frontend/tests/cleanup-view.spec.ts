@@ -9,13 +9,18 @@ const mocks = vi.hoisted(() => ({
   updateCleanupPolicy: vi.fn(),
   cleanupPreview: vi.fn(),
   setCleanupHold: vi.fn(),
+  setCleanupHolds: vi.fn(),
   list: vi.fn(),
 }))
 
 vi.mock('../src/api/client', () => ({
   ApiError: class MockApiError extends Error {},
   automationApi: { policy: mocks.policy, updateCleanupPolicy: mocks.updateCleanupPolicy },
-  dailyApi: { cleanupPreview: mocks.cleanupPreview, setCleanupHold: mocks.setCleanupHold },
+  dailyApi: {
+    cleanupPreview: mocks.cleanupPreview,
+    setCleanupHold: mocks.setCleanupHold,
+    setCleanupHolds: mocks.setCleanupHolds,
+  },
   activityApi: { list: mocks.list },
 }))
 
@@ -28,6 +33,7 @@ function policy(overrides: Partial<AutomationPolicy> = {}): AutomationPolicy {
     cleanup_grace_days: 0,
     cleanup_require_library_confirmed: true,
     cleanup_daily_limit: 20,
+    cleanup_release_backlog: false,
     ...overrides,
   } as AutomationPolicy
 }
@@ -152,6 +158,7 @@ describe('cleanup page', () => {
       cleanup_grace_days: 0,
       cleanup_require_library_confirmed: true,
       cleanup_daily_limit: 20,
+      cleanup_release_backlog: false,
     })
     expect(cards(wrapper)[0]).toContain('正在运行')
     expect(wrapper.text()).toContain('下一轮标记')
@@ -161,6 +168,66 @@ describe('cleanup page', () => {
     // The settings come before the lists they govern.
     const headings = wrapper.findAll('h2').map((heading) => heading.text())
     expect(headings).toEqual(['设置', '待删除', '保留中', '最近的清理记录'])
+  })
+
+  it('releases several at once, after a second click, and leaves deliberate holds out', async () => {
+    mocks.cleanupPreview
+      .mockResolvedValueOnce(
+        preview([
+          item({ hold_reason: 'BACKLOG' }),
+          item({ download_id: 'd2', media_title: '红宝石戒指', hold_reason: 'BACKLOG' }),
+          item({ download_id: 'kept', media_title: '大物', hold_reason: 'MANUAL' }),
+        ]),
+      )
+      .mockResolvedValueOnce(preview([item({ download_id: 'kept', hold_reason: 'MANUAL' })]))
+    mocks.setCleanupHolds.mockResolvedValue({ changed: 2, skipped: [] })
+    const wrapper = mountView()
+    await flushPromises()
+
+    // The one held on purpose is shown, labelled, and cannot be ticked.
+    expect(wrapper.text()).toContain('手动保留')
+    expect(wrapper.findAll('.cleanup-list input[type="checkbox"]')).toHaveLength(2)
+    expect(wrapper.text()).toContain('全选（2 项）')
+
+    const bulk = () => wrapper.find('.cleanup-bulk-actions')
+    expect(bulk().find('button').attributes('disabled')).toBeDefined()
+    await wrapper.find('input[name="select_all"]').setValue(true)
+    expect(wrapper.text()).toContain('已选 2 项 · 4.0 GB')
+
+    await bulk().find('button').trigger('click')
+    expect(mocks.setCleanupHolds).not.toHaveBeenCalled()
+    expect(bulk().text()).toContain('确认放行 2 项（4.0 GB）')
+
+    await bulk().findAll('button')[1]!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.setCleanupHolds).toHaveBeenCalledWith(['d1', 'd2'], false)
+    expect(wrapper.text()).toContain('已放行 2 项')
+  })
+
+  it('spells out what switching on automatic release will do before saving', async () => {
+    mocks.cleanupPreview.mockResolvedValue(
+      preview([
+        item({ hold_reason: 'BACKLOG' }),
+        item({ download_id: 'kept', hold_reason: 'TAG_REMOVED' }),
+      ]),
+    )
+    mocks.updateCleanupPolicy.mockResolvedValue(policy({ cleanup_release_backlog: true }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('摘标签保留')
+    await wrapper.find('input[name="cleanup_release_backlog"]').setValue(true)
+    expect(wrapper.text()).toContain('1 项满足条件的存量（2.0 GB）会在下一轮自动放行')
+    expect(wrapper.text()).toContain('每天最多删 20 个')
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updateCleanupPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ cleanup_release_backlog: true }),
+    )
+    expect(wrapper.text()).toContain('「自动放行存量」已开启')
   })
 
   it('says deletion is not authorised when the server switch is off', async () => {

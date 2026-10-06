@@ -304,3 +304,90 @@ def test_existing_downloads_are_held_back_from_cleanup(
 
     command.downgrade(config, "20260920_0024")
     database.unlink()
+
+
+def test_held_downloads_are_told_apart_by_why_they_are_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the backlog may be released automatically; a deliberate hold may not."""
+
+    backend_root = Path(__file__).parents[1]
+    database = backend_root / f".test-migration-{uuid4().hex}.db"
+    monkeypatch.setenv("DATABASE_URL", sqlite_url(database, async_driver=True))
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    command.upgrade(config, "20261005_0026")
+
+    stamp = "2026-09-01 00:00:00"
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO library_media (id, source, source_item_id, media_type, title,"
+                " state, discovered_at, updated_at, country_codes)"
+                " VALUES ('m1', 'nextfind', 'm1', 'movie', 'm1', 'COMPLETE',"
+                " :stamp, :stamp, '[]')"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO searches (id, media_id, site_ids, state, created_at)"
+                " VALUES ('s1', 'm1', '[\"avistaz\"]', 'SUCCEEDED', :stamp)"
+            ),
+            {"stamp": stamp},
+        )
+        for index, state in enumerate(("HELD", "HELD", "NONE", "DELETED"), start=1):
+            connection.execute(
+                text(
+                    "INSERT INTO release_candidates (id, search_id, site_id, torrent_id, title,"
+                    " season_coverage, episode_coverage, score, reasons, warnings, created_at)"
+                    " VALUES (:cid, 's1', 'avistaz', :cid, 'Example', '[]', '[]', 0.9,"
+                    " '[]', '[]', :stamp)"
+                ),
+                {"cid": f"c{index}", "stamp": stamp},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO downloads (id, media_id, candidate_id, name, state, progress,"
+                    " download_speed, upload_speed, ratio, info_hash, seeding_seconds,"
+                    " cleanup_state, created_at, updated_at)"
+                    " VALUES (:did, 'm1', :cid, 'Example.mkv', 'SEEDING', 1, 0, 0, 1.5,"
+                    " :hash, 0, :state, :stamp, :stamp)"
+                ),
+                {
+                    "did": f"d{index}",
+                    "cid": f"c{index}",
+                    "hash": str(index) * 40,
+                    "state": state,
+                    "stamp": stamp,
+                },
+            )
+        # d2 was held on purpose: the app logged it when the operator did so.
+        connection.execute(
+            text(
+                "INSERT INTO activity_log (id, event, message, details, created_at)"
+                " VALUES ('a1', 'DOWNLOAD_CLEANUP_HELD', 'kept', :details, :stamp)"
+            ),
+            {"details": '{"download_id": "d2"}', "stamp": stamp},
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.connect() as connection:
+        reasons = dict(
+            connection.execute(
+                text("SELECT id, cleanup_hold_reason FROM downloads ORDER BY id")
+            ).all()
+        )
+        release_backlog = connection.execute(
+            text("SELECT cleanup_release_backlog FROM automation_policy")
+        ).scalars().all()
+    engine.dispose()
+    assert reasons == {"d1": "BACKLOG", "d2": "MANUAL", "d3": None, "d4": None}
+    # Off for everyone after the upgrade; nothing starts on its own.
+    assert all(not value for value in release_backlog)
+
+    command.downgrade(config, "20261005_0026")
+    database.unlink()

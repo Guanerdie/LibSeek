@@ -23,6 +23,7 @@ const form = reactive<CleanupPolicy>({
   cleanup_grace_days: 2,
   cleanup_require_library_confirmed: true,
   cleanup_daily_limit: 20,
+  cleanup_release_backlog: false,
 })
 // What the server is acting on, as opposed to what is typed into the form.
 const saved = ref<CleanupPolicy | null>(null)
@@ -48,6 +49,8 @@ function applyPolicy(policy: AutomationPolicy): void {
     cleanup_grace_days: policy.cleanup_grace_days,
     cleanup_require_library_confirmed: policy.cleanup_require_library_confirmed,
     cleanup_daily_limit: policy.cleanup_daily_limit,
+    // An older server does not send this; absent means off.
+    cleanup_release_backlog: policy.cleanup_release_backlog ?? false,
   }
   Object.assign(form, values)
   saved.value = values
@@ -176,6 +179,63 @@ const riskyDays = computed(
   () => form.cleanup_after_days < 8 || form.cleanup_min_seeding_days < 8,
 )
 
+// A hold the operator placed is theirs; only the backlog is offered in bulk.
+function isBacklog(item: CleanupPreviewEntry): boolean {
+  return item.hold_reason !== 'MANUAL' && item.hold_reason !== 'TAG_REMOVED'
+}
+const heldBacklogReady = computed(() => heldReady.value.filter(isBacklog))
+// Saving would let the backlog in where it was being kept out.
+const armsBacklog = computed(
+  () => form.cleanup_release_backlog && saved.value?.cleanup_release_backlog === false,
+)
+
+const selectedIds = ref<string[]>([])
+const confirmingBulk = ref(false)
+const releasing = ref(false)
+const selectedItems = computed(() =>
+  heldBacklogReady.value.filter((item) => selectedIds.value.includes(item.download_id)),
+)
+const allSelected = computed(
+  () =>
+    heldBacklogReady.value.length > 0 &&
+    selectedItems.value.length === heldBacklogReady.value.length,
+)
+
+function toggle(item: CleanupPreviewEntry): void {
+  confirmingBulk.value = false
+  selectedIds.value = selectedIds.value.includes(item.download_id)
+    ? selectedIds.value.filter((id) => id !== item.download_id)
+    : [...selectedIds.value, item.download_id]
+}
+
+function toggleAll(): void {
+  confirmingBulk.value = false
+  selectedIds.value = allSelected.value
+    ? []
+    : heldBacklogReady.value.map((item) => item.download_id)
+}
+
+async function releaseSelected(): Promise<void> {
+  const ids = selectedItems.value.map((item) => item.download_id)
+  if (!ids.length || releasing.value) return
+  releasing.value = true
+  previewError.value = null
+  feedback.value = null
+  try {
+    const result = await dailyApi.setCleanupHolds(ids, false)
+    feedback.value = result.skipped.length
+      ? `已放行 ${result.changed} 项，${result.skipped.length} 项未能放行：${result.skipped[0]?.reason}`
+      : `已放行 ${result.changed} 项`
+    selectedIds.value = []
+    await Promise.all([loadPreview(), loadRecent()])
+  } catch (caught) {
+    previewError.value = message(caught, '无法批量放行')
+  } finally {
+    releasing.value = false
+    confirmingBulk.value = false
+  }
+}
+
 onMounted(() => void load())
 </script>
 
@@ -253,6 +313,10 @@ onMounted(() => void load())
             />
             必须已确认入库
           </label>
+          <label class="configuration-checkbox">
+            <input v-model="form.cleanup_release_backlog" name="cleanup_release_backlog" type="checkbox" />
+            自动放行存量（满足条件即清理）
+          </label>
         </div>
         <div class="configuration-field-grid cleanup-numbers">
           <label>
@@ -284,6 +348,11 @@ onMounted(() => void load())
         </p>
         <p v-if="armsDeletion" class="inline-warning">
           保存后将开始真正删除：「待删除」里的 {{ marked.length + queued.length }} 项会在下一轮被标记，观察期后删除。
+        </p>
+        <p v-if="armsBacklog" class="inline-warning">
+          保存后，「保留中」里 {{ heldBacklogReady.length }} 项满足条件的存量（{{ total(heldBacklogReady) }}）会在下一轮自动放行并打上标签，
+          观察 {{ form.cleanup_grace_days }} 天后删除，每天最多删 {{ form.cleanup_daily_limit }} 个；以后其余存量满足条件时也会自动处理。
+          你手动保留的和在 qBittorrent 里摘过标签的不受影响。
         </p>
         <div class="filter-actions cleanup-save">
           <span v-if="dirty" class="cleanup-unsaved" role="status">
@@ -367,11 +436,61 @@ onMounted(() => void load())
             </p>
           </div>
         </div>
+        <p v-if="saved.cleanup_release_backlog && heldBacklogReady.length" class="inline-warning">
+          「自动放行存量」已开启：下面没有标注「手动保留」的种子会在下一轮自动进入待删除，不需要逐个放行。
+        </p>
         <p v-if="!heldReady.length" class="muted cleanup-empty">没有可以放行的种子。</p>
-        <ul v-else class="cleanup-list">
+        <div v-if="heldReady.length" class="cleanup-bulk">
+          <label class="cleanup-select-all">
+            <input
+              type="checkbox"
+              name="select_all"
+              :checked="allSelected"
+              :disabled="!heldBacklogReady.length || releasing"
+              @change="toggleAll"
+            />
+            全选（{{ heldBacklogReady.length }} 项）
+          </label>
+          <span class="muted">已选 {{ selectedItems.length }} 项 · {{ total(selectedItems) }}</span>
+          <span class="cleanup-bulk-actions">
+            <template v-if="confirmingBulk">
+              <button type="button" class="button secondary small" :disabled="releasing" @click="confirmingBulk = false">
+                取消
+              </button>
+              <button type="button" class="button primary small" :disabled="releasing" @click="releaseSelected">
+                {{ releasing ? '放行中…' : `确认放行 ${selectedItems.length} 项（${total(selectedItems)}）` }}
+              </button>
+            </template>
+            <button
+              v-else
+              type="button"
+              class="button primary small"
+              :disabled="!selectedItems.length || changingId !== null"
+              @click="confirmingBulk = true"
+            >
+              放行所选
+            </button>
+          </span>
+        </div>
+        <ul v-if="heldReady.length" class="cleanup-list">
           <li v-for="item in heldReady" :key="item.download_id">
+            <input
+              v-if="isBacklog(item)"
+              type="checkbox"
+              class="cleanup-row-check"
+              :aria-label="`选择 ${item.media_title}`"
+              :checked="selectedIds.includes(item.download_id)"
+              :disabled="releasing"
+              @change="toggle(item)"
+            />
+            <span v-else class="cleanup-row-check" aria-hidden="true"></span>
             <span>
-              <strong>{{ item.media_title }}</strong>
+              <strong>
+                {{ item.media_title }}
+                <span v-if="!isBacklog(item)" class="status-pill">
+                  {{ item.hold_reason === 'TAG_REMOVED' ? '摘标签保留' : '手动保留' }}
+                </span>
+              </strong>
               <span class="muted">
                 {{ item.name }} · {{ formatBytes(item.size_bytes) }} · 已做种 {{ item.seeding_days }} 天（需
                 {{ item.required_seeding_days }} 天）
@@ -380,7 +499,7 @@ onMounted(() => void load())
             <button
               type="button"
               class="button secondary small"
-              :disabled="changingId !== null"
+              :disabled="changingId !== null || releasing"
               @click="setHold(item, false)"
             >
               {{ changingId === item.download_id ? '放行中…' : '放行' }}

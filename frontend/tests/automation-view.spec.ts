@@ -69,6 +69,7 @@ const policy: AutomationPolicy = {
   cleanup_grace_days: 2,
   cleanup_require_library_confirmed: true,
   cleanup_daily_limit: 20,
+  cleanup_release_backlog: false,
   updated_at: '2026-08-23T00:00:00Z',
   last_run_at: null,
 }
