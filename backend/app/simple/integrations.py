@@ -59,6 +59,11 @@ _EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,5})$")
 # qBittorrent does not list a torrent the instant it is accepted, so a download
 # is only declared missing once it has had time to show up.
 _QB_MISSING_GRACE = timedelta(minutes=15)
+#: A single sync may confirm at most this share of the still-unconfirmed titles
+#: (and never fewer than the floor) as having entered the library.  More than
+#: that is taken as a truncated listing rather than a very busy day.
+_MAX_CONFIRM_FRACTION = 0.05
+_MIN_CONFIRM_BATCH = 50
 _download_submission_lock = asyncio.Lock()
 _nextfind_sync_lock = asyncio.Lock()
 
@@ -319,6 +324,7 @@ async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> t
 async def _sync_nextfind_locked(
     session: AsyncSession, adapter: MediaSourceAdapter
 ) -> tuple[int, int, int]:
+    settings = get_settings()
     await adapter.authenticate()
     result = await adapter.list_missing_media()
     stored_items = list(
@@ -391,8 +397,21 @@ async def _sync_nextfind_locked(
     # loop or a page-limit stop all come back as a short list plus a warning.
     # Treating "absent from that list" as "already in the library" would arm an
     # irreversible delete for every title the sync failed to read, so a warned
-    # response only updates states and never writes a confirmation.
+    # response never writes a confirmation and never marks a title complete.
     trustworthy_listing = not result.warnings
+    # NextFind has also been seen to answer "success, zero series missing" for
+    # minutes at a time while tens of thousands were missing a moment earlier.
+    # Nothing in such a reply says it is wrong, so the reply is judged by what
+    # believing it would do: titles do not enter a library by the thousand
+    # between two syncs.
+    unconfirmed = [item for item in stored_items if item.library_confirmed_at is None]
+    would_confirm = sum(1 for item in unconfirmed if item.source_item_id not in seen)
+    confirm_limit = settings.library_confirm_max_batch or max(
+        _MIN_CONFIRM_BATCH, int(len(unconfirmed) * _MAX_CONFIRM_FRACTION)
+    )
+    listing_shrank = would_confirm > confirm_limit
+    if listing_shrank:
+        trustworthy_listing = False
     # A confirmation matters to the operator only where a download hangs on
     # it; logging one row per title would write tens of thousands on the first
     # sync after an upgrade.
@@ -437,26 +456,42 @@ async def _sync_nextfind_locked(
                         message=f"{stored_item.title} 已不在 NextFind 缺失列表中，确认入库",
                     )
                 )
-        if not still_missing and stored_item.state != MediaState.DOWNLOADING:
+        if (
+            not still_missing
+            # A short listing says nothing about the titles it left out; marking
+            # them complete hid every missing series from the library page.
+            and trustworthy_listing
+            and stored_item.state != MediaState.DOWNLOADING
+        ):
             stored_item.state = MediaState.COMPLETE
             stored_item.attention_reason = None
 
+    warning_count = len(result.warnings) + (1 if listing_shrank else 0)
+    details: dict[str, object] = {
+        "created": created,
+        "updated": updated,
+        "warnings": warning_count,
+        "newly_confirmed": newly_confirmed,
+        "confirmation_revoked": revoked,
+        "id_collisions": id_collisions,
+    }
+    if listing_shrank:
+        details["rejected_confirmations"] = would_confirm
+        details["confirmation_limit"] = confirm_limit
     session.add(
         ActivityLog(
             event="NEXTFIND_SYNCED",
-            message=f"NextFind 同步完成：新增 {created}，更新 {updated}",
-            details={
-                "created": created,
-                "updated": updated,
-                "warnings": len(result.warnings),
-                "newly_confirmed": newly_confirmed,
-                "confirmation_revoked": revoked,
-                "id_collisions": id_collisions,
-            },
+            message=(
+                f"NextFind 列表异常：{would_confirm} 部影视同时不再缺失，"
+                f"超过上限 {confirm_limit}，本次不更新入库状态"
+                if listing_shrank
+                else f"NextFind 同步完成：新增 {created}，更新 {updated}"
+            ),
+            details=details,
         )
     )
     await session.commit()
-    return created, updated, len(result.warnings)
+    return created, updated, warning_count
 
 
 def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None:

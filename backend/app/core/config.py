@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     # is plenty in normal use; a short interval is for testing the feature
     # without waiting a day per step.
     cleanup_interval_minutes: int = Field(default=360, ge=1, le=7 * 24 * 60)
+    # The most titles one NextFind sync may newly confirm as being in the
+    # library.  0 means automatic: 5% of the unconfirmed titles, at least 50.
+    # A listing that would confirm more is treated as truncated and ignored.
+    # Raise it once, on purpose, after a genuinely large import (or the first
+    # sync of an existing library), then set it back.
+    library_confirm_max_batch: int = Field(default=0, ge=0)
     torrent_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     torrent_max_files: int = Field(default=20_000, ge=1, le=100_000)
     preferred_resolutions: tuple[str, ...] = ("2160p", "1080p")

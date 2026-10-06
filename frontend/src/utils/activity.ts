@@ -98,6 +98,8 @@ const detailLabels: Record<string, string> = {
   newly_confirmed: '新确认入库',
   confirmation_revoked: '撤销入库确认',
   id_collisions: '电影与剧集同号',
+  rejected_confirmations: '未采信的入库数量',
+  confirmation_limit: '单次确认上限',
   markable: '可标记',
   deletable: '可删除',
   would_reclaim_bytes: '预计释放',

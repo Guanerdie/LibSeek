@@ -543,6 +543,7 @@ async def test_a_film_and_a_series_sharing_one_id_do_not_fail_the_sync(session_f
 async def test_a_short_listing_confirms_nothing_and_is_not_fresh(session_factory) -> None:
     async with session_factory() as session:
         media = await _media(session, "unread", "Unread Title")
+        media.state = MediaState.READY
         await _download_for(session, media)
         await session.commit()
 
@@ -550,7 +551,89 @@ async def test_a_short_listing_confirms_nothing_and_is_not_fresh(session_factory
         await session.refresh(media)
 
         assert media.library_confirmed_at is None
+        # It was not read, which is not the same as no longer missing.
+        assert media.state == MediaState.READY
         assert not library_listing_is_fresh(timedelta(minutes=15))
+
+
+async def _many_missing(session: AsyncSession, count: int) -> list[LibraryMediaItem]:
+    items = []
+    for index in range(count):
+        media = await _media(session, f"bulk-{index}", f"Bulk Title {index}")
+        media.state = MediaState.READY
+        items.append(media)
+    await _download_for(session, items[0])
+    await session.commit()
+    return items
+
+
+@pytest.mark.asyncio
+async def test_a_listing_that_empties_out_is_not_believed(session_factory) -> None:
+    """NextFind has answered "success, nothing missing" while thousands were."""
+
+    async with session_factory() as session:
+        items = await _many_missing(session, 60)
+
+        # No warning from the source at all: the reply looks perfectly healthy.
+        await sync_nextfind(session, _FakeNextFind(missing=[]))  # type: ignore[arg-type]
+        for media in items:
+            await session.refresh(media)
+        synced = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "NEXTFIND_SYNCED")
+            )
+        ).one()
+        confirmed_rows = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "LIBRARY_CONFIRMED")
+            )
+        ).all()
+
+        assert all(media.library_confirmed_at is None for media in items)
+        assert all(media.state == MediaState.READY for media in items)
+        assert confirmed_rows == []
+        assert synced.details["rejected_confirmations"] == 60
+        assert synced.details["confirmation_limit"] == 50
+        assert synced.details["warnings"] == 1
+        assert "列表异常" in synced.message
+        # Cleanup asks exactly this before deleting anything.
+        assert not library_listing_is_fresh(timedelta(minutes=15))
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_number_of_imports_is_still_confirmed(session_factory) -> None:
+    async with session_factory() as session:
+        items = await _many_missing(session, 60)
+        still_missing = [media.source_item_id for media in items[10:]]
+
+        await sync_nextfind(session, _FakeNextFind(missing=still_missing))  # type: ignore[arg-type]
+        for media in items:
+            await session.refresh(media)
+
+        assert [media.library_confirmed_at is not None for media in items] == (
+            [True] * 10 + [False] * 50
+        )
+        assert items[0].state == MediaState.COMPLETE
+        assert library_listing_is_fresh(timedelta(minutes=15))
+
+
+@pytest.mark.asyncio
+async def test_a_large_import_can_be_let_through_on_purpose(
+    monkeypatch: pytest.MonkeyPatch, session_factory
+) -> None:
+    monkeypatch.setattr(
+        integrations,
+        "get_settings",
+        lambda: Settings(_env_file=None, library_confirm_max_batch=1_000),
+    )
+    async with session_factory() as session:
+        items = await _many_missing(session, 60)
+
+        await sync_nextfind(session, _FakeNextFind(missing=[]))  # type: ignore[arg-type]
+        for media in items:
+            await session.refresh(media)
+
+        assert all(media.library_confirmed_at is not None for media in items)
 
 
 # ---------------------------------------------------------------------------
