@@ -6,11 +6,16 @@ links, one per line -- matches each line against the missing list, and then
 runs the same quick fill the single-title button runs, one title after
 another in the background.
 
-Two things are deliberately left alone.  Only titles NextFind reports missing
-are downloaded: one that is not on the list is either in the library already
-or unknown to NextFind, and nothing would later confirm it arrived.  And the
-release still has to pass the policy's quality rules; what is waived is the
-daily budget, which exists to pace unattended automation, not an explicit
+A line is matched against every title NextFind has ever reported, missing or
+not.  A missing one is downloaded as a matter of course.  One already in the
+library is downloaded only when the operator ticks it: a list tends to include
+titles its author forgot they had, and a second copy is not something to make
+by accident.  Space reclaim never removes such a copy on its own -- its
+library confirmation predates the download, so nothing shows the new file was
+filed -- and the operator is told so.
+
+The release still has to pass the policy's quality rules; what is waived is
+the daily budget, which exists to pace unattended automation, not an explicit
 request.
 """
 
@@ -20,21 +25,36 @@ import asyncio
 import logging
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 from app.core import audit
 from app.core.time import utc_now
 from app.db.session import SessionFactory
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.simple import automation
-from app.simple.integrations import build_pt_site, build_qb, build_tmdb
-from app.simple.models import Download, DownloadState, LibraryMediaItem, MediaState
+from app.simple.integrations import (
+    build_pt_site,
+    build_qb,
+    build_qb_readonly,
+    build_tmdb,
+    close_adapter,
+)
+from app.simple.models import (
+    ActivityLog,
+    Download,
+    DownloadCleanupState,
+    DownloadState,
+    LibraryMediaItem,
+    MediaState,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -83,6 +103,9 @@ class MediaChoice:
     year: int | None
     media_type: MediaType
     tmdb_id: int | None
+    # NextFind does not report it missing: downloading it is a deliberate
+    # second copy, not filling a gap.
+    in_library: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,6 +179,7 @@ def _choice(media: LibraryMediaItem) -> MediaChoice:
         year=media.year,
         media_type=media.media_type,
         tmdb_id=media.tmdb_id,
+        in_library=not _is_missing(media),
     )
 
 
@@ -225,27 +249,20 @@ async def match_lines(session: AsyncSession, lines: list[ParsedLine]) -> list[Ma
             results.append(MatchedLine(raw=line.raw, status="NOT_FOUND"))
             continue
         missing = [media for media in found if _is_missing(media)]
-        if not missing:
-            results.append(
-                MatchedLine(
-                    raw=line.raw,
-                    status="NOT_MISSING",
-                    media=_choice(found[0]),
-                    note="NextFind 没有把它列为缺失，可能已经入库",
-                )
-            )
-            continue
-        if len(missing) > 1 or not exact:
+        # A missing title is what the line most likely means; one already in
+        # the library is offered only when nothing missing fits.
+        pool = missing or found
+        if len(pool) > 1 or not exact:
             results.append(
                 MatchedLine(
                     raw=line.raw,
                     status="AMBIGUOUS",
-                    choices=tuple(_choice(media) for media in missing[:MAX_CHOICES]),
+                    choices=tuple(_choice(media) for media in pool[:MAX_CHOICES]),
                     note=(None if exact else "没有完全同名的影视，下面是名称相近的"),
                 )
             )
             continue
-        media = missing[0]
+        media = pool[0]
         if media.id in taken:
             results.append(MatchedLine(raw=line.raw, status="DUPLICATE", media=_choice(media)))
             continue
@@ -260,6 +277,18 @@ async def match_lines(session: AsyncSession, lines: list[ParsedLine]) -> list[Ma
                 )
             )
             continue
+        if not missing:
+            # Downloadable, but only on the operator's say-so: a list often
+            # contains titles they did not realise they already had.
+            results.append(
+                MatchedLine(
+                    raw=line.raw,
+                    status="NOT_MISSING",
+                    media=_choice(media),
+                    note="库中已有。仍可下载，但这份下载不会被自动清理",
+                )
+            )
+            continue
         results.append(MatchedLine(raw=line.raw, status="MATCHED", media=_choice(media)))
     return results
 
@@ -268,7 +297,15 @@ async def match_lines(session: AsyncSession, lines: list[ParsedLine]) -> list[Ma
 # Running a batch
 # ---------------------------------------------------------------------------
 
-ItemOutcome = Literal["PENDING", "RUNNING", "DOWNLOADED", "NO_CANDIDATE", "FAILED", "CANCELLED"]
+ItemOutcome = Literal[
+    "PENDING",
+    "RUNNING",
+    "DOWNLOADED",
+    "ALREADY_PRESENT",
+    "NO_CANDIDATE",
+    "FAILED",
+    "CANCELLED",
+]
 
 
 @dataclass
@@ -279,6 +316,7 @@ class BatchItem:
     message: str | None = None
     selected_title: str | None = None
     download_id: str | None = None
+    in_library: bool = False
 
 
 @dataclass
@@ -312,9 +350,19 @@ async def start_batch(
     session: AsyncSession,
     media_ids: list[str],
     *,
+    existing_ids: list[str] | None = None,
     session_factory: async_sessionmaker[AsyncSession] = SessionFactory,
 ) -> ImportBatch:
+    """Start downloading ``media_ids``.
+
+    ``existing_ids`` names the ones the operator asked for although they are
+    in the library already.  A title that is not missing and is not named
+    there left the missing list after it was matched, and is refused rather
+    than quietly downloaded a second time.
+    """
+
     global _batch
+    agreed = set(existing_ids or [])
     if batch_running():
         raise AppError(
             "IMPORT_IN_PROGRESS",
@@ -334,13 +382,14 @@ async def start_batch(
         media = rows.get(media_id)
         if media is None:
             raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
-        if not _is_missing(media):
+        in_library = not _is_missing(media)
+        if in_library and media.id not in agreed:
             raise AppError(
                 "MEDIA_NOT_MISSING",
                 f"《{media.title}》已不在缺失列表里，请重新匹配",
                 status_code=409,
             )
-        items.append(BatchItem(media_id=media.id, title=media.title))
+        items.append(BatchItem(media_id=media.id, title=media.title, in_library=in_library))
     now = utc_now()
     _batch = ImportBatch(
         id=now.strftime("%Y%m%d-%H%M%S"),
@@ -384,8 +433,85 @@ def _why_nothing(rejected: list[dict[str, object]]) -> str:
     return f"搜到 {len(rejected)} 个资源，都不符合选种标准：{summary}"
 
 
+async def retire_vanished_downloads(
+    session: AsyncSession,
+    media_ids: list[str],
+    *,
+    qb_factory: Callable[[], QbittorrentAdapter] = build_qb_readonly,
+) -> int:
+    """Stop download records whose torrent is gone from standing in for a file.
+
+    Submitting a release that was downloaded once before reuses the old record
+    instead of adding the torrent again -- right while the torrent is still
+    there, and wrong once it has been removed by hand, when the title would be
+    reported as downloaded with nothing on disk.  Each finished record for
+    these titles is checked against the client, and one whose torrent is no
+    longer there is marked VANISHED, which the duplicate check ignores.
+    """
+
+    records = list(
+        await session.scalars(
+            select(Download).where(
+                Download.media_id.in_(media_ids),
+                Download.info_hash.is_not(None),
+                Download.state.in_((DownloadState.COMPLETED, DownloadState.SEEDING)),
+                Download.cleanup_state.in_((DownloadCleanupState.NONE, DownloadCleanupState.HELD)),
+            )
+        )
+    )
+    if not records:
+        return 0
+    qb = qb_factory()
+    try:
+        await qb.authenticate()
+        torrents = await qb.list_torrents()
+    finally:
+        await close_adapter(qb)
+    present = {identity for torrent in torrents for identity in torrent.identity_hashes}
+    retired = 0
+    for record in records:
+        if (record.info_hash or "").casefold() in present:
+            continue
+        record.cleanup_state = DownloadCleanupState.VANISHED
+        record.cleanup_hold_reason = None
+        # No longer seeding either, or the title would still count as having
+        # a download under way and refuse a new one.
+        record.state = DownloadState.COMPLETED
+        record.download_speed = 0
+        record.upload_speed = 0
+        retired += 1
+        session.add(
+            ActivityLog(
+                media_id=record.media_id,
+                event="DOWNLOAD_RECORD_RETIRED",
+                message=f"{record.name} 已不在 qBittorrent 中，旧下载记录不再用于判重",
+                reason="再次下载前核对：这个种子此前已被手动移除",
+                details={"download_id": record.id, "info_hash": record.info_hash},
+            )
+        )
+    if retired:
+        await session.commit()
+    return retired
+
+
+def _aware(value: datetime) -> datetime:
+    # SQLite hands timezone-aware columns back naive.
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 async def _run(batch: ImportBatch, session_factory: async_sessionmaker[AsyncSession]) -> None:
     try:
+        try:
+            with audit.scope(details={"import_batch": batch.id}):
+                async with session_factory() as session:
+                    await retire_vanished_downloads(
+                        session, [item.media_id for item in batch.items]
+                    )
+        except AppError as exc:
+            # Without the client there is no telling which records are stale.
+            # The batch still runs; a release that turns out to be a reused
+            # record is reported as such below instead of as a new download.
+            _logger.info("Skipped the stale download check: %s", exc.message)
         for item in batch.items:
             if batch.cancel_requested:
                 item.outcome = "CANCELLED"
@@ -405,7 +531,11 @@ async def _run(batch: ImportBatch, session_factory: async_sessionmaker[AsyncSess
                             ),
                             qb_factory=build_qb,
                             metadata_factory=build_tmdb,
-                            origin="批量导入",
+                            origin=(
+                                "批量导入（库中已有，按要求再次下载）"
+                                if item.in_library
+                                else "批量导入"
+                            ),
                         )
             except AppError as exc:
                 item.outcome = "FAILED"
@@ -427,6 +557,11 @@ async def _run(batch: ImportBatch, session_factory: async_sessionmaker[AsyncSess
             if download.state in (DownloadState.ERROR, DownloadState.OUTCOME_UNKNOWN):
                 item.outcome = "FAILED"
                 item.message = download.error_message or "提交到 qBittorrent 的结果未确认"
+            elif batch.started_at is not None and _aware(download.created_at) < batch.started_at:
+                # An older record for the very same torrent: nothing was
+                # submitted, and saying "downloaded" would be untrue.
+                item.outcome = "ALREADY_PRESENT"
+                item.message = "选中的种子此前已经下载过，下载记录还在，没有重复提交"
             else:
                 item.outcome = "DOWNLOADED"
     except asyncio.CancelledError:

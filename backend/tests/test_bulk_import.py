@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.adapters.downloaders.qbittorrent import QbittorrentAdapter
 from app.core import audit
+from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import MediaType
+from app.schemas.qbittorrent import QbTorrent
 from app.simple import bulk_import
 from app.simple.bulk_import import match_lines, normalize_title, parse_lines
 from app.simple.models import (
+    ActivityLog,
+    CleanupHoldReason,
     Download,
+    DownloadCleanupState,
     DownloadState,
     LibraryMediaItem,
     MediaState,
@@ -211,10 +217,18 @@ class _Selected:
 
 
 class _Submitted:
-    def __init__(self, download_id: str, state: DownloadState = DownloadState.QUEUED) -> None:
+    def __init__(
+        self,
+        download_id: str,
+        state: DownloadState = DownloadState.QUEUED,
+        *,
+        created_at: datetime | None = None,
+    ) -> None:
         self.id = download_id
         self.state = state
         self.error_message = "qBittorrent 拒绝了这个种子" if state == DownloadState.ERROR else None
+        # A record made by this submission, unless a test says it is older.
+        self.created_at = created_at or utc_now() + timedelta(seconds=1)
 
 
 @pytest.mark.asyncio
@@ -285,8 +299,10 @@ async def test_a_second_batch_waits_for_the_first(
     monkeypatch: pytest.MonkeyPatch, session_factory
 ) -> None:
     gate = asyncio.Event()
+    under_way = asyncio.Event()
 
     async def slow_quick_fill(_session: AsyncSession, **kwargs: Any) -> tuple[Any, ...]:
+        under_way.set()
         await gate.wait()
         return None, _Selected("x"), [], _Submitted("d")
 
@@ -303,10 +319,9 @@ async def test_a_second_batch_waits_for_the_first(
             await bulk_import.start_batch(session, [second.id], session_factory=session_factory)
         assert raised.value.error_code == "IMPORT_IN_PROGRESS"
 
-        # Let the first title get under way, then cancel: it stops before the
-        # next title, and the one in hand completes.
-        for _ in range(5):
-            await asyncio.sleep(0)
+        # Once the first title is under way, cancel: it stops before the next
+        # title, and the one in hand completes.
+        await asyncio.wait_for(under_way.wait(), timeout=5)
         bulk_import.request_cancel()
         gate.set()
         await _finish()
@@ -330,3 +345,188 @@ async def test_a_title_that_left_the_missing_list_is_refused(session_factory) ->
         assert raised.value.error_code == "MEDIA_NOT_MISSING"
         assert not bulk_import.batch_running()
         assert (await session.scalars(select(Download))).all() == []
+
+
+# ---------------------------------------------------------------------------
+# Titles that are already in the library
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_title_in_the_library_is_offered_but_flagged(session_factory) -> None:
+    async with session_factory() as session:
+        owned = await _media(
+            session, "库里已有的剧", tmdb_id=51, state=MediaState.COMPLETE, confirmed=True
+        )
+        await _media(session, "同名", tmdb_id=52, state=MediaState.COMPLETE, confirmed=True)
+        wanted = await _media(session, "同名", tmdb_id=53, media_type=MediaType.MOVIE)
+        await _media(session, "另一部已有", tmdb_id=54, state=MediaState.COMPLETE, confirmed=True)
+        await session.commit()
+
+        results = await match_lines(session, parse_lines("库里已有的剧\n同名\n另一部"))
+        by_raw = {line.raw: line for line in results}
+
+        in_library = by_raw["库里已有的剧"]
+        assert in_library.status == "NOT_MISSING"
+        assert in_library.media.media_id == owned.id and in_library.media.in_library
+        assert "不会被自动清理" in (in_library.note or "")
+        # Where one of the same name is missing, that is what the line means.
+        assert by_raw["同名"].status == "MATCHED"
+        assert by_raw["同名"].media.media_id == wanted.id
+        assert not by_raw["同名"].media.in_library
+        # A near match is still the operator's call, and says what it is.
+        assert by_raw["另一部"].status == "AMBIGUOUS"
+        assert [choice.in_library for choice in by_raw["另一部"].choices] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_title_in_the_library_downloads_only_when_asked_for(
+    monkeypatch: pytest.MonkeyPatch, session_factory
+) -> None:
+    origins: dict[str, str] = {}
+
+    async def fake_quick_fill(_session: AsyncSession, **kwargs: Any) -> tuple[Any, ...]:
+        origins[kwargs["media_id"]] = kwargs["origin"]
+        return None, _Selected("Some.Release"), [], _Submitted("d")
+
+    monkeypatch.setattr(bulk_import.automation, "quick_fill_media", fake_quick_fill)
+    async with session_factory() as session:
+        owned = await _media(
+            session, "库里已有的剧", tmdb_id=61, state=MediaState.COMPLETE, confirmed=True
+        )
+        missing = await _media(session, "缺失的剧", tmdb_id=62)
+        await session.commit()
+
+        with pytest.raises(AppError) as raised:
+            await bulk_import.start_batch(
+                session, [missing.id, owned.id], session_factory=session_factory
+            )
+        assert raised.value.error_code == "MEDIA_NOT_MISSING"
+
+        started = await bulk_import.start_batch(
+            session,
+            [missing.id, owned.id],
+            existing_ids=[owned.id],
+            session_factory=session_factory,
+        )
+        await _finish()
+
+    assert [item.in_library for item in started.items] == [False, True]
+    assert [item.outcome for item in bulk_import.current_batch().items] == ["DOWNLOADED"] * 2
+    # The record says which downloads were a deliberate second copy.
+    assert origins[missing.id] == "批量导入"
+    assert "库中已有" in origins[owned.id]
+
+
+async def _old_download(
+    session: AsyncSession, media: LibraryMediaItem, info_hash: str, **fields: Any
+) -> Download:
+    search = ReleaseSearch(media_id=media.id, site_ids=["avistaz"])
+    session.add(search)
+    await session.flush()
+    candidate = ReleaseCandidate(
+        search_id=search.id,
+        site_id="avistaz",
+        torrent_id=f"t-{info_hash[:6]}",
+        title="Old.Release",
+        score=0.9,
+        reasons=[],
+        warnings=[],
+    )
+    session.add(candidate)
+    await session.flush()
+    download = Download(
+        media_id=media.id,
+        candidate_id=candidate.id,
+        name="Old.Release",
+        progress=1,
+        info_hash=info_hash,
+        **fields,
+    )
+    session.add(download)
+    await session.flush()
+    return download
+
+
+class _Client:
+    def __init__(self, hashes: list[str]) -> None:
+        self.hashes = hashes
+        self.closed = False
+
+    async def authenticate(self) -> None:
+        return None
+
+    async def list_torrents(self) -> list[QbTorrent]:
+        return [
+            QbTorrent(hash=value, name=value[:8], size=1, progress=1, ratio=0, state="uploading")
+            for value in self.hashes
+        ]
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_a_record_whose_torrent_was_removed_stops_counting_as_a_download(
+    session_factory,
+) -> None:
+    """Otherwise the same release would be "reused" and nothing would be added."""
+
+    async with session_factory() as session:
+        media = await _media(session, "以前下过的剧", tmdb_id=71)
+        gone = await _old_download(
+            session,
+            media,
+            "a" * 40,
+            state=DownloadState.SEEDING,
+            cleanup_state=DownloadCleanupState.HELD,
+            cleanup_hold_reason=CleanupHoldReason.BACKLOG.value,
+        )
+        other = await _media(session, "还在做种的剧", tmdb_id=72)
+        kept = await _old_download(session, other, "b" * 40, state=DownloadState.SEEDING)
+        await session.commit()
+        client = _Client(["b" * 40])
+
+        with audit.scope(actor="owner", trigger="MANUAL"):
+            retired = await bulk_import.retire_vanished_downloads(
+                session,
+                [media.id, other.id],
+                qb_factory=lambda: cast(QbittorrentAdapter, client),
+            )
+        await session.refresh(gone)
+        await session.refresh(kept)
+        logged = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "DOWNLOAD_RECORD_RETIRED")
+            )
+        ).all()
+
+        assert retired == 1 and client.closed
+        assert gone.cleanup_state == DownloadCleanupState.VANISHED
+        assert gone.cleanup_hold_reason is None
+        # Not "seeding" any more, so it does not block a new download either.
+        assert gone.state == DownloadState.COMPLETED
+        assert kept.cleanup_state == DownloadCleanupState.NONE
+        assert kept.state == DownloadState.SEEDING
+        assert [(row.media_id, row.actor) for row in logged] == [(media.id, "owner")]
+
+
+@pytest.mark.asyncio
+async def test_reusing_an_existing_torrent_is_not_reported_as_a_new_download(
+    monkeypatch: pytest.MonkeyPatch, session_factory
+) -> None:
+    async def fake_quick_fill(_session: AsyncSession, **kwargs: Any) -> tuple[Any, ...]:
+        long_ago = utc_now() - timedelta(days=30)
+        return None, _Selected("Old.Release"), [], _Submitted("d-old", created_at=long_ago)
+
+    monkeypatch.setattr(bulk_import.automation, "quick_fill_media", fake_quick_fill)
+    async with session_factory() as session:
+        media = await _media(session, "种子还在的剧", tmdb_id=81)
+        await session.commit()
+
+        await bulk_import.start_batch(session, [media.id], session_factory=session_factory)
+        await _finish()
+
+    (item,) = bulk_import.current_batch().items
+    assert item.outcome == "ALREADY_PRESENT"
+    assert "没有重复提交" in (item.message or "")

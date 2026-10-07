@@ -309,6 +309,7 @@ class ImportMediaChoice(BaseModel):
     year: int | None
     media_type: MediaType
     tmdb_id: int | None
+    in_library: bool = False
 
 
 class ImportMatchLine(BaseModel):
@@ -331,6 +332,9 @@ class ImportMatchResult(BaseModel):
 
 class ImportStartRequest(BaseModel):
     media_ids: list[str] = Field(min_length=1, max_length=200)
+    # The ones among them that are already in the library and that the
+    # operator asked for anyway.  Anything else not missing is refused.
+    existing_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
 class ImportBatchItemView(BaseModel):
@@ -338,10 +342,19 @@ class ImportBatchItemView(BaseModel):
 
     media_id: str
     title: str
-    outcome: Literal["PENDING", "RUNNING", "DOWNLOADED", "NO_CANDIDATE", "FAILED", "CANCELLED"]
+    outcome: Literal[
+        "PENDING",
+        "RUNNING",
+        "DOWNLOADED",
+        "ALREADY_PRESENT",
+        "NO_CANDIDATE",
+        "FAILED",
+        "CANCELLED",
+    ]
     message: str | None = None
     selected_title: str | None = None
     download_id: str | None = None
+    in_library: bool = False
 
 
 class ImportBatchView(BaseModel):

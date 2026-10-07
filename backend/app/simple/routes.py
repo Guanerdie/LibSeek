@@ -240,7 +240,9 @@ async def start_import(
     del principal
     # Fail here, once, rather than once per title in the background.
     await close_adapter(build_qb())
-    batch = await bulk_import.start_batch(session, payload.media_ids)
+    batch = await bulk_import.start_batch(
+        session, payload.media_ids, existing_ids=payload.existing_ids
+    )
     return ImportBatchView.model_validate(batch)
 
 

@@ -88,9 +88,10 @@ describe('bulk import page', () => {
     ])
 
     expect(mocks.importMatch).toHaveBeenCalledWith('红宝石戒指\n同名\n不存在')
-    expect(wrapper.text()).toContain('1 部将下载，1 部需要你选择，2 部不会下载')
+    expect(wrapper.text()).toContain('1 部将下载，1 部需要你选择，1 部库中已有、未勾选，1 部不会下载')
     expect(wrapper.text()).toContain('红宝石戒指（2013 · 电视剧）')
-    expect(wrapper.text()).toContain('可能已经入库')
+    // In the library already: offered, but not downloaded unless ticked.
+    expect(wrapper.text()).toContain('仍然下载（不会被自动清理）')
     const start = () => wrapper.find('.import-start button')
     expect(start().text()).toBe('开始下载 1 部')
 
@@ -113,10 +114,48 @@ describe('bulk import page', () => {
     await start().trigger('click')
     await flushPromises()
 
-    expect(mocks.importStart).toHaveBeenCalledWith(['m1', 'm2'])
+    expect(mocks.importStart).toHaveBeenCalledWith(['m1', 'm2'], [])
     expect(wrapper.text()).toContain('正在下载这一批')
     expect(wrapper.text()).toContain('已处理 0 / 2 部')
     expect(wrapper.text()).toContain('搜索中…')
+    wrapper.unmount()
+  })
+
+  it('downloads a title already in the library only when its box is ticked', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await matchWith(wrapper, [
+      line('红宝石戒指', { media: media('m1', '红宝石戒指') }),
+      line('已入库的剧', {
+        status: 'NOT_MISSING',
+        media: media('m4', '已入库的剧', { in_library: true }),
+      }),
+      line('另一部已有', {
+        status: 'NOT_MISSING',
+        media: media('m5', '另一部已有', { in_library: true }),
+      }),
+    ])
+    const start = () => wrapper.find('.import-start button')
+
+    expect(start().text()).toBe('开始下载 1 部')
+    expect(wrapper.text()).toContain('库中已有的 2 部也下载')
+
+    // One line at a time...
+    await wrapper.find('input[aria-label="仍然下载「已入库的剧」"]').setValue(true)
+    expect(start().text()).toBe('开始下载 2 部')
+    expect(wrapper.text()).toContain('2 部将下载（其中 1 部库中已有）')
+    expect(wrapper.text()).toContain('1 部库中已有、未勾选')
+
+    // ...or all of them.
+    await wrapper.find('input[name="again_all"]').setValue(true)
+    expect(start().text()).toBe('开始下载 3 部')
+
+    mocks.importStart.mockResolvedValueOnce(batch({ state: 'RUNNING', started_by: 'owner' }))
+    await start().trigger('click')
+    await flushPromises()
+
+    // The server is told which ones were asked for on purpose.
+    expect(mocks.importStart).toHaveBeenCalledWith(['m1', 'm4', 'm5'], ['m4', 'm5'])
     wrapper.unmount()
   })
 

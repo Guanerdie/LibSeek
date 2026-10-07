@@ -6,6 +6,7 @@ const eventLabels: Record<string, string> = {
   DOWNLOAD_RETRYING: '重新提交下载',
   DOWNLOAD_SUBMITTED: '提交下载',
   DOWNLOAD_FAILED: '下载提交失败',
+  DOWNLOAD_RECORD_RETIRED: '旧下载记录作废',
   DOWNLOAD_CLEANUP_MARKED: '标记待清理',
   DOWNLOAD_CLEANUP_DELETED: '删除种子和文件',
   DOWNLOAD_CLEANUP_HELD: '设为保留',

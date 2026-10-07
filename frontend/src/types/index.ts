@@ -492,6 +492,8 @@ export interface ImportMediaChoice {
   year: number | null
   media_type: DailyMediaType
   tmdb_id: number | null
+  // Already in the library: downloading it makes a deliberate second copy.
+  in_library?: boolean
 }
 
 /** One pasted line and the missing title it was taken to mean. */
@@ -513,6 +515,7 @@ export type ImportOutcome =
   | 'PENDING'
   | 'RUNNING'
   | 'DOWNLOADED'
+  | 'ALREADY_PRESENT'
   | 'NO_CANDIDATE'
   | 'FAILED'
   | 'CANCELLED'

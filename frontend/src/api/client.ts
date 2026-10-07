@@ -272,11 +272,12 @@ export const dailyApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     }),
-  importStart: (mediaIds: string[]) =>
+  // existingIds: the ones already in the library that were asked for anyway.
+  importStart: (mediaIds: string[], existingIds: string[] = []) =>
     request<ImportBatch>('/api/library/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ media_ids: mediaIds }),
+      body: JSON.stringify({ media_ids: mediaIds, existing_ids: existingIds }),
     }),
   importStatus: () => request<ImportBatch>('/api/library/import'),
   importCancel: () => request<ImportBatch>('/api/library/import/cancel', { method: 'POST' }),

@@ -366,6 +366,9 @@ body{color:var(--text);font-size:13px;line-height:1.55;background:var(--bg)}
 .import-tally{display:flex;flex-wrap:wrap;gap:14px;margin:0;font-size:12px}
 .import-lines select{display:block;width:min(100%,520px);height:34px;margin-top:6px;padding:0 10px;color:var(--text);border:1px solid var(--line);border-radius:9px;background:var(--panel);font-size:12px}
 .import-lines li.import-not_found strong,.import-lines li.import-not_missing strong,.import-lines li.import-duplicate strong,.import-lines li.import-downloading strong{color:var(--muted);font-weight:400}
+.import-again-line{display:flex;align-items:center;gap:6px;margin-top:4px;color:var(--text);font-size:12px;cursor:pointer}
+.import-again-line input,.import-again input{width:15px;height:15px;accent-color:var(--accent)}
+.import-lines li.import-not_missing strong{color:var(--text);font-weight:700}
 .import-start{display:flex;align-items:center;justify-content:flex-end;gap:12px}
 @media(max-width:720px){.page-header-actions{width:100%;flex-direction:column;align-items:stretch}}
 /* Cleanup page. */

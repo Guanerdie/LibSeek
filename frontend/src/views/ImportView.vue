@@ -18,6 +18,8 @@ const lines = ref<ImportMatchLine[] | null>(null)
 const truncated = ref(false)
 // For a line with several candidates: which one the operator picked, by index.
 const picked = reactive<Record<number, string>>({})
+// For a line whose title is already in the library: download it anyway?
+const again = reactive<Record<number, boolean>>({})
 const matching = ref(false)
 const starting = ref(false)
 const error = ref<string | null>(null)
@@ -39,7 +41,7 @@ function describe(media: ImportMediaChoice): string {
 const statusText: Record<ImportMatchLine['status'], string> = {
   MATCHED: '将下载',
   AMBIGUOUS: '需要你选择',
-  NOT_MISSING: '不在缺失列表',
+  NOT_MISSING: '库中已有',
   DOWNLOADING: '已在下载',
   NOT_FOUND: '没有找到',
   DUPLICATE: '重复',
@@ -49,6 +51,7 @@ const outcomeText: Record<ImportOutcome, string> = {
   PENDING: '等待中',
   RUNNING: '搜索中…',
   DOWNLOADED: '已提交下载',
+  ALREADY_PRESENT: '种子已存在',
   NO_CANDIDATE: '没有合格资源',
   FAILED: '失败',
   CANCELLED: '已取消',
@@ -61,17 +64,42 @@ function outcomeClass(outcome: ImportOutcome): string {
   return ''
 }
 
+/** What each line would download, if anything, and whether it is a second copy. */
+function chosenFor(line: ImportMatchLine, index: number): ImportMediaChoice | null {
+  if (line.status === 'MATCHED') return line.media
+  // In the library already: only when the box on that line is ticked.
+  if (line.status === 'NOT_MISSING') return again[index] ? line.media : null
+  if (line.status === 'AMBIGUOUS') {
+    return line.choices.find((choice) => choice.media_id === picked[index]) ?? null
+  }
+  return null
+}
+
 /** The titles that would be downloaded, each once, in the order pasted. */
-const chosenIds = computed(() => {
-  const ids: string[] = []
+const chosen = computed(() => {
+  const media: ImportMediaChoice[] = []
   ;(lines.value ?? []).forEach((line, index) => {
-    const id = line.status === 'MATCHED' ? line.media?.media_id : picked[index]
-    if (id && (line.status === 'MATCHED' || line.status === 'AMBIGUOUS') && !ids.includes(id)) {
-      ids.push(id)
-    }
+    const choice = chosenFor(line, index)
+    if (choice && !media.some((item) => item.media_id === choice.media_id)) media.push(choice)
   })
-  return ids
+  return media
 })
+const chosenIds = computed(() => chosen.value.map((item) => item.media_id))
+const existingIds = computed(() =>
+  chosen.value.filter((item) => item.in_library).map((item) => item.media_id),
+)
+
+const inLibraryIndexes = computed(() =>
+  (lines.value ?? []).flatMap((line, index) => (line.status === 'NOT_MISSING' ? [index] : [])),
+)
+const allAgain = computed(
+  () => inLibraryIndexes.value.length > 0 && inLibraryIndexes.value.every((index) => again[index]),
+)
+
+function toggleAllAgain(): void {
+  const value = !allAgain.value
+  for (const index of inLibraryIndexes.value) again[index] = value
+}
 
 const counts = computed(() => {
   const all = lines.value ?? []
@@ -80,9 +108,12 @@ const counts = computed(() => {
   ).length
   return {
     ready: chosenIds.value.length,
+    again: existingIds.value.length,
     undecided,
+    inLibrary: all.filter((line, index) => line.status === 'NOT_MISSING' && !again[index]).length,
     skipped: all.filter(
-      (line) => line.status !== 'MATCHED' && line.status !== 'AMBIGUOUS',
+      (line) =>
+        line.status !== 'MATCHED' && line.status !== 'AMBIGUOUS' && line.status !== 'NOT_MISSING',
     ).length,
   }
 })
@@ -95,6 +126,7 @@ const tally = computed(() => {
     total: items.length,
     done: items.filter((item) => item.outcome !== 'PENDING' && item.outcome !== 'RUNNING').length,
     downloaded: count('DOWNLOADED'),
+    present: count('ALREADY_PRESENT'),
     none: count('NO_CANDIDATE'),
     failed: count('FAILED'),
     cancelled: count('CANCELLED'),
@@ -110,6 +142,7 @@ async function match(): Promise<void> {
     lines.value = result.lines
     truncated.value = result.truncated
     for (const key of Object.keys(picked)) delete picked[Number(key)]
+    for (const key of Object.keys(again)) delete again[Number(key)]
     // Nothing is chosen on the operator's behalf where a line was unclear.
     result.lines.forEach((line, index) => {
       if (line.status === 'AMBIGUOUS') picked[index] = ''
@@ -149,7 +182,7 @@ async function start(): Promise<void> {
   starting.value = true
   error.value = null
   try {
-    batch.value = await dailyApi.importStart(chosenIds.value)
+    batch.value = await dailyApi.importStart(chosenIds.value, existingIds.value)
     lines.value = null
     text.value = ''
     schedulePoll()
@@ -222,6 +255,7 @@ onBeforeUnmount(() => {
       </div>
       <p class="import-tally">
         <span class="success-text">已提交下载 {{ tally.downloaded }} 部</span>
+        <span v-if="tally.present" class="muted">种子已存在 {{ tally.present }} 部</span>
         <span v-if="tally.none" class="warning-text">没有合格资源 {{ tally.none }} 部</span>
         <span v-if="tally.failed" class="danger-text">失败 {{ tally.failed }} 部</span>
         <span v-if="tally.cancelled" class="muted">已取消 {{ tally.cancelled }} 部</span>
@@ -270,10 +304,19 @@ onBeforeUnmount(() => {
         <div>
           <h2>2. 核对后开始</h2>
           <p class="muted">
-            {{ counts.ready }} 部将下载<template v-if="counts.undecided">，{{ counts.undecided }} 部需要你选择</template><template v-if="counts.skipped">，{{ counts.skipped }} 部不会下载</template>。
+            {{ counts.ready }} 部将下载<template v-if="counts.again">（其中 {{ counts.again }} 部库中已有）</template><template v-if="counts.undecided">，{{ counts.undecided }} 部需要你选择</template><template v-if="counts.inLibrary">，{{ counts.inLibrary }} 部库中已有、未勾选</template><template v-if="counts.skipped">，{{ counts.skipped }} 部不会下载</template>。
             不占每日下载额度，仍按最低评分、做种数和体积上限选种。
           </p>
         </div>
+      </div>
+      <div v-if="inLibraryIndexes.length" class="cleanup-bulk import-again">
+        <label class="cleanup-select-all">
+          <input type="checkbox" name="again_all" :checked="allAgain" @change="toggleAllAgain" />
+          库中已有的 {{ inLibraryIndexes.length }} 部也下载
+        </label>
+        <span class="muted">
+          这些影视 NextFind 没有报缺失。再下一份不会被空间清理自动删除，需要你自己处理。
+        </span>
       </div>
       <p v-if="truncated" class="inline-warning">清单超过 200 行，只匹配了前 200 行。剩下的请分批导入。</p>
       <p v-if="!lines.length" class="muted cleanup-empty">清单里没有可识别的内容。</p>
@@ -286,23 +329,30 @@ onBeforeUnmount(() => {
               <select v-model="picked[index]" :aria-label="`为「${line.raw}」选择影视`">
                 <option value="">不下载这一行</option>
                 <option v-for="choice in line.choices" :key="choice.media_id" :value="choice.media_id">
-                  {{ describe(choice) }}
+                  {{ describe(choice) }}{{ choice.in_library ? ' · 库中已有' : '' }}
                 </option>
               </select>
+            </span>
+            <span v-else-if="line.status === 'NOT_MISSING' && line.media" class="muted">
+              {{ describe(line.media) }}
+              <label class="import-again-line">
+                <input v-model="again[index]" type="checkbox" :aria-label="`仍然下载「${line.raw}」`" />
+                仍然下载（不会被自动清理）
+              </label>
             </span>
             <span v-else-if="line.media" class="muted">
               {{ describe(line.media) }}<template v-if="line.note"> · {{ line.note }}</template>
             </span>
-            <span v-else class="muted">缺失列表里没有这部。可能已经入库，或者 NextFind 还没有收录。</span>
+            <span v-else class="muted">UNIN 里没有这部影视的记录，NextFind 从未报过它，无法下载。</span>
           </span>
           <span
             class="status-pill"
             :class="{
-              'state-succeeded': line.status === 'MATCHED' || (line.status === 'AMBIGUOUS' && picked[index]),
+              'state-succeeded': chosenFor(line, index) !== null,
               'state-paused': line.status === 'AMBIGUOUS' && !picked[index],
             }"
           >
-            {{ line.status === 'AMBIGUOUS' && picked[index] ? '将下载' : statusText[line.status] }}
+            {{ chosenFor(line, index) && line.status !== 'MATCHED' ? '将下载' : statusText[line.status] }}
           </span>
         </li>
       </ul>
