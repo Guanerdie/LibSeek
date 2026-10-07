@@ -23,6 +23,7 @@ from app.errors import AppError
 from app.schemas.common import ErrorResponse
 from app.simple import routes as daily
 from app.simple.background import cancel_background_tasks, recover_interrupted_searches
+from app.simple.bulk_import import cancel_import_tasks
 from app.simple.cleanup import download_cleanup_loop
 from app.simple.integrations import build_pt_site, build_qb, build_qb_readonly
 from app.simple.retention import history_retention_loop
@@ -69,6 +70,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     finally:
         await cancel_manual_automation_runs()
         await cancel_background_tasks()
+        await cancel_import_tasks()
         if tasks:
             stop.set()
             await asyncio.gather(*tasks)

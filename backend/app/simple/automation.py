@@ -240,6 +240,7 @@ async def quick_fill_media(
     qb_factory: Callable[[], QbittorrentAdapter],
     metadata_factory: Callable[[], MetadataProvider] | None = None,
     force: bool = False,
+    origin: str = "一键补齐",
 ) -> tuple[ReleaseSearch, ReleaseCandidate | None, list[dict[str, object]], Download | None]:
     """Search, pick the best candidate and submit it -- in one call.
 
@@ -296,7 +297,7 @@ async def quick_fill_media(
 
     # A person asked for this title, but which release to take was the
     # policy's pick; the record says so.
-    with audit.scope(reason=_selection_reason("一键补齐", selected, len(candidates))):
+    with audit.scope(reason=_selection_reason(origin, selected, len(candidates))):
         download = await submit_download(
             session,
             candidate_id=selected.id,

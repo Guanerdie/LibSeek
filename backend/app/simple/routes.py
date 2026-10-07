@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
-from app.simple import activity, automation, cleanup, service, stats
+from app.simple import activity, automation, bulk_import, cleanup, service, stats
 from app.simple.background import queue_library_sync, queue_release_search
 from app.simple.integrations import (
     build_nextfind,
@@ -60,6 +60,11 @@ from app.simple.schemas import (
     DownloadPage,
     DownloadView,
     IdentityRequest,
+    ImportBatchView,
+    ImportMatchLine,
+    ImportMatchRequest,
+    ImportMatchResult,
+    ImportStartRequest,
     LibrarySyncView,
     MediaDetail,
     MediaFilterOptions,
@@ -203,6 +208,54 @@ async def _media_detail_payload(session: AsyncSession, media_id: str) -> MediaDe
             "subscription_active": subscribed and policy.scope_mode == "selected",
         }
     )
+
+
+@router.post("/library/import/match", response_model=ImportMatchResult)
+async def match_import(
+    payload: ImportMatchRequest, session: Session, principal: OperatorPrincipal
+) -> ImportMatchResult:
+    """Say which missing title each pasted line means.  Changes nothing."""
+
+    del principal
+    line_count = sum(
+        1 for line in payload.text.splitlines() if line.strip() and not line.strip().startswith("#")
+    )
+    matched = await bulk_import.match_lines(session, bulk_import.parse_lines(payload.text))
+    return ImportMatchResult(
+        lines=[ImportMatchLine.model_validate(line) for line in matched],
+        truncated=line_count > bulk_import.MAX_LINES,
+    )
+
+
+@router.post(
+    "/library/import",
+    response_model=ImportBatchView,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_import(
+    payload: ImportStartRequest, session: Session, principal: OperatorPrincipal
+) -> ImportBatchView:
+    """Search and download the chosen titles one after another, in the background."""
+
+    del principal
+    # Fail here, once, rather than once per title in the background.
+    await close_adapter(build_qb())
+    batch = await bulk_import.start_batch(session, payload.media_ids)
+    return ImportBatchView.model_validate(batch)
+
+
+@router.get("/library/import", response_model=ImportBatchView)
+async def import_progress(principal: ViewerPrincipal) -> ImportBatchView:
+    del principal
+    return ImportBatchView.model_validate(bulk_import.current_batch())
+
+
+@router.post("/library/import/cancel", response_model=ImportBatchView)
+async def cancel_import(principal: OperatorPrincipal) -> ImportBatchView:
+    """Stop before the next title; the one being searched right now finishes."""
+
+    del principal
+    return ImportBatchView.model_validate(bulk_import.request_cancel())
 
 
 @router.get("/library/{media_id}", response_model=MediaDetail)

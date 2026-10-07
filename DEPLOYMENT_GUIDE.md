@@ -160,6 +160,15 @@ docker compose up -d
 docker compose exec api python -c "import sqlite3;c=sqlite3.connect('file:/var/lib/unin/unin.db?mode=ro',uri=True);print(c.execute('select cleanup_state,count(*) from downloads group by 1').fetchall())"
 ```
 
+### 批量导入
+
+「缺失」页右上角的「批量导入」：贴一份清单（每行一部，片名、片名加年份、TMDB 编号或 TMDB 链接都可以），匹配后逐部搜索并自动下载评分最高的资源。
+
+- 只下载 NextFind 缺失列表里的影视。不在列表里的会标出来，不下载。
+- 不占自动化的每日下载数量和体积额度；最低评分、做种数、单资源体积上限等选种标准照常生效。
+- 一次最多 200 行，同一时间只能有一批在运行。进度保存在内存里，重启 `api` 会中断当前这一批，已经提交的下载不受影响。
+- 每部的下载记录在「记录」页，操作人是发起导入的用户，原因注明「批量导入」。
+
 ## 6. 日常维护
 
 ```bash

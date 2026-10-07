@@ -8,6 +8,7 @@ import CleanupView from '../views/CleanupView.vue'
 import ConfigurationView from '../views/ConfigurationView.vue'
 import AutomationView from '../views/AutomationView.vue'
 import AutomationRunDetailView from '../views/AutomationRunDetailView.vue'
+import ImportView from '../views/ImportView.vue'
 import LoginView from '../views/LoginView.vue'
 import MonitoringView from '../views/MonitoringView.vue'
 import LibraryView from '../views/LibraryView.vue'
@@ -27,6 +28,7 @@ const router = createRouter({
     { path: '/login', component: LoginView, meta: { public: true } },
     { path: '/', redirect: '/library' },
     { path: '/library', component: LibraryView },
+    { path: '/library/import', component: ImportView, meta: { requiredRole: 'operator' } },
     { path: '/library/:id/resources', component: ResourcesView },
     { path: '/downloads', component: DownloadsView },
     { path: '/cleanup', component: CleanupView, meta: { requiredRole: 'operator' } },

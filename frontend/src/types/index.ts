@@ -477,6 +477,65 @@ export interface QuickFillResult {
 
 export type DownloadCleanupState = 'NONE' | 'MARKED' | 'DELETED' | 'VANISHED' | 'HELD'
 
+export type ImportLineStatus =
+  | 'MATCHED'
+  | 'AMBIGUOUS'
+  | 'NOT_MISSING'
+  | 'DOWNLOADING'
+  | 'NOT_FOUND'
+  | 'DUPLICATE'
+
+export interface ImportMediaChoice {
+  media_id: string
+  title: string
+  original_title: string | null
+  year: number | null
+  media_type: DailyMediaType
+  tmdb_id: number | null
+}
+
+/** One pasted line and the missing title it was taken to mean. */
+export interface ImportMatchLine {
+  raw: string
+  status: ImportLineStatus
+  media: ImportMediaChoice | null
+  // For AMBIGUOUS: what the operator picks from.
+  choices: ImportMediaChoice[]
+  note: string | null
+}
+
+export interface ImportMatchResult {
+  lines: ImportMatchLine[]
+  truncated: boolean
+}
+
+export type ImportOutcome =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'DOWNLOADED'
+  | 'NO_CANDIDATE'
+  | 'FAILED'
+  | 'CANCELLED'
+
+export interface ImportBatchItem {
+  media_id: string
+  title: string
+  outcome: ImportOutcome
+  message: string | null
+  selected_title: string | null
+  download_id: string | null
+}
+
+export interface ImportBatch {
+  id: string
+  state: 'IDLE' | 'RUNNING' | 'FINISHED' | 'CANCELLED'
+  started_by: string | null
+  started_at: string | null
+  finished_at: string | null
+  cancel_requested: boolean
+  items: ImportBatchItem[]
+}
+
 /** The space-reclaim part of the policy, saved on its own page. */
 export type CleanupPolicy = Pick<
   AutomationPolicy,

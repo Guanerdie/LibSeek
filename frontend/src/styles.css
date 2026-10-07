@@ -351,6 +351,23 @@ body{color:var(--text);font-size:13px;line-height:1.55;background:var(--bg)}
 .automation-run-error{grid-column:1/-1;margin:0}
 @media(max-width:1100px){.automation-policy-panel .tab-panel>.configuration-field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.automation-policy-panel .tab-panel>.automation-quality-grid,.automation-policy-panel .tab-panel>.filter-heading>.configuration-field-grid:not(.automation-year-options){grid-template-columns:repeat(3,minmax(0,1fr))}.automation-policy-panel .automation-media-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){.automation-policy-panel .tab-panel>.configuration-field-grid,.automation-policy-panel .automation-media-options{grid-template-columns:1fr}.automation-policy-panel .tab-panel>.automation-quality-grid,.automation-policy-panel .tab-panel>.filter-heading>.configuration-field-grid:not(.automation-year-options){grid-template-columns:repeat(2,minmax(0,1fr))}.automation-run-card{grid-template-columns:minmax(0,1fr) auto}.automation-run-counts{grid-column:1/-1;grid-row:2}}
+/* Bulk import. */
+.page-header-actions{display:flex;align-items:center;gap:10px}
+.page-header-actions .button{text-decoration:none}
+.import-page{display:grid;gap:20px}
+.import-page>.page-header{margin-bottom:6px}
+.import-page .page-header .button{text-decoration:none}
+.import-panel{display:grid;gap:14px;padding:24px}
+.import-panel h2{margin:0 0 4px;font-size:18px}
+.import-panel .section-heading p{margin:0;font-size:12px;line-height:1.6}
+.import-panel a{color:var(--accent);text-decoration:none}
+.import-text{width:100%;min-height:170px;padding:12px 14px;color:var(--text);border:1px solid var(--line);border-radius:12px;background:var(--panel);font:13px/1.7 ui-monospace,"SF Mono",Consolas,"Noto Sans SC",monospace;resize:vertical}
+.import-text:focus{outline:none;box-shadow:0 0 0 2px rgba(185,109,82,.12)}
+.import-tally{display:flex;flex-wrap:wrap;gap:14px;margin:0;font-size:12px}
+.import-lines select{display:block;width:min(100%,520px);height:34px;margin-top:6px;padding:0 10px;color:var(--text);border:1px solid var(--line);border-radius:9px;background:var(--panel);font-size:12px}
+.import-lines li.import-not_found strong,.import-lines li.import-not_missing strong,.import-lines li.import-duplicate strong,.import-lines li.import-downloading strong{color:var(--muted);font-weight:400}
+.import-start{display:flex;align-items:center;justify-content:flex-end;gap:12px}
+@media(max-width:720px){.page-header-actions{width:100%;flex-direction:column;align-items:stretch}}
 /* Cleanup page. */
 .cleanup-page{display:grid;gap:20px}
 .cleanup-page>.page-header{margin-bottom:6px}

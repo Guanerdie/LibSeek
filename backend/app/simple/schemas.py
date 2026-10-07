@@ -295,6 +295,67 @@ class CleanupHoldBulkResult(BaseModel):
     skipped: list[CleanupHoldSkipped] = Field(default_factory=list)
 
 
+class ImportMatchRequest(BaseModel):
+    # Titles, TMDB ids or TMDB links, one per line.
+    text: str = Field(min_length=1, max_length=40_000)
+
+
+class ImportMediaChoice(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    media_id: str
+    title: str
+    original_title: str | None
+    year: int | None
+    media_type: MediaType
+    tmdb_id: int | None
+
+
+class ImportMatchLine(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    raw: str
+    status: Literal[
+        "MATCHED", "AMBIGUOUS", "NOT_MISSING", "DOWNLOADING", "NOT_FOUND", "DUPLICATE"
+    ]
+    media: ImportMediaChoice | None = None
+    choices: list[ImportMediaChoice] = Field(default_factory=list)
+    note: str | None = None
+
+
+class ImportMatchResult(BaseModel):
+    lines: list[ImportMatchLine]
+    # Lines beyond the limit are not looked at; say so rather than drop them.
+    truncated: bool = False
+
+
+class ImportStartRequest(BaseModel):
+    media_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class ImportBatchItemView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    media_id: str
+    title: str
+    outcome: Literal["PENDING", "RUNNING", "DOWNLOADED", "NO_CANDIDATE", "FAILED", "CANCELLED"]
+    message: str | None = None
+    selected_title: str | None = None
+    download_id: str | None = None
+
+
+class ImportBatchView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    state: Literal["IDLE", "RUNNING", "FINISHED", "CANCELLED"]
+    started_by: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    cancel_requested: bool = False
+    items: list[ImportBatchItemView] = Field(default_factory=list)
+
+
 class ActivityView(BaseModel):
     """One thing that was done: when, by whom, on whose decision, and why."""
 

@@ -90,9 +90,12 @@ onMounted(() => daily.loadMedia())
       title="缺失影视"
       description="从缺失列表选择一项，确认资源后直接进入下载。"
     >
-      <button class="button primary" :disabled="daily.mediaSyncing" @click="daily.syncMedia">
-        {{ daily.mediaSyncing ? '同步中…' : '同步缺失影视' }}
-      </button>
+      <div class="page-header-actions">
+        <RouterLink class="button secondary" to="/library/import">批量导入</RouterLink>
+        <button class="button primary" :disabled="daily.mediaSyncing" @click="daily.syncMedia">
+          {{ daily.mediaSyncing ? '同步中…' : '同步缺失影视' }}
+        </button>
+      </div>
     </PageHeader>
 
     <div class="summary-grid" aria-label="影视概览">

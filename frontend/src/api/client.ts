@@ -23,6 +23,8 @@ import type {
   DailyMediaPage,
   DailyMediaQuery,
   DailySearch,
+  ImportBatch,
+  ImportMatchResult,
   LibrarySyncStatus,
   LoginResponse,
   Page,
@@ -262,6 +264,22 @@ export const dailyApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ held }),
     }),
+  // Bulk import: match pasted lines against the missing list, then download
+  // the chosen titles in the background; poll importStatus until it ends.
+  importMatch: (text: string) =>
+    request<ImportMatchResult>('/api/library/import/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }),
+  importStart: (mediaIds: string[]) =>
+    request<ImportBatch>('/api/library/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_ids: mediaIds }),
+    }),
+  importStatus: () => request<ImportBatch>('/api/library/import'),
+  importCancel: () => request<ImportBatch>('/api/library/import/cancel', { method: 'POST' }),
   setCleanupHolds: (downloadIds: string[], held: boolean) =>
     request<CleanupHoldBulkResult>('/api/downloads/cleanup-hold', {
       method: 'POST',

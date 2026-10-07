@@ -334,7 +334,7 @@ describe('simplified daily store', () => {
       .mockResolvedValueOnce(emptyMedia)
       .mockResolvedValueOnce(emptyMedia)
     const store = useDailyStore()
-    const firstView = mount(LibraryView)
+    const firstView = mount(LibraryView, { global: { stubs: { RouterLink: true } } })
     await flushPromises()
 
     await firstView.get('button.primary').trigger('click')
@@ -343,7 +343,7 @@ describe('simplified daily store', () => {
     expect(firstView.get('button.primary').attributes('disabled')).toBeDefined()
 
     firstView.unmount()
-    const reenteredView = mount(LibraryView)
+    const reenteredView = mount(LibraryView, { global: { stubs: { RouterLink: true } } })
     await flushPromises()
 
     expect(reenteredView.get('button.primary').text()).toBe('同步中…')
