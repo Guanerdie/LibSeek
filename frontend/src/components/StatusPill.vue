@@ -14,4 +14,9 @@ const stateClass = computed(() => `state-${props.status.toLowerCase().replaceAll
 const text = computed(() => props.label ?? statusLabel(props.status))
 </script>
 
-<template><span class="status-pill" :class="stateClass">{{ text }}</span></template>
+<template>
+  <span class="status-pill" :class="stateClass">
+    <span class="status-indicator" aria-hidden="true"></span>
+    <span class="status-text">{{ text }}</span>
+  </span>
+</template>

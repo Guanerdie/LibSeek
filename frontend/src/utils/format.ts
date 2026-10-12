@@ -153,6 +153,16 @@ const candidateWarningLabels: Record<string, string> = {
   POSSIBLE_DUPLICATE: '可能重复下载',
 }
 
+/**
+ * NextFind reports posters as its own proxy path (`/api/tmdb/image/<file>`),
+ * TMDB as `/<file>`. Only the file name is the same in both.
+ */
+export function tmdbPosterUrl(posterPath: string | null | undefined): string | null {
+  const file = posterPath?.split(/[?#]/)[0].split('/').pop()
+  if (!file || !/^[\w-]+\.(jpe?g|png|webp)$/i.test(file)) return null
+  return `https://image.tmdb.org/t/p/w500/${file}`
+}
+
 export function candidateReasonLabel(code: string): string {
   return candidateReasonLabels[code] ?? `未识别匹配项（${code}）`
 }

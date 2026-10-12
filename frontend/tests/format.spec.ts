@@ -6,7 +6,22 @@ import {
   formatCountryCodes,
   formatShanghai,
   parseApiTime,
+  tmdbPosterUrl,
 } from '../src/utils/format'
+
+describe('poster addresses', () => {
+  it('builds the TMDB address from either form of poster path', () => {
+    const expected = 'https://image.tmdb.org/t/p/w500/7AjIupf0lxNKNq0p8z36jv5ZpiJ.jpg'
+    expect(tmdbPosterUrl('/api/tmdb/image/7AjIupf0lxNKNq0p8z36jv5ZpiJ.jpg')).toBe(expected)
+    expect(tmdbPosterUrl('/7AjIupf0lxNKNq0p8z36jv5ZpiJ.jpg')).toBe(expected)
+  })
+
+  it('shows the placeholder when there is no usable poster', () => {
+    expect(tmdbPosterUrl(null)).toBeNull()
+    expect(tmdbPosterUrl('')).toBeNull()
+    expect(tmdbPosterUrl('/api/tmdb/image/')).toBeNull()
+  })
+})
 
 describe('API timestamps', () => {
   it('reads a time without an offset as UTC, which is what the server stores', () => {

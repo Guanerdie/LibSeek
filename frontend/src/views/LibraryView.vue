@@ -8,7 +8,7 @@ import Pagination from '../components/Pagination.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { useDailyStore } from '../stores/daily'
 import type { DailyMediaRegion, DailyMediaState, DailyMediaType } from '../types'
-import { mediaStateLabel } from '../utils/format'
+import { mediaStateLabel, tmdbPosterUrl } from '../utils/format'
 
 const daily = useDailyStore()
 const summary = computed(() => {
@@ -36,6 +36,16 @@ const filters = reactive<{
 
 const bulkBusy = ref(false)
 const bulkNotice = ref<string | null>(null)
+const failedImages = reactive<Record<string, boolean>>({})
+
+function getPosterUrl(posterPath: string | null, id: string): string | null {
+  if (failedImages[id]) return null
+  return tmdbPosterUrl(posterPath)
+}
+
+function handleImageError(id: string): void {
+  failedImages[id] = true
+}
 
 /** Add every item the current filter produced to the follow list. */
 async function subscribeCurrentPage(subscribed: boolean): Promise<void> {
@@ -196,24 +206,56 @@ onMounted(() => daily.loadMedia())
     />
 
     <div v-if="daily.media.length" class="media-grid">
-      <article v-for="item in daily.media" :key="item.id" class="panel media-card">
-        <div class="media-card-heading">
-          <div>
-            <span class="eyebrow">{{ item.media_type === 'tv' ? '电视剧' : '电影' }}</span>
-            <h2>{{ item.title }}</h2>
-            <p>
-              {{ item.year ?? '年份未知' }} ·
-              {{ item.regions.length ? item.regions.join(' / ') : '地区未知' }} ·
-              TMDB {{ item.tmdb_id ?? '待识别' }}
-            </p>
+      <article v-for="item in daily.media" :key="item.id" class="panel media-card cinematic-card">
+        <div class="media-poster-container">
+          <img
+            v-if="getPosterUrl(item.poster_path, item.id)"
+            :src="getPosterUrl(item.poster_path, item.id)!"
+            :alt="item.title"
+            class="media-poster-img"
+            loading="lazy"
+            @error="handleImageError(item.id)"
+          />
+          <div v-else class="media-poster-placeholder">
+            <span class="poster-placeholder-icon">
+              <svg v-if="item.media_type === 'tv'" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect width="20" height="15" x="2" y="7" rx="2" ry="2" /><polyline points="17 2 12 7 7 2" /></svg>
+              <svg v-else width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4" /></svg>
+            </span>
+            <span class="poster-placeholder-letter">{{ item.title.slice(0, 1) }}</span>
           </div>
-          <StatusPill :status="item.state" :label="mediaStateLabel(item.state)" />
+          <div class="poster-overlay-gradient"></div>
+          <div class="poster-badges">
+            <span class="media-type-tag" :class="item.media_type">
+              {{ item.media_type === 'tv' ? '电视剧' : '电影' }}
+            </span>
+            <StatusPill :status="item.state" :label="mediaStateLabel(item.state)" />
+          </div>
         </div>
-        <p v-if="item.attention_reason" class="inline-warning">{{ item.attention_reason }}</p>
-        <RouterLink class="card-action" :to="`/library/${item.id}/resources`">
-          {{ item.tmdb_id ? '查找资源' : '确认影视信息' }}
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
-        </RouterLink>
+
+        <div class="media-card-body">
+          <div class="media-card-heading">
+            <div class="media-card-title-wrap">
+              <h2 :title="item.title">{{ item.title }}</h2>
+              <p v-if="item.original_title && item.original_title !== item.title" class="media-original-title">
+                {{ item.original_title }}
+              </p>
+              <div class="media-meta-tags">
+                <span class="meta-tag">{{ item.year ?? '未知年份' }}</span>
+                <span class="meta-dot">·</span>
+                <span class="meta-tag">{{ item.regions.length ? item.regions.join('/') : '地区未知' }}</span>
+                <span class="meta-dot">·</span>
+                <span class="meta-tag tmdb-tag" :class="{ 'is-identified': Boolean(item.tmdb_id) }">
+                  TMDB {{ item.tmdb_id ?? '待识别' }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <p v-if="item.attention_reason" class="inline-warning">{{ item.attention_reason }}</p>
+          <RouterLink class="card-action" :to="`/library/${item.id}/resources`">
+            <span>{{ item.tmdb_id ? '查找资源' : '确认影视信息' }}</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
+          </RouterLink>
+        </div>
       </article>
     </div>
     <Pagination
