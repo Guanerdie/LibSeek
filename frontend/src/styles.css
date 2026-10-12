@@ -1027,3 +1027,53 @@ html, body {
   border-color: #4c669f;
   background: #4c669f;
 }
+
+/* 自动化策略「基本」页：左边一列是三个短设置，右边是带分布图的最低评分，
+   两列等高，不再是四个高矮不一的格子。 */
+.automation-policy-panel .tab-panel > .automation-basic-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  align-items: stretch;
+}
+
+.automation-basic-grid > .configuration-checkbox {
+  align-items: center !important;
+  min-height: 56px !important;
+  padding: 12px 14px !important;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.automation-basic-grid > .score-field {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  display: flex !important;
+  flex-direction: column;
+}
+
+.automation-basic-grid > .score-field .score-chart {
+  flex: 1;
+  min-height: 72px;
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .automation-policy-panel .tab-panel > .automation-basic-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .automation-basic-grid > .score-field {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
+
+/* 年份范围：两个下拉框。 */
+.automation-policy-panel .tab-panel > .filter-heading > .automation-year-range {
+  grid-template-columns: repeat(2, minmax(0, 180px));
+  align-items: end;
+  justify-content: start;
+}
+
+.automation-year-range > .field-hint {
+  grid-column: 1 / -1;
+}

@@ -107,6 +107,34 @@ const mediaOptionsPage = ref(1)
 const mediaOptionsPageSize = 10
 const mediaOptionsLoading = ref(false)
 const yearOptions = ref<number[]>([])
+
+/** The policy stores a list of years; the page edits it as one range. */
+function setYearRange(from: number | null, to: number | null): void {
+  if (from === null || to === null) {
+    form.years = []
+    return
+  }
+  const [low, high] = from <= to ? [from, to] : [to, from]
+  form.years = Array.from({ length: high - low + 1 }, (_, index) => high - index)
+}
+const yearFrom = computed<number | null>({
+  get: () => (form.years.length ? Math.min(...form.years) : null),
+  // Picking the first end of a range leaves the other end open as far as the list goes.
+  set: (year) => setYearRange(year, year === null ? null : (yearTo.value ?? yearOptions.value[0] ?? year)),
+})
+const yearTo = computed<number | null>({
+  get: () => (form.years.length ? Math.max(...form.years) : null),
+  set: (year) =>
+    setYearRange(year === null ? null : (yearFrom.value ?? yearOptions.value.at(-1) ?? year), year),
+})
+const yearsHaveGaps = computed(
+  () => form.years.length > 0 && form.years.length !== yearTo.value! - yearFrom.value! + 1,
+)
+const yearSummary = computed(() => {
+  if (!form.years.length) return '不限年份'
+  if (yearFrom.value === yearTo.value) return `${yearFrom.value} 年`
+  return yearsHaveGaps.value ? `${form.years.length} 个年份` : `${yearFrom.value}–${yearTo.value} 年`
+})
 const mediaQuery = reactive({
   query: '',
   region: '' as DailyMediaRegion | '',
@@ -138,7 +166,7 @@ const automationSummary = computed(() => [
     label: '搜索范围',
     value: form.scope_mode === 'filters' ? '规则筛选' : '手动清单',
     detail: form.scope_mode === 'filters'
-      ? `${form.media_types.length} 种类型 · ${form.years.length ? `${form.years.length} 个年份` : '不限年份'}`
+      ? `${form.media_types.length} 种类型 · ${yearSummary.value}`
       : `${form.selected_media_ids.length} 部影视`,
     tone: 'violet',
     icon: '⌁',
@@ -545,7 +573,7 @@ onBeforeUnmount(() => {
       <!-- v-show, not v-if: a field on a hidden tab still belongs to the form
            and is saved with it. -->
       <div v-show="activeTab === 'basic'" class="tab-panel" role="tabpanel">
-        <div class="configuration-field-grid automation-primary-grid">
+        <div class="configuration-field-grid automation-primary-grid automation-basic-grid">
           <label class="configuration-checkbox">
             <input v-model="form.enabled" name="enabled" type="checkbox" /> 启用自动化策略
           </label>
@@ -636,11 +664,24 @@ onBeforeUnmount(() => {
             <strong>年份范围</strong>
             <p class="muted">不选择年份时处理全部年份；选择后只处理影视首播年份匹配的项目。</p>
           </div>
-          <div v-if="yearOptions.length" class="configuration-field-grid automation-year-options">
-            <label v-for="year in yearOptions" :key="year" class="configuration-checkbox">
-              <input v-model="form.years" :name="`year-${year}`" type="checkbox" :value="year" />
-              {{ year }}
+          <div v-if="yearOptions.length" class="configuration-field-grid automation-year-range">
+            <label>
+              从
+              <select v-model="yearFrom" name="year_from">
+                <option :value="null">不限</option>
+                <option v-for="year in yearOptions" :key="year" :value="year">{{ year }} 年</option>
+              </select>
             </label>
+            <label>
+              到
+              <select v-model="yearTo" name="year_to">
+                <option :value="null">不限</option>
+                <option v-for="year in yearOptions" :key="year" :value="year">{{ year }} 年</option>
+              </select>
+            </label>
+            <span v-if="yearsHaveGaps" class="field-hint">
+              当前保存的是 {{ form.years.length }} 个不连续的年份；在这里修改后会变成连续的范围。
+            </span>
           </div>
           <p v-else class="muted">当前媒体库还没有可用年份。</p>
         </div>

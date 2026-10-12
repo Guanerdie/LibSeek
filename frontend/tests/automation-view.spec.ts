@@ -209,13 +209,27 @@ describe('automation settings', () => {
     const wrapper = mount(AutomationView)
     await flushPromises()
 
-    await wrapper.get('input[name="year-2025"]').setValue(true)
+    const from = wrapper.get<HTMLSelectElement>('select[name="year_from"]')
+    const to = wrapper.get<HTMLSelectElement>('select[name="year_to"]')
+    expect(from.element.value).toBe('2026')
+    expect(to.element.value).toBe('2026')
+
+    // A range is saved as every year in it.
+    await from.setValue(2024)
     await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
     await flushPromises()
 
-    expect(mocks.updatePolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ years: [2026, 2025] }),
+    expect(mocks.updatePolicy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ years: [2026, 2025, 2024] }),
     )
+
+    // Either end set to "no limit" clears the whole restriction.
+    await to.setValue(null)
+    expect(from.element.selectedOptions[0].text).toBe('不限')
+    await wrapper.get('form[aria-labelledby="automation-policy-title"]').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.updatePolicy).toHaveBeenLastCalledWith(expect.objectContaining({ years: [] }))
   })
 
   it('places the search strategy before the run history', async () => {
