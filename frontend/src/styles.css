@@ -413,25 +413,43 @@ body{color:var(--text);font-size:13px;line-height:1.55;background:var(--bg)}
 /* ========================================================================= */
 
 :root {
+  /* The layers above read these, so every panel, field and label follows
+     the dark palette instead of the warm light one. */
+  color: #e8edf7;
+  color-scheme: dark;
+  --bg: #090d15;
+  --panel: #131b28;
+  --surface: #0f1622;
+  --text: #e8edf7;
+  --muted: #8e9bb0;
+  --line: rgba(255, 255, 255, 0.1);
+  --blue: #8aa6c9;
+  --cyan: #8fb3b8;
+  --violet: #a9b9d8;
+  --pink: #a9a3c4;
+  --accent: #8fa5d1;
+  --accent-soft: rgba(124, 147, 196, 0.16);
+  --warning: #c9a36b;
+  --danger: #cf8a8f;
+  --green: #7fb89a;
+  --raised: 0 10px 28px -6px rgba(0, 0, 0, 0.45);
+  --raised-sm: 0 5px 16px -4px rgba(0, 0, 0, 0.4);
   --unin-obsidian: #090d15;
   --unin-surface-base: #0f1622;
   --unin-surface-card: rgba(18, 26, 38, 0.78);
   --unin-surface-card-hover: rgba(24, 34, 50, 0.92);
   --unin-surface-glass: rgba(15, 22, 34, 0.75);
   --unin-border-subtle: rgba(255, 255, 255, 0.08);
-  --unin-border-highlight: rgba(99, 164, 255, 0.35);
-  --unin-accent-electric: #5477ff;
-  --unin-accent-gradient: linear-gradient(135deg, #446cf6 0%, #6857f3 55%, #9b51e0 100%);
-  --unin-accent-glow: 0 8px 24px -4px rgba(84, 119, 255, 0.32);
+  --unin-border-highlight: rgba(255, 255, 255, 0.2);
+  --unin-accent-electric: #4c669f;
+  --unin-accent-gradient: #4c669f;
+  --unin-accent-glow: none;
   --unin-shadow-card: 0 10px 28px -6px rgba(0, 0, 0, 0.45), 0 2px 6px -1px rgba(0, 0, 0, 0.3);
-  --unin-shadow-hover: 0 18px 40px -10px rgba(0, 0, 0, 0.6), 0 0 25px -4px rgba(84, 119, 255, 0.22);
+  --unin-shadow-hover: 0 14px 32px -10px rgba(0, 0, 0, 0.6);
 }
 
 html, body {
   background:
-    radial-gradient(ellipse 80% 50% at 50% -12%, rgba(68, 108, 246, 0.14), transparent 70%),
-    radial-gradient(ellipse 60% 40% at 90% 20%, rgba(155, 81, 224, 0.08), transparent 60%),
-    radial-gradient(ellipse 50% 30% at 10% 60%, rgba(0, 210, 211, 0.05), transparent 50%),
     var(--unin-obsidian);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -448,13 +466,13 @@ html, body {
 .topbar-brand .brand-mark {
   background: var(--unin-accent-gradient) !important;
   border-radius: 12px !important;
-  box-shadow: 0 4px 18px rgba(84, 119, 255, 0.4) !important;
+  box-shadow: none !important;
   transition: transform 0.25s ease, box-shadow 0.25s ease;
 }
 
 .topbar-brand:hover .brand-mark {
   transform: scale(1.05);
-  box-shadow: 0 6px 22px rgba(84, 119, 255, 0.55) !important;
+  box-shadow: none !important;
 }
 
 .topbar-search {
@@ -467,10 +485,17 @@ html, body {
 .topbar-search:hover, .topbar-search:focus-within {
   border-color: var(--unin-border-highlight) !important;
   background: rgba(20, 29, 45, 0.9) !important;
-  box-shadow: 0 0 16px -2px rgba(84, 119, 255, 0.25) !important;
+  box-shadow: none !important;
+}
+
+.topbar-nav {
+  gap: 6px !important;
 }
 
 .topbar-nav a {
+  height: auto !important;
+  padding: 7px 14px !important;
+  border: 1px solid transparent !important;
   border-radius: 10px !important;
   transition: all 0.2s ease !important;
   font-weight: 500 !important;
@@ -482,10 +507,68 @@ html, body {
 }
 
 .topbar-nav a.router-link-active {
-  background: rgba(84, 119, 255, 0.16) !important;
-  border: 1px solid rgba(84, 119, 255, 0.3) !important;
-  color: #9eb5ff !important;
-  box-shadow: 0 2px 10px rgba(84, 119, 255, 0.18) !important;
+  background: rgba(124, 147, 196, 0.16) !important;
+  border: 1px solid rgba(124, 147, 196, 0.3) !important;
+  color: #a9b9d8 !important;
+  box-shadow: none !important;
+}
+
+/* The pill marks the current page; the old underline is not needed. */
+.topbar-nav a.router-link-active::after {
+  display: none !important;
+}
+
+/* Light tints left over from the warm palette. */
+.button:hover:not(:disabled) {
+  color: #fff;
+  border-color: var(--unin-border-highlight);
+  background: var(--unin-surface-card-hover);
+}
+
+.status-pill,
+.config-state {
+  background: rgba(142, 155, 176, 0.14);
+}
+
+.status-pill.activity-cleanup {
+  background: rgba(207, 138, 143, 0.12);
+}
+
+.status-pill.activity-download,
+.status-pill.activity-auto {
+  background: rgba(138, 166, 201, 0.12);
+}
+
+.status-pill.activity-library,
+.status-pill.activity-manual,
+.configuration-message.success {
+  background: rgba(127, 184, 154, 0.12);
+}
+
+.inline-warning,
+.cleanup-unsaved,
+.configuration-message.warning {
+  color: var(--warning);
+  background: rgba(201, 163, 107, 0.12);
+}
+
+.session-error,
+.login-error,
+.inline-error,
+.configuration-message.error {
+  color: var(--danger);
+  background: rgba(207, 138, 143, 0.12);
+}
+
+.configuration-message.pending {
+  color: var(--muted);
+}
+
+.configuration-message.pending,
+.reason-list li,
+.automation-run-card,
+.automation-job-card {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 /* 统计概览卡片高光 */
@@ -518,9 +601,7 @@ html, body {
   font-size: 26px !important;
   font-weight: 700 !important;
   letter-spacing: -0.03em !important;
-  background: linear-gradient(180deg, #ffffff 40%, #b8c7db 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--text) !important;
 }
 
 /* 状态药丸与发光指示灯 (StatusPill) */
@@ -555,9 +636,9 @@ html, body {
 .status-pill.state-completed,
 .status-pill.state-complete,
 .config-state.configured {
-  color: #38e2a4 !important;
-  background: rgba(54, 211, 154, 0.12) !important;
-  border-color: rgba(54, 211, 154, 0.25) !important;
+  color: #7fb89a !important;
+  background: rgba(127, 184, 154, 0.12) !important;
+  border-color: rgba(127, 184, 154, 0.25) !important;
 }
 .status-pill.state-ready .status-indicator,
 .status-pill.state-candidates .status-indicator,
@@ -565,8 +646,7 @@ html, body {
 .status-pill.state-seeding .status-indicator,
 .status-pill.state-completed .status-indicator,
 .status-pill.state-complete .status-indicator {
-  background: #38e2a4;
-  box-shadow: 0 0 8px #38e2a4;
+  background: #7fb89a;
 }
 
 /* 蓝色进行系：IDENTIFYING, SEARCHING, DOWNLOADING, SUBMITTING, QUEUED */
@@ -576,9 +656,9 @@ html, body {
 .status-pill.state-submitting,
 .status-pill.state-queued,
 .status-pill.state-downloading {
-  color: #63a4ff !important;
-  background: rgba(99, 164, 255, 0.12) !important;
-  border-color: rgba(99, 164, 255, 0.26) !important;
+  color: #8aa6c9 !important;
+  background: rgba(138, 166, 201, 0.12) !important;
+  border-color: rgba(138, 166, 201, 0.26) !important;
 }
 .status-pill.state-identifying .status-indicator,
 .status-pill.state-searching .status-indicator,
@@ -586,8 +666,7 @@ html, body {
 .status-pill.state-submitting .status-indicator,
 .status-pill.state-queued .status-indicator,
 .status-pill.state-downloading .status-indicator {
-  background: #63a4ff;
-  box-shadow: 0 0 8px #63a4ff;
+  background: #8aa6c9;
 }
 
 /* 琥珀警告系：MISSING, NEEDS_ATTENTION, PAUSED, OUTCOME_UNKNOWN */
@@ -596,35 +675,33 @@ html, body {
 .status-pill.state-needs-attention,
 .status-pill.state-outcome-unknown,
 .config-state.pending {
-  color: #f7b764 !important;
-  background: rgba(242, 179, 92, 0.12) !important;
-  border-color: rgba(242, 179, 92, 0.28) !important;
+  color: #c9a36b !important;
+  background: rgba(201, 163, 107, 0.12) !important;
+  border-color: rgba(201, 163, 107, 0.28) !important;
 }
 .status-pill.state-missing .status-indicator,
 .status-pill.state-paused .status-indicator,
 .status-pill.state-needs-attention .status-indicator,
 .status-pill.state-outcome-unknown .status-indicator {
-  background: #f7b764;
-  box-shadow: 0 0 8px #f7b764;
+  background: #c9a36b;
 }
 
 /* 红色错误系：FAILED, ERROR */
 .status-pill.state-failed,
 .status-pill.state-error {
-  color: #ff758f !important;
-  background: rgba(240, 120, 140, 0.12) !important;
-  border-color: rgba(240, 120, 140, 0.28) !important;
+  color: #cf8a8f !important;
+  background: rgba(207, 138, 143, 0.12) !important;
+  border-color: rgba(207, 138, 143, 0.28) !important;
 }
 .status-pill.state-failed .status-indicator,
 .status-pill.state-error .status-indicator {
-  background: #ff758f;
-  box-shadow: 0 0 8px #ff758f;
+  background: #cf8a8f;
 }
 
 /* 电影级画报卡片 (Cinematic Media Card) */
 .media-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)) !important;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)) !important;
   gap: 20px !important;
 }
 
@@ -651,7 +728,8 @@ html, body {
 .media-poster-container {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 10;
+  /* TMDB posters are 2:3; anything wider crops them. */
+  aspect-ratio: 2 / 3;
   overflow: hidden;
   background: #0a0f18;
 }
@@ -676,7 +754,7 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: linear-gradient(135deg, #131d2e 0%, #0d1420 100%);
+  background: #101826;
   color: var(--muted);
   position: relative;
   user-select: none;
@@ -722,6 +800,12 @@ html, body {
   pointer-events: auto;
 }
 
+/* Readable on a bright poster as well as a dark one. */
+.poster-badges .status-pill,
+.poster-badges .media-type-tag {
+  background-color: rgba(9, 13, 21, 0.72) !important;
+}
+
 .media-type-tag {
   font-size: 10px;
   font-weight: 700;
@@ -734,15 +818,15 @@ html, body {
 }
 
 .media-type-tag.tv {
-  background: rgba(57, 208, 216, 0.18);
-  color: #39d0d8;
-  border-color: rgba(57, 208, 216, 0.3);
+  background: rgba(143, 179, 184, 0.18);
+  color: #8fb3b8;
+  border-color: rgba(143, 179, 184, 0.3);
 }
 
 .media-type-tag.movie {
-  background: rgba(146, 120, 255, 0.18);
-  color: #b7a5ff;
-  border-color: rgba(146, 120, 255, 0.3);
+  background: rgba(169, 163, 196, 0.18);
+  color: #a9a3c4;
+  border-color: rgba(169, 163, 196, 0.3);
 }
 
 .media-card-body {
@@ -774,7 +858,7 @@ html, body {
 }
 
 .media-card.cinematic-card:hover .media-card-heading h2 {
-  color: #92b5ff !important;
+  color: #a9b9d8 !important;
 }
 
 .media-original-title {
@@ -813,8 +897,8 @@ html, body {
 }
 
 .tmdb-tag.is-identified {
-  background: rgba(54, 211, 154, 0.1);
-  color: #55e6b5;
+  background: rgba(127, 184, 154, 0.1);
+  color: #7fb89a;
 }
 
 /* 卡片主操作按钮条升级 */
@@ -826,9 +910,9 @@ html, body {
   gap: 7px !important;
   padding: 9px 14px !important;
   border-radius: 10px !important;
-  background: rgba(84, 119, 255, 0.12) !important;
-  border: 1px solid rgba(84, 119, 255, 0.25) !important;
-  color: #8da8ff !important;
+  background: rgba(124, 147, 196, 0.12) !important;
+  border: 1px solid rgba(124, 147, 196, 0.25) !important;
+  color: #a9b9d8 !important;
   font-size: 12px !important;
   font-weight: 600 !important;
   text-decoration: none !important;
@@ -847,7 +931,7 @@ html, body {
   background: var(--unin-accent-gradient) !important;
   color: #ffffff !important;
   border-color: transparent !important;
-  box-shadow: 0 4px 18px rgba(84, 119, 255, 0.42) !important;
+  box-shadow: none !important;
   transform: translateY(-1px);
 }
 
@@ -873,12 +957,12 @@ html, body {
 .button.primary {
   background: var(--unin-accent-gradient) !important;
   border: 1px solid rgba(255, 255, 255, 0.18) !important;
-  box-shadow: 0 4px 16px rgba(84, 119, 255, 0.35) !important;
+  box-shadow: none !important;
   color: #ffffff !important;
 }
 
 .button.primary:hover:not(:disabled) {
-  box-shadow: 0 6px 22px rgba(84, 119, 255, 0.5) !important;
+  box-shadow: none !important;
 }
 
 /* 候选资源卡片升级 (ResourcesView) */
@@ -900,15 +984,13 @@ html, body {
 .candidate-score {
   font-size: 26px !important;
   font-weight: 800 !important;
-  background: linear-gradient(135deg, #7053f3 0%, #39d0d8 100%) !important;
-  -webkit-background-clip: text !important;
-  -webkit-text-fill-color: transparent !important;
+  color: var(--text) !important;
 }
 
 .candidate-free-status.is-free {
-  color: #38e2a4 !important;
-  background: rgba(56, 226, 164, 0.14) !important;
-  border: 1px solid rgba(56, 226, 164, 0.3) !important;
+  color: #7fb89a !important;
+  background: rgba(127, 184, 154, 0.14) !important;
+  border: 1px solid rgba(127, 184, 154, 0.3) !important;
   font-weight: 600;
 }
 
@@ -930,7 +1012,18 @@ html, body {
 }
 
 .progress-track span {
-  background: linear-gradient(90deg, #00d2d3 0%, #5477ff 50%, #9b51e0 100%) !important;
-  box-shadow: 0 0 12px rgba(84, 119, 255, 0.5) !important;
+  background: #6f89bd !important;
+  box-shadow: none !important;
   border-radius: 999px !important;
+}
+
+/* Solid fills where an older layer still paints a gradient or a light accent. */
+.brand-mark {
+  background: #4c669f;
+  box-shadow: none;
+}
+
+.pagination-page.active {
+  border-color: #4c669f;
+  background: #4c669f;
 }
