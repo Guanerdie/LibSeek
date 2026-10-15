@@ -207,6 +207,9 @@ body{color:var(--text);font-size:13px;line-height:1.55;background:var(--bg)}
 .topbar-search kbd{margin-left:auto;padding:2px 5px;color:var(--muted);border:1px solid var(--line);border-radius:4px;font-family:inherit;font-size:9px}
 .topbar-live{display:inline-flex;align-items:center;gap:6px;color:var(--sage,#77836a);font-size:11px;white-space:nowrap}
 .topbar-live i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:none}
+.topbar-live[data-status="checking"]{color:var(--muted)}
+.topbar-live[data-status="error"]{color:var(--danger)}
+.topbar-live[data-status="checking"] i,.topbar-live[data-status="error"] i{background:currentColor}
 .topbar-actions,.session-summary{display:flex;align-items:center;gap:10px}
 .session-summary>span{display:grid;gap:1px;text-align:right}
 .session-summary strong{color:var(--text);font-size:11px}

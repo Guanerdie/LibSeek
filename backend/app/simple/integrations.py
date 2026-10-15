@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -55,6 +56,7 @@ from app.simple.models import (
 )
 from app.simple.service import complete_search, queue_download
 
+_logger = logging.getLogger(__name__)
 _EPISODE_CODE = re.compile(r"^S(\d{2})E(\d{2,5})$")
 # qBittorrent does not list a torrent the instant it is accepted, so a download
 # is only declared missing once it has had time to show up.
@@ -818,6 +820,7 @@ async def run_release_search(
         else None
     )
     stored: list[ReleaseCandidate] = []
+    media_id = media.id
     try:
         for site_id in search.site_ids:
             adapter = adapter_factory(site_id)
@@ -842,12 +845,25 @@ async def run_release_search(
                 stored.append(_candidate_from_adapter(search.id, scored))
         return await complete_search(session, search_id=search.id, candidates=stored)
     except Exception as exc:
-        search.state = SearchState.FAILED
-        search.error_message = exc.message if isinstance(exc, AppError) else "PT 搜索失败"
-        search.finished_at = utc_now()
-        media.state = MediaState.NEEDS_ATTENTION
-        media.attention_reason = search.error_message
-        await session.commit()
+        # A database failure leaves the transaction unusable; rollback also
+        # expires ORM objects, so reload them before recording the outcome.
+        await session.rollback()
+        try:
+            failed_search = await session.get(ReleaseSearch, search_id)
+            failed_media = await session.get(LibraryMediaItem, media_id)
+            message = exc.message if isinstance(exc, AppError) else "PT 搜索失败"
+            if failed_search is not None:
+                failed_search.state = SearchState.FAILED
+                failed_search.error_message = message
+                failed_search.finished_at = utc_now()
+            if failed_media is not None:
+                failed_media.state = MediaState.NEEDS_ATTENTION
+                failed_media.attention_reason = message
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            _logger.exception("Unable to record a failed release search")
+        # Keep the original exception, including the initial database failure.
         raise
 
 

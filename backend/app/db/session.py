@@ -20,6 +20,9 @@ if engine.url.get_backend_name() == "sqlite":
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA busy_timeout=5000")
+        # Readers (lists, status polling) must not block a background writer's
+        # COMMIT. WAL keeps those operations on separate snapshots.
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
 

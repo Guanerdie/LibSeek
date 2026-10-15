@@ -191,6 +191,7 @@ async def execute_recorded_automation_run(
             # Scheduled runs used to do this in ``run_scheduled_cycle`` only,
             # which meant manual runs and retries searched the previous snapshot.
             await _sync_nextfind_before_automation(session)
+            await session.refresh(run)
             await automation.run_automation(
                 session,
                 adapter_factory=lambda site_id: build_pt_site(
@@ -209,19 +210,22 @@ async def execute_recorded_automation_run(
         raise
     except Exception as exc:
         message = exc.message if isinstance(exc, AppError) else "自动化运行失败"
+        if not isinstance(exc, AppError):
+            _logger.exception("Unexpected automation run failure", exc_info=exc)
         try:
             await session.rollback()
             await _fail_automation_run(session, run_id, message)
         except asyncio.CancelledError:
             raise
         except Exception as persist_exc:
+            # A failed COMMIT can retain SQLite's write lock. Release the
+            # original connection before another session attempts recovery.
+            await session.close()
             _logger.warning(
                 "Unable to persist automation run failure with its original session",
                 exc_info=persist_exc,
             )
             await _persist_automation_run_failure(run_id, message)
-        if not isinstance(exc, AppError):
-            _logger.exception("Unexpected automation run failure", exc_info=exc)
 
 
 async def _sync_nextfind_before_automation(session: AsyncSession) -> None:
@@ -237,6 +241,7 @@ async def _sync_nextfind_before_automation(session: AsyncSession) -> None:
         nextfind = build_nextfind()
         await sync_nextfind(session, nextfind)
     except AppError as exc:
+        await session.rollback()
         session.add(ActivityLog(event="AUTOMATION_SYNC_FAILED", message=exc.message))
         await session.commit()
     finally:
@@ -264,7 +269,7 @@ async def _execute_manual_automation_run(run_id: str) -> None:
 
 async def _persist_automation_run_failure(run_id: str, message: str) -> None:
     retry_delay = 1.0
-    while True:
+    for attempt in range(5):
         try:
             async with SessionFactory() as session:
                 await _fail_automation_run(session, run_id, message)
@@ -272,6 +277,10 @@ async def _persist_automation_run_failure(run_id: str, message: str) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if attempt == 4:
+                # Let the scheduler/session owner unwind instead of keeping
+                # the whole automation runner inside an endless retry loop.
+                raise
             _logger.warning(
                 "Unable to persist automation run failure; retrying",
                 exc_info=exc,

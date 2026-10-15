@@ -1,12 +1,21 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from '../src/App.vue'
 import router from '../src/router'
 import { useAuthStore } from '../src/stores/auth'
 
+enableAutoUnmount(afterEach)
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
+})
+
 beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(() =>
+    Promise.resolve(new Response(JSON.stringify({ status: 'ok' }))),
+  ))
   const pinia = createPinia()
   setActivePinia(pinia)
   const auth = useAuthStore()
@@ -15,6 +24,25 @@ beforeEach(() => {
 })
 
 describe('authenticated navigation', () => {
+  it('shows health failures, recovers on the next poll, and stops polling on unmount', async () => {
+    vi.useFakeTimers()
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{}', { status: 503 }))
+    await router.push('/library')
+    const wrapper = mount(App, {
+      global: { plugins: [router], stubs: { RouterView: true, RouterLink: true } },
+    })
+    expect(wrapper.find('[role="status"]').text()).toContain('检查服务中')
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toContain('服务异常')
+    await vi.advanceTimersByTimeAsync(30_000)
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').text()).toContain('服务正常')
+    expect(fetch).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
   it('exposes only the daily routes', async () => {
     expect(router.resolve('/login').matched).toHaveLength(1)
     expect(router.resolve('/configuration').matched).toHaveLength(1)

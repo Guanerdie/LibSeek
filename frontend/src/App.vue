@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from './stores/auth'
@@ -22,6 +22,42 @@ const isPublicRoute = computed(() => Boolean(route.meta.public))
 const activeNavItem = computed(() =>
   primaryNavItems.find((item) => route.path === item.to || route.path.startsWith(`${item.to}/`)),
 )
+
+const serviceStatus = ref<'checking' | 'ok' | 'error'>('checking')
+const serviceStatusLabel = computed(() =>
+  ({ checking: '检查服务中', ok: '服务正常', error: '服务异常' })[serviceStatus.value],
+)
+let healthTimer: ReturnType<typeof setInterval> | undefined
+let healthRequest: AbortController | undefined
+
+async function checkHealth(): Promise<void> {
+  if (isPublicRoute.value || healthRequest) return
+  const controller = new AbortController()
+  healthRequest = controller
+  const timeout = setTimeout(() => controller.abort(), 5000)
+  try {
+    const response = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' })
+    const result = response.ok ? await response.json() : null
+    serviceStatus.value = result?.status === 'ok' ? 'ok' : 'error'
+  } catch {
+    serviceStatus.value = 'error'
+  } finally {
+    clearTimeout(timeout)
+    healthRequest = undefined
+  }
+}
+
+onMounted(() => {
+  void checkHealth()
+  healthTimer = setInterval(() => void checkHealth(), 30_000)
+})
+watch(isPublicRoute, (publicRoute) => {
+  if (!publicRoute) void checkHealth()
+})
+onUnmounted(() => {
+  clearInterval(healthTimer)
+  healthRequest?.abort()
+})
 
 async function logout(): Promise<void> {
   if (await auth.logout()) await router.replace('/login')
@@ -58,7 +94,9 @@ async function logout(): Promise<void> {
             <span>搜索缺失影视</span>
             <kbd>Ctrl K</kbd>
           </RouterLink>
-          <span class="topbar-live"><i></i> 服务正常</span>
+          <span class="topbar-live" :data-status="serviceStatus" role="status">
+            <i aria-hidden="true"></i> {{ serviceStatusLabel }}
+          </span>
         </div>
         <div class="topbar-actions">
           <div v-if="auth.principal" class="session-summary">
