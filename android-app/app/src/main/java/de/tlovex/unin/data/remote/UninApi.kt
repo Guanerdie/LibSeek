@@ -1,6 +1,17 @@
 package de.tlovex.unin.data.remote
 
+import de.tlovex.unin.data.model.ActivityCategory
+import de.tlovex.unin.data.model.ActivityPageDto
 import de.tlovex.unin.data.model.AutomationJobDto
+import de.tlovex.unin.data.model.CleanupHoldBulkResultDto
+import de.tlovex.unin.data.model.CleanupHoldBulkUpdateDto
+import de.tlovex.unin.data.model.CleanupHoldUpdateDto
+import de.tlovex.unin.data.model.CleanupPolicyUpdateDto
+import de.tlovex.unin.data.model.CleanupPreviewDto
+import de.tlovex.unin.data.model.ImportBatchDto
+import de.tlovex.unin.data.model.ImportMatchRequestDto
+import de.tlovex.unin.data.model.ImportMatchResultDto
+import de.tlovex.unin.data.model.ImportStartRequestDto
 import de.tlovex.unin.data.model.AutomationJobPageDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
@@ -179,4 +190,40 @@ interface UninApi {
 
     @GET("api/stats")
     suspend fun stats(): StatsDto
+
+    @GET("api/downloads/cleanup-preview")
+    suspend fun cleanupPreview(): CleanupPreviewDto
+
+    @PUT("api/downloads/{downloadId}/cleanup-hold")
+    suspend fun setCleanupHold(
+        @Path("downloadId") downloadId: String,
+        @Body request: CleanupHoldUpdateDto,
+    ): DownloadDto
+
+    @POST("api/downloads/cleanup-hold")
+    suspend fun setCleanupHolds(@Body request: CleanupHoldBulkUpdateDto): CleanupHoldBulkResultDto
+
+    @PUT("api/automation/policy")
+    suspend fun updateCleanupPolicy(@Body policy: CleanupPolicyUpdateDto): AutomationPolicyDto
+
+    @GET("api/activity")
+    suspend fun activity(
+        @Query("category") category: ActivityCategory? = null,
+        @Query("trigger") trigger: String? = null,
+        @Query("query") query: String? = null,
+        @Query("page") page: Int = 1,
+        @Query("page_size") pageSize: Int = 30,
+    ): ActivityPageDto
+
+    @POST("api/library/import/match")
+    suspend fun matchImport(@Body request: ImportMatchRequestDto): ImportMatchResultDto
+
+    @POST("api/library/import")
+    suspend fun startImport(@Body request: ImportStartRequestDto): ImportBatchDto
+
+    @GET("api/library/import")
+    suspend fun importStatus(): ImportBatchDto
+
+    @POST("api/library/import/cancel")
+    suspend fun cancelImport(): ImportBatchDto
 }

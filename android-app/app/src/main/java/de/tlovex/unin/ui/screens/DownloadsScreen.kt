@@ -17,6 +17,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import de.tlovex.unin.ui.DownloadItemUi
 import de.tlovex.unin.ui.DownloadState
 import de.tlovex.unin.ui.UninCallbacks
+import de.tlovex.unin.ui.UninDestination
 import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.NeumorphicCard
 import de.tlovex.unin.ui.components.PaginationBar
@@ -69,6 +71,7 @@ fun DownloadsScreen(
         contentPadding = contentPadding,
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        item { DownloadsTabs(UninDestination.Downloads, callbacks.onDestinationSelected) }
         item {
             SectionHeading(
                 title = "下载任务",
@@ -118,6 +121,7 @@ fun DownloadsScreen(
                     item = item,
                     callbacks = callbacks,
                     actionsEnabled = !state.isBusy,
+                    holdEnabled = state.canOperate && state.cleanup.changingId == null,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -138,6 +142,7 @@ private fun DownloadCard(
     item: DownloadItemUi,
     callbacks: UninCallbacks,
     actionsEnabled: Boolean,
+    holdEnabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val statusColor = when (item.state) {
@@ -188,6 +193,26 @@ private fun DownloadCard(
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (item.state == DownloadState.OutcomeUnknown) UninWarning else UninDanger,
                 )
+            }
+            if (item.cleanupText != null || item.canChangeHold) {
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        item.cleanupText ?: "满足条件后会被自动清理",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (item.held) UninSuccess else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (item.canChangeHold) {
+                        Text("保留", style = MaterialTheme.typography.labelMedium)
+                        Spacer(Modifier.size(6.dp))
+                        Switch(
+                            checked = item.held,
+                            onCheckedChange = { callbacks.onSetCleanupHold(item.id, it) },
+                            enabled = holdEnabled,
+                        )
+                    }
+                }
             }
             if (item.state == DownloadState.Failed) {
                 Spacer(Modifier.height(8.dp))

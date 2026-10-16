@@ -188,6 +188,7 @@ fun AutomationScreen(
                     PolicySummaryRow("媒体类型", policy.mediaTypesText)
                     PolicySummaryRow("选择范围", policy.scopeText)
                     PolicySummaryRow("地区", policy.regionsText)
+                    PolicySummaryRow("年份", policy.yearsText)
                     PolicySummaryRow("自动识别", if (policy.autoIdentify) "开启" else "关闭")
                     PolicySummaryRow(
                         "带风险候选",

@@ -67,6 +67,17 @@ data class AutomationPolicyDto(
     @SerializedName("weight_seeders") val weightSeeders: Int = 13,
     @SerializedName("weight_promotion") val weightPromotion: Int = 3,
     @SerializedName("seeder_floor") val seederFloor: Int = 3,
+    // Not edited by the automation screen, so never echoed back by toUpdate():
+    // the server keeps what it has for fields a request leaves out.
+    val years: List<Int>? = null,
+    @SerializedName("cleanup_enabled") val cleanupEnabled: Boolean? = null,
+    @SerializedName("cleanup_dry_run") val cleanupDryRun: Boolean? = null,
+    @SerializedName("cleanup_after_days") val cleanupAfterDays: Int? = null,
+    @SerializedName("cleanup_min_seeding_days") val cleanupMinSeedingDays: Int? = null,
+    @SerializedName("cleanup_grace_days") val cleanupGraceDays: Int? = null,
+    @SerializedName("cleanup_require_library_confirmed") val cleanupRequireLibraryConfirmed: Boolean? = null,
+    @SerializedName("cleanup_daily_limit") val cleanupDailyLimit: Int? = null,
+    @SerializedName("cleanup_release_backlog") val cleanupReleaseBacklog: Boolean? = null,
     @SerializedName("updated_at") val updatedAt: String,
     @SerializedName("last_run_at") val lastRunAt: String?,
 )

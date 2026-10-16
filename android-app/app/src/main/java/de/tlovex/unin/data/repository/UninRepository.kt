@@ -1,6 +1,17 @@
 package de.tlovex.unin.data.repository
 
+import de.tlovex.unin.data.model.ActivityCategory
+import de.tlovex.unin.data.model.ActivityPageDto
 import de.tlovex.unin.data.model.AutomationJobDto
+import de.tlovex.unin.data.model.CleanupHoldBulkResultDto
+import de.tlovex.unin.data.model.CleanupHoldUpdateDto
+import de.tlovex.unin.data.model.CleanupHoldBulkUpdateDto
+import de.tlovex.unin.data.model.CleanupPolicyUpdateDto
+import de.tlovex.unin.data.model.CleanupPreviewDto
+import de.tlovex.unin.data.model.ImportBatchDto
+import de.tlovex.unin.data.model.ImportMatchRequestDto
+import de.tlovex.unin.data.model.ImportMatchResultDto
+import de.tlovex.unin.data.model.ImportStartRequestDto
 import de.tlovex.unin.data.model.AutomationJobPageDto
 import de.tlovex.unin.data.model.AutomationPolicyDto
 import de.tlovex.unin.data.model.AutomationPolicyUpdateDto
@@ -280,4 +291,32 @@ class UninRepository(
         api.retryAutomationJob(jobId)
 
     suspend fun stats(): StatsDto = api.stats()
+
+    suspend fun cleanupPreview(): CleanupPreviewDto = api.cleanupPreview()
+
+    /** True keeps the download out of automatic cleanup; false lets it back in. */
+    suspend fun setCleanupHold(downloadId: String, held: Boolean): DownloadDto =
+        api.setCleanupHold(downloadId, CleanupHoldUpdateDto(held))
+
+    suspend fun setCleanupHolds(downloadIds: List<String>, held: Boolean): CleanupHoldBulkResultDto =
+        api.setCleanupHolds(CleanupHoldBulkUpdateDto(downloadIds, held))
+
+    suspend fun updateCleanupPolicy(policy: CleanupPolicyUpdateDto): AutomationPolicyDto =
+        api.updateCleanupPolicy(policy)
+
+    suspend fun activity(
+        category: ActivityCategory? = null,
+        page: Int = 1,
+        pageSize: Int = 30,
+    ): ActivityPageDto = api.activity(category = category, page = page, pageSize = pageSize)
+
+    suspend fun matchImport(text: String): ImportMatchResultDto =
+        api.matchImport(ImportMatchRequestDto(text))
+
+    suspend fun startImport(mediaIds: List<String>, existingIds: List<String>): ImportBatchDto =
+        api.startImport(ImportStartRequestDto(mediaIds, existingIds))
+
+    suspend fun importStatus(): ImportBatchDto = api.importStatus()
+
+    suspend fun cancelImport(): ImportBatchDto = api.cancelImport()
 }

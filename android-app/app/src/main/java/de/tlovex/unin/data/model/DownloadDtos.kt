@@ -29,6 +29,10 @@ data class DownloadDto(
     @SerializedName("upload_speed") val uploadSpeed: Long,
     val ratio: Double,
     @SerializedName("error_message") val errorMessage: String?,
+    // Space reclaim; absent from servers older than the feature.
+    @SerializedName("cleanup_state") val cleanupState: DownloadCleanupState? = null,
+    @SerializedName("cleanup_marked_at") val cleanupMarkedAt: String? = null,
+    @SerializedName("cleanup_deleted_at") val cleanupDeletedAt: String? = null,
     @SerializedName("created_at") val createdAt: String,
     @SerializedName("updated_at") val updatedAt: String,
 )

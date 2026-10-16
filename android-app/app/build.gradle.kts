@@ -25,14 +25,16 @@ val hasLocalReleaseSigning = localReleaseKeystoreFile.isFile &&
 
 android {
     namespace = "de.tlovex.unin"
-    compileSdk = 36
+    // Compose 1.12 and core 1.19 must be compiled against API 37; the app still
+    // targets 35, so this changes nothing at run time.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "de.tlovex.unin"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.4.0"
+        versionCode = 7
+        versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

@@ -1,14 +1,20 @@
 package de.tlovex.unin.ui
 
 import androidx.compose.runtime.Immutable
+import de.tlovex.unin.data.model.ActivityCategory
 import de.tlovex.unin.ui.screens.SettingsConfigurationCallbacks
 import de.tlovex.unin.ui.screens.SettingsConfigurationUiState
 
 enum class UninDestination {
     Missing,
     Resources,
+    // Reached from the missing list; back returns there.
+    Import,
     Downloads,
+    // The second tab of the downloads page.
+    Cleanup,
     Automation,
+    Activity,
     Settings,
 }
 
@@ -67,6 +73,13 @@ data class DownloadItemUi(
     val ratioText: String = "",
     val errorMessage: String? = null,
     val mediaId: String = "",
+    // Space reclaim: what will happen to this download's files. Null when the
+    // server does not report it.
+    val cleanupText: String? = null,
+    val held: Boolean = false,
+    // Held and unmarked downloads can be switched here; a marked one is kept by
+    // removing its tag in qBittorrent, and a deleted one is gone.
+    val canChangeHold: Boolean = false,
 )
 
 @Immutable
@@ -87,6 +100,7 @@ data class AutomationPolicyUi(
     val maxAttempts: Int = 3,
     val dailyLimit: Int = 3,
     val dailyDownloadSizeGb: Int? = null,
+    val yearsText: String = "不限年份",
     // Read-only here: these are edited on the web, where the score histogram
     // gives them context. Shown so the app is honest about what is in effect.
     val cooldownText: String = "24 / 72 / 168 小时",
@@ -136,6 +150,8 @@ data class UninUiState(
     val isLibraryLoading: Boolean = false,
     val isLibrarySyncing: Boolean = false,
     val canSyncLibrary: Boolean = false,
+    // Operator or admin: may download, hold, release and import.
+    val canOperate: Boolean = false,
     val currentDestination: UninDestination = UninDestination.Missing,
     val username: String = "",
     val password: String = "",
@@ -160,6 +176,9 @@ data class UninUiState(
     val automationStats: AutomationStatsUi? = null,
     val isAutomationRunInProgress: Boolean = false,
     val automationRunOutcomeUnknown: Boolean = false,
+    val cleanup: CleanupUi = CleanupUi(),
+    val activity: ActivityUi = ActivityUi(),
+    val bulkImport: ImportUi = ImportUi(),
     val connections: List<ConnectionUi> = emptyList(),
     val settingsConfiguration: SettingsConfigurationUiState = SettingsConfigurationUiState(),
     val lastSyncedText: String = "尚未同步",
@@ -201,6 +220,23 @@ data class UninCallbacks(
     val onRefreshAutomation: () -> Unit = {},
     val onRetryAutomation: (AutomationRunUi) -> Unit = {},
     val onTestConnection: (ConnectionUi) -> Unit = {},
+    val onRefreshCleanup: () -> Unit = {},
+    val onCleanupSettingsChanged: (CleanupSettingsUi) -> Unit = {},
+    val onSaveCleanupSettings: () -> Unit = {},
+    // True keeps the download out of automatic cleanup; false lets it back in.
+    val onSetCleanupHold: (downloadId: String, held: Boolean) -> Unit = { _, _ -> },
+    val onCleanupSelectionChanged: (Set<String>) -> Unit = {},
+    val onReleaseSelected: () -> Unit = {},
+    val onActivityCategorySelected: (ActivityCategory?) -> Unit = {},
+    val onActivityPageSelected: (Int) -> Unit = {},
+    val onRefreshActivity: () -> Unit = {},
+    val onImportMatch: (text: String) -> Unit = {},
+    val onImportPick: (lineIndex: Int, mediaId: String?) -> Unit = { _, _ -> },
+    val onImportAgain: (lineIndex: Int, again: Boolean) -> Unit = { _, _ -> },
+    val onImportAgainAll: (Boolean) -> Unit = {},
+    val onImportStart: () -> Unit = {},
+    val onImportCancel: () -> Unit = {},
+    val onImportDiscard: () -> Unit = {},
     val settingsConfiguration: SettingsConfigurationCallbacks = SettingsConfigurationCallbacks(),
     val onDismissMessage: () -> Unit = {},
 )

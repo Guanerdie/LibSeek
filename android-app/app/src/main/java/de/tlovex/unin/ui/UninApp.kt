@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.MovieFilter
 import androidx.compose.material.icons.outlined.Settings
@@ -29,8 +30,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import de.tlovex.unin.ui.components.UninWordmark
+import de.tlovex.unin.ui.screens.ActivityScreen
 import de.tlovex.unin.ui.screens.AutomationScreen
+import de.tlovex.unin.ui.screens.CleanupScreen
 import de.tlovex.unin.ui.screens.DownloadsScreen
+import de.tlovex.unin.ui.screens.ImportScreen
 import de.tlovex.unin.ui.screens.LoginScreen
 import de.tlovex.unin.ui.screens.MissingMediaScreen
 import de.tlovex.unin.ui.screens.ResourceCandidatesScreen
@@ -47,8 +51,16 @@ private val primaryDestinations = listOf(
     NavigationItem(UninDestination.Missing, "缺失", Icons.Outlined.MovieFilter),
     NavigationItem(UninDestination.Downloads, "下载", Icons.Outlined.Download),
     NavigationItem(UninDestination.Automation, "自动化", Icons.Outlined.AutoAwesome),
+    NavigationItem(UninDestination.Activity, "记录", Icons.Outlined.History),
     NavigationItem(UninDestination.Settings, "设置", Icons.Outlined.Settings),
 )
+
+/** The navigation item a page belongs under: sub-pages light up their parent. */
+private fun UninDestination.navigationParent(): UninDestination = when (this) {
+    UninDestination.Resources, UninDestination.Import -> UninDestination.Missing
+    UninDestination.Cleanup -> UninDestination.Downloads
+    else -> this
+}
 
 /**
  * Stateless UNIN application UI. The host owns navigation and business state and responds through
@@ -126,6 +138,9 @@ private fun ScreenContent(
         UninDestination.Missing -> MissingMediaScreen(state, callbacks, contentPadding, modifier)
         UninDestination.Resources -> ResourceCandidatesScreen(state, callbacks, contentPadding, modifier)
         UninDestination.Downloads -> DownloadsScreen(state, callbacks, contentPadding, modifier)
+        UninDestination.Import -> ImportScreen(state, callbacks, contentPadding, modifier)
+        UninDestination.Cleanup -> CleanupScreen(state, callbacks, contentPadding, modifier)
+        UninDestination.Activity -> ActivityScreen(state, callbacks, contentPadding, modifier)
         UninDestination.Automation -> AutomationScreen(state, callbacks, contentPadding, modifier)
         UninDestination.Settings -> SettingsScreen(
             state = state,
@@ -142,7 +157,7 @@ private fun ScreenContent(
 private fun PhoneNavigationBar(selected: UninDestination, onSelected: (UninDestination) -> Unit) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
         primaryDestinations.forEach { item ->
-            val isSelected = selected == item.destination || (selected == UninDestination.Resources && item.destination == UninDestination.Missing)
+            val isSelected = selected.navigationParent() == item.destination
             NavigationBarItem(
                 selected = isSelected,
                 onClick = { onSelected(item.destination) },
@@ -164,7 +179,7 @@ private fun TabletNavigationRail(selected: UninDestination, onSelected: (UninDes
         },
     ) {
         primaryDestinations.forEach { item ->
-            val isSelected = selected == item.destination || (selected == UninDestination.Resources && item.destination == UninDestination.Missing)
+            val isSelected = selected.navigationParent() == item.destination
             NavigationRailItem(
                 selected = isSelected,
                 onClick = { onSelected(item.destination) },

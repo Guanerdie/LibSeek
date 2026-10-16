@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import de.tlovex.unin.ui.MediaKind
 import de.tlovex.unin.ui.MissingMediaUi
 import de.tlovex.unin.ui.UninCallbacks
+import de.tlovex.unin.ui.UninDestination
 import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.GradientPrimaryButton
 import de.tlovex.unin.ui.components.MetricCard
@@ -104,12 +106,22 @@ fun MissingMediaScreen(
                 subtitle = "来自 NextFind · $syncStatus",
                 action = if (state.canSyncLibrary) {
                     {
-                        GradientPrimaryButton(
-                            text = "同步",
-                            onClick = callbacks.onSyncMissing,
-                            loading = state.isLibrarySyncing,
-                            icon = Icons.Outlined.CloudSync,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = { callbacks.onDestinationSelected(UninDestination.Import) },
+                                modifier = Modifier.height(48.dp),
+                            ) {
+                                Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, contentDescription = null)
+                                Spacer(Modifier.size(4.dp))
+                                Text("批量导入")
+                            }
+                            GradientPrimaryButton(
+                                text = "同步",
+                                onClick = callbacks.onSyncMissing,
+                                loading = state.isLibrarySyncing,
+                                icon = Icons.Outlined.CloudSync,
+                            )
+                        }
                     }
                 } else {
                     null

@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import de.tlovex.unin.data.UninDataLayer
+import de.tlovex.unin.data.model.ActivityCategory
 import de.tlovex.unin.data.model.AuthRole
 import de.tlovex.unin.data.model.ApiErrorPolicy
 import de.tlovex.unin.data.model.AutomationJobDto
@@ -17,7 +18,10 @@ import de.tlovex.unin.data.model.AutomationRunStateDto
 import de.tlovex.unin.data.model.AutomationScopeMode
 import de.tlovex.unin.data.model.CandidateDto
 import de.tlovex.unin.data.model.ConfigurationStatusDto
+import de.tlovex.unin.data.model.DownloadCleanupState
 import de.tlovex.unin.data.model.DownloadDto
+import de.tlovex.unin.data.model.ImportBatchState
+import de.tlovex.unin.data.model.ImportLineStatus
 import de.tlovex.unin.data.model.EpisodeState
 import de.tlovex.unin.data.model.MediaDetailDto
 import de.tlovex.unin.data.model.MediaState
@@ -36,6 +40,13 @@ import de.tlovex.unin.ui.AutomationPolicyUi
 import de.tlovex.unin.ui.AutomationRunState
 import de.tlovex.unin.ui.AutomationRunUi
 import de.tlovex.unin.ui.AutomationStatsUi
+import de.tlovex.unin.ui.CleanupSettingsUi
+import de.tlovex.unin.ui.ImportUi
+import de.tlovex.unin.ui.toCleanupSettings
+import de.tlovex.unin.ui.toLists
+import de.tlovex.unin.ui.toUi
+import de.tlovex.unin.ui.totalSize
+import de.tlovex.unin.ui.formatServerTime as formatUtcServerTime
 import de.tlovex.unin.ui.ConnectionState
 import de.tlovex.unin.ui.ConnectionUi
 import de.tlovex.unin.ui.DownloadItemUi
@@ -59,11 +70,6 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.URI
 import java.net.UnknownHostException
-import java.time.Instant
-import java.time.LocalDateTime
-import java.time.OffsetDateTime
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import java.util.Locale
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
@@ -132,6 +138,10 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     private val libraryOperationMutex = Mutex()
     private var automationRunPollJob: Job? = null
     private var automationRunPollId: String? = null
+    private var importPollJob: Job? = null
+    private var activityLoadJob: Job? = null
+    private var activityRequest = 0
+    private var cleanupLoadJob: Job? = null
     private val authenticatedJobs = mutableSetOf<Job>()
 
     val callbacks = UninCallbacks(
@@ -193,6 +203,41 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         onRefreshAutomation = ::refreshAutomationStatus,
         onRetryAutomation = ::retryAutomation,
         onTestConnection = ::testConnection,
+        onRefreshCleanup = ::loadCleanup,
+        onCleanupSettingsChanged = { form ->
+            mutableUiState.update { it.copy(cleanup = it.cleanup.copy(form = form)) }
+        },
+        onSaveCleanupSettings = ::saveCleanupSettings,
+        onSetCleanupHold = ::setCleanupHold,
+        onCleanupSelectionChanged = { ids ->
+            mutableUiState.update { it.copy(cleanup = it.cleanup.copy(selectedIds = ids)) }
+        },
+        onReleaseSelected = ::releaseSelected,
+        onActivityCategorySelected = { category -> loadActivity(category = category, page = 1) },
+        onActivityPageSelected = { page -> loadActivity(page = page) },
+        onRefreshActivity = { loadActivity() },
+        onImportMatch = ::matchImport,
+        onImportPick = { index, mediaId -> editImportLine(index) { it.copy(pickedId = mediaId) } },
+        onImportAgain = { index, again -> editImportLine(index) { it.copy(again = again) } },
+        onImportAgainAll = { again ->
+            mutableUiState.update { state ->
+                val lines = state.bulkImport.lines?.map { line ->
+                    if (line.status == ImportLineStatus.NOT_MISSING && line.media != null) {
+                        line.copy(again = again)
+                    } else {
+                        line
+                    }
+                }
+                state.copy(bulkImport = state.bulkImport.copy(lines = lines))
+            }
+        },
+        onImportStart = ::startImport,
+        onImportCancel = ::cancelImport,
+        onImportDiscard = {
+            mutableUiState.update {
+                it.copy(bulkImport = it.bulkImport.copy(lines = null, truncated = false, error = null))
+            }
+        },
         settingsConfiguration = SettingsConfigurationCallbacks(
             onSaveNextFind = ::saveNextFindConfiguration,
             onSaveTmdb = ::saveTmdbConfiguration,
@@ -209,7 +254,13 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun navigateBack() {
-        selectDestination(UninDestination.Missing)
+        selectDestination(
+            if (uiState.value.currentDestination == UninDestination.Cleanup) {
+                UninDestination.Downloads
+            } else {
+                UninDestination.Missing
+            },
+        )
     }
 
     private fun restoreSession() {
@@ -434,6 +485,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             UninDestination.Automation -> loadAutomation()
             UninDestination.Resources -> Unit
             UninDestination.Settings -> refreshConfiguration()
+            UninDestination.Cleanup -> loadCleanup()
+            UninDestination.Activity -> loadActivity()
+            UninDestination.Import -> loadImportStatus()
         }
     }
 
@@ -1511,6 +1565,312 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ------------------------------------------------------------ cleanup
+
+    private fun loadCleanup() {
+        if (cleanupLoadJob?.isActive == true) return
+        mutableUiState.update { it.copy(cleanup = it.cleanup.copy(isLoading = true)) }
+        lateinit var job: Job
+        job = launchAction("无法读取清理设置") {
+            try {
+                val settings = repository.automationPolicy().toCleanupSettings()
+                mutableUiState.update { state ->
+                    val cleanup = state.cleanup
+                    state.copy(
+                        cleanup = cleanup.copy(
+                            saved = settings,
+                            // An edit that has not been saved survives a refresh.
+                            form = if (cleanup.isLoaded && cleanup.isDirty) cleanup.form else settings,
+                            isLoaded = true,
+                        ),
+                    )
+                }
+                refreshCleanupLists()
+            } finally {
+                mutableUiState.update { it.copy(cleanup = it.cleanup.copy(isLoading = false)) }
+            }
+        }
+        cleanupLoadJob = job
+        job.invokeOnCompletion {
+            if (cleanupLoadJob === job) cleanupLoadJob = null
+        }
+    }
+
+    /**
+     * The preview and the latest cleanup records.
+     *
+     * The preview asks qBittorrent, so it can fail while the settings load
+     * fine; that failure is shown on the page instead of hiding the settings.
+     */
+    private suspend fun refreshCleanupLists() {
+        var previewFailure: String? = null
+        val preview = attempt { repository.cleanupPreview() }
+            .onFailure {
+                if (it.isSessionAuthenticationFailure()) throw it
+                previewFailure = errorMessage(it, "无法读取清理清单")
+            }
+            .getOrNull()
+        // The records are a convenience; the full list has its own page.
+        val recent = attempt {
+            repository.activity(ActivityCategory.CLEANUP, page = 1, pageSize = RECENT_CLEANUP_RECORDS)
+        }.getOrNull()
+        mutableUiState.update { state ->
+            val cleanup = state.cleanup
+            val lists = preview?.toLists() ?: cleanup.lists
+            val offered = lists.heldBacklogReady.mapTo(mutableSetOf()) { it.downloadId }
+            state.copy(
+                cleanup = cleanup.copy(
+                    lists = lists,
+                    deleteAuthorized = preview?.deleteAuthorized ?: cleanup.deleteAuthorized,
+                    previewError = previewFailure,
+                    recent = recent?.items?.map { it.toUi() } ?: cleanup.recent,
+                    // Nothing stays selected that is no longer offered.
+                    selectedIds = cleanup.selectedIds.intersect(offered),
+                ),
+            )
+        }
+    }
+
+    private fun saveCleanupSettings() {
+        val cleanup = uiState.value.cleanup
+        if (!cleanup.isLoaded || cleanup.isSaving || !cleanup.isDirty) return
+
+        mutableUiState.update { it.copy(cleanup = it.cleanup.copy(isSaving = true)) }
+        launchAction("无法保存清理设置") {
+            try {
+                val settings = repository.updateCleanupPolicy(cleanup.form.toDto()).toCleanupSettings()
+                mutableUiState.update {
+                    it.copy(
+                        cleanup = it.cleanup.copy(saved = settings, form = settings),
+                        snackbarMessage = "清理设置已保存",
+                    )
+                }
+                refreshCleanupLists()
+            } finally {
+                mutableUiState.update { it.copy(cleanup = it.cleanup.copy(isSaving = false)) }
+            }
+        }
+    }
+
+    private fun setCleanupHold(downloadId: String, held: Boolean) {
+        if (uiState.value.cleanup.changingId != null) return
+
+        mutableUiState.update { it.copy(cleanup = it.cleanup.copy(changingId = downloadId)) }
+        launchAction("无法修改清理设置") {
+            try {
+                val download = repository.setCleanupHold(downloadId, held)
+                mutableUiState.update { state ->
+                    state.copy(
+                        downloads = state.downloads.map { if (it.id == download.id) download.toUi() else it },
+                        snackbarMessage = if (held) {
+                            "已设为保留，不会被自动清理"
+                        } else {
+                            "已放行，满足条件后会被清理"
+                        },
+                    )
+                }
+                if (uiState.value.currentDestination == UninDestination.Cleanup) refreshCleanupLists()
+            } finally {
+                mutableUiState.update { it.copy(cleanup = it.cleanup.copy(changingId = null)) }
+            }
+        }
+    }
+
+    private fun releaseSelected() {
+        val cleanup = uiState.value.cleanup
+        val items = cleanup.selectedItems
+        if (items.isEmpty() || cleanup.changingId != null) return
+
+        mutableUiState.update { it.copy(cleanup = it.cleanup.copy(changingId = BULK_CHANGE)) }
+        launchAction("无法批量放行") {
+            try {
+                val result = repository.setCleanupHolds(items.map { it.downloadId }, held = false)
+                val skipped = result.skipped.orEmpty()
+                mutableUiState.update {
+                    it.copy(
+                        cleanup = it.cleanup.copy(selectedIds = emptySet()),
+                        snackbarMessage = if (skipped.isEmpty()) {
+                            "已放行 ${result.changed} 项（${totalSize(items)}）"
+                        } else {
+                            "已放行 ${result.changed} 项，${skipped.size} 项未能放行：${skipped.first().reason}"
+                        },
+                    )
+                }
+                refreshCleanupLists()
+            } finally {
+                mutableUiState.update { it.copy(cleanup = it.cleanup.copy(changingId = null)) }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------- activity
+
+    private fun loadActivity(
+        category: ActivityCategory? = uiState.value.activity.category,
+        page: Int = uiState.value.activity.page,
+    ) {
+        // A newer request replaces an older one; only the newest may finish.
+        activityLoadJob?.cancel()
+        val request = ++activityRequest
+        mutableUiState.update {
+            it.copy(activity = it.activity.copy(category = category, page = page, isLoading = true))
+        }
+        activityLoadJob = launchAction("无法读取操作记录") {
+            try {
+                val result = repository.activity(category, page, ACTIVITY_PAGE_SIZE)
+                mutableUiState.update { state ->
+                    state.copy(
+                        activity = state.activity.copy(
+                            entries = result.items.map { it.toUi() },
+                            page = result.page,
+                            pageSize = result.pageSize,
+                            total = result.total,
+                            isLoaded = true,
+                        ),
+                    )
+                }
+            } finally {
+                if (request == activityRequest) {
+                    mutableUiState.update { it.copy(activity = it.activity.copy(isLoading = false)) }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- import
+
+    private fun matchImport(text: String) {
+        if (text.isBlank() || uiState.value.bulkImport.isMatching) return
+
+        mutableUiState.update { it.copy(bulkImport = it.bulkImport.copy(isMatching = true, error = null)) }
+        launchAction("无法匹配这份清单") {
+            try {
+                val result = repository.matchImport(text)
+                mutableUiState.update {
+                    it.copy(
+                        bulkImport = it.bulkImport.copy(
+                            lines = result.lines.map { line -> line.toUi() },
+                            truncated = result.truncated == true,
+                        ),
+                    )
+                }
+            } finally {
+                mutableUiState.update { it.copy(bulkImport = it.bulkImport.copy(isMatching = false)) }
+            }
+        }
+    }
+
+    private fun editImportLine(index: Int, transform: (de.tlovex.unin.ui.ImportLineUi) -> de.tlovex.unin.ui.ImportLineUi) {
+        mutableUiState.update { state ->
+            val lines = state.bulkImport.lines?.mapIndexed { i, line -> if (i == index) transform(line) else line }
+            state.copy(bulkImport = state.bulkImport.copy(lines = lines))
+        }
+    }
+
+    private fun startImport() {
+        val current: ImportUi = uiState.value.bulkImport
+        val chosen = current.chosen
+        if (chosen.isEmpty() || current.isStarting || current.batch?.isRunning == true) return
+
+        mutableUiState.update { it.copy(bulkImport = it.bulkImport.copy(isStarting = true, error = null)) }
+        launchAction("无法开始下载") {
+            try {
+                val batch = repository.startImport(
+                    mediaIds = chosen.map { it.mediaId },
+                    existingIds = chosen.filter { it.inLibrary }.map { it.mediaId },
+                )
+                mutableUiState.update {
+                    it.copy(
+                        bulkImport = it.bulkImport.copy(
+                            batch = batch.toUi(),
+                            lines = null,
+                            truncated = false,
+                            startedCount = it.bulkImport.startedCount + 1,
+                        ),
+                        snackbarMessage = "已开始下载 ${chosen.size} 部，可以离开这一页",
+                    )
+                }
+                if (batch.state == ImportBatchState.RUNNING) startImportPolling()
+            } finally {
+                mutableUiState.update { it.copy(bulkImport = it.bulkImport.copy(isStarting = false)) }
+            }
+        }
+    }
+
+    private fun cancelImport() {
+        launchAction("无法停止这一批") {
+            val batch = repository.cancelImport()
+            mutableUiState.update {
+                it.copy(
+                    bulkImport = it.bulkImport.copy(batch = batch.toUi()),
+                    snackbarMessage = "处理完当前这部后停止",
+                )
+            }
+        }
+    }
+
+    private fun loadImportStatus() {
+        launchAction("无法读取批量导入进度") {
+            val batch = repository.importStatus()
+            mutableUiState.update {
+                // IDLE: nothing has run since the server started.
+                it.copy(
+                    bulkImport = it.bulkImport.copy(
+                        batch = batch.takeIf { b -> b.state != ImportBatchState.IDLE }?.toUi(),
+                    ),
+                )
+            }
+            if (batch.state == ImportBatchState.RUNNING) startImportPolling()
+        }
+    }
+
+    /** Follows a running batch until it ends, wherever the operator is in the app. */
+    private fun startImportPolling() {
+        if (importPollJob?.isActive == true) return
+        val job = viewModelScope.launch {
+            var failures = 0
+            while (true) {
+                delay(IMPORT_POLL_INTERVAL_MS)
+                val result = attempt { repository.importStatus() }
+                val batch = result.getOrNull()
+                if (batch == null) {
+                    val error = result.exceptionOrNull()
+                    if (error != null && error.isSessionAuthenticationFailure()) {
+                        expireSession("登录已过期，请重新登录")
+                        return@launch
+                    }
+                    failures += 1
+                    if (failures >= IMPORT_POLL_MAX_FAILURES) {
+                        mutableUiState.update {
+                            it.copy(snackbarMessage = "暂时读不到批量导入进度，回到这一页会再次读取")
+                        }
+                        return@launch
+                    }
+                    continue
+                }
+                failures = 0
+                val ui = batch.toUi()
+                mutableUiState.update { it.copy(bulkImport = it.bulkImport.copy(batch = ui)) }
+                if (batch.state != ImportBatchState.RUNNING) {
+                    mutableUiState.update { it.copy(snackbarMessage = "批量导入已结束：${ui.summary}") }
+                    return@launch
+                }
+            }
+        }
+        importPollJob = job
+        authenticatedJobs += job
+        job.invokeOnCompletion { authenticatedJobs -= job }
+    }
+
+    /** Runs [block]; a cancellation still cancels, anything else becomes a failure. */
+    private suspend fun <T> attempt(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
+
     private fun launchAction(
         fallbackMessage: String,
         block: suspend () -> Unit,
@@ -1556,6 +1916,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
                 isAuthenticated = true,
                 isBusy = activeOperations > 0,
                 canSyncLibrary = principal.role != AuthRole.VIEWER,
+                canOperate = principal.role != AuthRole.VIEWER,
                 accountDisplayName = principal.displayName(),
                 // The endpoint is operator-and-above, same as every other write.
                 canChangePassword = principal.role != AuthRole.VIEWER,
@@ -1593,6 +1954,7 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         cancelAuthenticatedJobs()
         searchJob?.cancel()
         mediaDetailJob?.cancel()
+        importPollJob?.cancel()
         repository.clearAuth()
         showSignedOut(message)
     }
@@ -1605,6 +1967,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         downloadsSyncJob = null
         automationRunPollJob = null
         automationRunPollId = null
+        importPollJob = null
+        activityLoadJob = null
+        cleanupLoadJob = null
     }
 
     private fun cancelAuthenticationJob() {
@@ -1802,6 +2167,18 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
             speedText = if (downloadSpeed > 0) "↓ ${downloadSpeed.formatRate()}" else "",
             ratioText = if (ratio > 0.0) String.format(Locale.US, "分享率 %.2f", ratio) else "",
             errorMessage = errorMessage ?: fallbackError,
+            cleanupText = when (cleanupState) {
+                DownloadCleanupState.HELD -> "保留，不会自动清理"
+                DownloadCleanupState.MARKED -> cleanupMarkedAt
+                    ?.let { "已标记待清理（${formatServerTime(it)}）" }
+                    ?: "已标记待清理"
+                DownloadCleanupState.DELETED -> "已连同文件删除"
+                DownloadCleanupState.VANISHED -> "种子已不在 qBittorrent 中"
+                DownloadCleanupState.NONE, null -> null
+            },
+            held = cleanupState == DownloadCleanupState.HELD,
+            canChangeHold = cleanupState == DownloadCleanupState.HELD ||
+                cleanupState == DownloadCleanupState.NONE,
         )
     }
 
@@ -1832,6 +2209,14 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         dailyLimit = dailyDownloadLimit,
         dailyDownloadSizeGb = dailyDownloadBytes?.let {
             (it.toDouble() / BYTES_PER_GIB).roundToInt()
+        },
+        yearsText = years.orEmpty().let { list ->
+            when {
+                list.isEmpty() -> "不限年份"
+                list.size == 1 -> "${list.first()} 年"
+                list.size == list.max() - list.min() + 1 -> "${list.min()}–${list.max()} 年"
+                else -> "${list.size} 个年份"
+            }
         },
         cooldownText = "$cooldownTier1Hours / $cooldownTier2Hours / $cooldownTier3Hours 小时",
         varietyText = when {
@@ -2283,16 +2668,8 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun Long.formatRate(): String = "${this.formatBytes()}/s"
 
-    private fun formatServerTime(value: String): String {
-        val instant = runCatching { Instant.parse(value) }.getOrNull()
-            ?: runCatching { OffsetDateTime.parse(value).toInstant() }.getOrNull()
-        if (instant != null) {
-            return TIME_FORMATTER.format(instant.atZone(SHANGHAI_ZONE))
-        }
-        return runCatching {
-            TIME_FORMATTER.format(LocalDateTime.parse(value))
-        }.getOrDefault(value.take(16).replace('T', ' '))
-    }
+    // The server stores UTC and sends it without an offset; see Formatting.kt.
+    private fun formatServerTime(value: String): String = formatUtcServerTime(value)
 
     private class UserFacingException(message: String) : Exception(message)
 
@@ -2306,6 +2683,12 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         const val SEARCH_POLL_LIMIT = 60
         const val SEARCH_POLL_INTERVAL_MS = 1_000L
         const val AUTOMATION_RUN_POLL_INTERVAL_MS = 2_000L
+        const val IMPORT_POLL_INTERVAL_MS = 2_000L
+        // About a minute of failed reads before giving up on following a batch.
+        const val IMPORT_POLL_MAX_FAILURES = 30
+        const val ACTIVITY_PAGE_SIZE = 30
+        const val RECENT_CLEANUP_RECORDS = 8
+        const val BULK_CHANGE = "bulk"
         const val MAX_ERROR_MESSAGE_LENGTH = 240
         const val MAX_ERROR_BODY_BYTES = 16_384L
         const val CONNECTION_SERVER = "unin"
@@ -2317,7 +2700,5 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         const val SAFETY_PREFERENCES_NAME = "unin_operation_safety"
         const val UNKNOWN_AUTOMATION_RUN_KEY = "unknown_automation_run"
         const val UNKNOWN_DOWNLOAD_SUBMISSION_KEY = "unknown_download_submission"
-        val SHANGHAI_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
-        val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
     }
 }
