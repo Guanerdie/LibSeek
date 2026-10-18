@@ -2044,7 +2044,9 @@ class UninViewModel(application: Application) : AndroidViewModel(application) {
         year = year,
         kind = if (mediaType == MediaType.MOVIE) MediaKind.Movie else MediaKind.Series,
         missingDescription = attentionReason ?: state.description(),
-        posterUrl = posterPath,
+        // NextFind's proxy path is turned into a TMDB image address.
+        posterUrl = de.tlovex.unin.ui.tmdbPosterUrl(posterPath),
+        regions = regions,
         tmdbConfirmed = tmdbId != null,
         candidateCount = candidateCount,
         downloadActive = state == MediaState.DOWNLOADING,

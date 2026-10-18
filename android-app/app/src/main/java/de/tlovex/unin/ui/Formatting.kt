@@ -43,6 +43,20 @@ internal fun formatBytes(bytes: Long): String {
     return String.format(Locale.US, if (value >= 10) "%.1f %s" else "%.2f %s", value, units[unit])
 }
 
+private val POSTER_FILE = Regex("""^[\w-]+\.(jpe?g|png|webp)$""", RegexOption.IGNORE_CASE)
+
+/**
+ * The TMDB address of a poster.
+ *
+ * NextFind reports posters as its own proxy path (`/api/tmdb/image/<file>`),
+ * TMDB as `/<file>`; only the file name is the same in both.
+ */
+internal fun tmdbPosterUrl(posterPath: String?): String? {
+    val file = posterPath?.substringBefore('?')?.substringBefore('#')?.substringAfterLast('/')
+    if (file.isNullOrEmpty() || !POSTER_FILE.matches(file)) return null
+    return "https://image.tmdb.org/t/p/w342/$file"
+}
+
 /** 3.0 → "3", 2.46 → "2.5". */
 internal fun formatDays(days: Double): String =
     if (days % 1.0 == 0.0) days.toLong().toString() else String.format(Locale.US, "%.1f", days)

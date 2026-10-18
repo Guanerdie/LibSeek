@@ -7,26 +7,34 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Tv
 import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,7 +48,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -55,6 +62,9 @@ import de.tlovex.unin.ui.UninUiState
 import de.tlovex.unin.ui.components.GradientPrimaryButton
 import de.tlovex.unin.ui.components.MetricCard
 import de.tlovex.unin.ui.components.NeumorphicCard
+import de.tlovex.unin.ui.components.PosterImage
+import de.tlovex.unin.ui.components.UninCardShape
+import de.tlovex.unin.ui.components.UninControlShape
 import de.tlovex.unin.ui.components.PaginationBar
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
@@ -66,6 +76,8 @@ import de.tlovex.unin.ui.theme.UninSuccess
 import de.tlovex.unin.ui.theme.UninViolet
 import de.tlovex.unin.ui.theme.UninWarning
 
+private val REGION_FILTERS = listOf("全部", "欧美", "大陆", "港台", "韩国", "日本", "亚太")
+
 @Composable
 fun MissingMediaScreen(
     state: UninUiState,
@@ -73,20 +85,29 @@ fun MissingMediaScreen(
     contentPadding: androidx.compose.foundation.layout.PaddingValues,
     modifier: Modifier = Modifier,
 ) {
+    var selectedRegion by remember { mutableStateOf("全部") }
+    val filteredMedia = remember(state.missingMedia, selectedRegion) {
+        if (selectedRegion == "全部") {
+            state.missingMedia
+        } else {
+            state.missingMedia.filter { selectedRegion in it.regions }
+        }
+    }
+
     var page by remember { mutableIntStateOf(0) }
     val pageSize = 24
-    val totalItems = state.missingMedia.size
+    val totalItems = filteredMedia.size
     val pages = pageCount(totalItems, pageSize)
-    val visibleMedia = pageSlice(state.missingMedia, page, pageSize)
+    val visibleMedia = pageSlice(filteredMedia, page, pageSize)
     val gridState = rememberLazyGridState()
-    LaunchedEffect(totalItems) {
+    LaunchedEffect(totalItems, selectedRegion) {
         page = page.coerceIn(0, (pages - 1).coerceAtLeast(0))
     }
     LaunchedEffect(page) {
         gridState.animateScrollToItem(0)
     }
-    val movieCount = state.missingMedia.count { it.kind == MediaKind.Movie }
-    val seriesCount = state.missingMedia.count { it.kind == MediaKind.Series }
+    val movieCount = filteredMedia.count { it.kind == MediaKind.Movie }
+    val seriesCount = filteredMedia.count { it.kind == MediaKind.Series }
     val syncStatus = when {
         state.isLibrarySyncing -> "正在同步 NextFind"
         state.isLibraryLoading -> "正在读取最近项目"
@@ -101,37 +122,57 @@ fun MissingMediaScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
-            SectionHeading(
-                title = "缺失影视",
-                subtitle = "来自 NextFind · $syncStatus",
-                action = if (state.canSyncLibrary) {
-                    {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(
-                                onClick = { callbacks.onDestinationSelected(UninDestination.Import) },
-                                modifier = Modifier.height(48.dp),
-                            ) {
-                                Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, contentDescription = null)
-                                Spacer(Modifier.size(4.dp))
-                                Text("批量导入")
-                            }
-                            GradientPrimaryButton(
-                                text = "同步",
-                                onClick = callbacks.onSyncMissing,
-                                loading = state.isLibrarySyncing,
-                                icon = Icons.Outlined.CloudSync,
-                            )
+            Column {
+                SectionHeading(title = "缺失影视", subtitle = "来自 NextFind · $syncStatus")
+                if (state.canSyncLibrary) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = { callbacks.onDestinationSelected(UninDestination.Import) },
+                            modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                            shape = UninControlShape,
+                        ) {
+                            Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.size(8.dp))
+                            Text("批量导入")
                         }
+                        GradientPrimaryButton(
+                            text = "同步 NextFind",
+                            onClick = callbacks.onSyncMissing,
+                            loading = state.isLibrarySyncing,
+                            icon = Icons.Outlined.CloudSync,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
-                } else {
-                    null
-                },
-            )
+                }
+                Spacer(Modifier.height(12.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    items(REGION_FILTERS) { region ->
+                        val isSelected = selectedRegion == region
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { selectedRegion = region },
+                            label = { Text(region) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        )
+                    }
+                }
+            }
         }
-        item { MetricCard("当前显示", state.missingMedia.size.toString(), UninBlue, Modifier.fillMaxWidth()) }
-        item { MetricCard("电影", movieCount.toString(), UninCyan, Modifier.fillMaxWidth()) }
-        item { MetricCard("剧集", seriesCount.toString(), UninViolet, Modifier.fillMaxWidth()) }
-        if (state.missingMedia.isEmpty()) {
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MetricCard("当前显示", filteredMedia.size.toString(), UninBlue, Modifier.weight(1f))
+                MetricCard("电影", movieCount.toString(), UninCyan, Modifier.weight(1f))
+                MetricCard("剧集", seriesCount.toString(), UninViolet, Modifier.weight(1f))
+            }
+        }
+        if (filteredMedia.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 NeumorphicCard(Modifier.fillMaxWidth()) {
                     Column(
@@ -186,67 +227,94 @@ fun MissingMediaScreen(
     }
 }
 
+
 @Composable
 private fun MissingMediaCard(media: MissingMediaUi, callbacks: UninCallbacks, modifier: Modifier = Modifier) {
     var showTmdbDialog by remember(media.id) { mutableStateOf(false) }
     var tmdbIdText by remember(media.id) { mutableStateOf("") }
+    val isMovie = media.kind == MediaKind.Movie
 
-    NeumorphicCard(modifier.clickable { callbacks.onMediaSelected(media) }) {
-        Column(Modifier.padding(16.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Box(
-                    Modifier
-                        .size(width = 88.dp, height = 124.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Brush.linearGradient(listOf(UninBlue.copy(.75f), UninCyan.copy(.7f), UninViolet.copy(.8f)))),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Outlined.Movie, contentDescription = null, tint = Color.White, modifier = Modifier.size(34.dp))
-                }
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            media.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (media.year != null) Text(media.year.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (media.originalTitle.isNotBlank()) {
-                        Text(media.originalTitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    StatusPill(if (media.kind == MediaKind.Movie) "电影" else "剧集", if (media.kind == MediaKind.Movie) UninCyan else UninViolet)
-                    Spacer(Modifier.height(10.dp))
-                    Text(media.missingDescription, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                    if (media.candidateCount > 0) {
-                        Text("已发现 ${media.candidateCount} 个候选", style = MaterialTheme.typography.labelMedium, color = UninSuccess)
-                    }
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                if (!media.tmdbConfirmed) {
-                    TextButton(onClick = { showTmdbDialog = true }, modifier = Modifier.height(48.dp)) {
-                        Text("识别 TMDB")
-                    }
-                } else if (media.downloadActive) {
-                    StatusPill("下载进行中", UninWarning)
-                } else {
-                    StatusPill("TMDB 已确认", UninSuccess)
-                    Spacer(Modifier.size(8.dp))
-                    GradientPrimaryButton(
-                        text = "查找资源",
-                        onClick = { callbacks.onSearchResources(media) },
-                        icon = Icons.Outlined.Search,
+    NeumorphicCard(
+        modifier
+            .clip(UninCardShape)
+            .clickable { callbacks.onMediaSelected(media) },
+    ) {
+        // A fixed height, so cards side by side on a tablet line up.
+        Row(
+            Modifier.padding(12.dp).height(156.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            PosterImage(
+                url = media.posterUrl,
+                isMovie = isMovie,
+                title = media.title,
+                modifier = Modifier.size(width = 104.dp, height = 156.dp),
+            )
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+                Text(
+                    media.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (media.originalTitle.isNotBlank() && media.originalTitle != media.title) {
+                    Text(
+                        media.originalTitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    listOfNotNull(
+                        media.year?.toString() ?: "年份未知",
+                        if (isMovie) "电影" else "剧集",
+                        media.regions.takeIf { it.isNotEmpty() }?.joinToString("/"),
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    media.missingDescription,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.weight(1f))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (media.candidateCount > 0) {
+                        Text(
+                            "${media.candidateCount} 个候选",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = UninSuccess,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    if (!media.tmdbConfirmed) {
+                        StatusPill("待识别", UninWarning)
+                        Spacer(Modifier.size(8.dp))
+                        TextButton(onClick = { showTmdbDialog = true }) { Text("识别 TMDB") }
+                    } else if (media.downloadActive) {
+                        StatusPill("下载进行中", UninBlue)
+                    } else {
+                        GradientPrimaryButton(
+                            text = "查找资源",
+                            onClick = { callbacks.onSearchResources(media) },
+                            icon = Icons.Outlined.Search,
+                            modifier = Modifier.height(40.dp),
+                        )
+                    }
                 }
             }
         }
     }
-
     if (showTmdbDialog) {
         val tmdbId = tmdbIdText.toIntOrNull()?.takeIf { it > 0 }
         AlertDialog(
@@ -303,3 +371,4 @@ private fun MissingMediaCard(media: MissingMediaUi, callbacks: UninCallbacks, mo
         )
     }
 }
+

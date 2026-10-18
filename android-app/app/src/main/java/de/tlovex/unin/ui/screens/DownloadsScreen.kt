@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Refresh
@@ -28,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import de.tlovex.unin.ui.DownloadItemUi
 import de.tlovex.unin.ui.DownloadState
@@ -38,6 +40,7 @@ import de.tlovex.unin.ui.components.NeumorphicCard
 import de.tlovex.unin.ui.components.PaginationBar
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
+import de.tlovex.unin.ui.components.UninProgressBar
 import de.tlovex.unin.ui.components.pageCount
 import de.tlovex.unin.ui.components.pageSlice
 import de.tlovex.unin.ui.theme.UninBlue
@@ -166,17 +169,13 @@ private fun DownloadCard(
             Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     Text(item.title, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(2.dp))
                     Text(item.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 StatusPill(statusText, statusColor)
             }
-            Spacer(Modifier.height(16.dp))
-            LinearProgressIndicator(
-                progress = { item.progress.coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = statusColor,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
-            )
+            Spacer(Modifier.height(14.dp))
+            UninProgressBar(item.progress, statusColor)
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("${(item.progress.coerceIn(0f, 1f) * 100).toInt()}%", style = MaterialTheme.typography.labelLarge)

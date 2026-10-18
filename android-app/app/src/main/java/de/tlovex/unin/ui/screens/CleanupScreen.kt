@@ -3,6 +3,8 @@ package de.tlovex.unin.ui.screens
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -134,22 +136,22 @@ fun CleanupScreen(
             item { EmptyLine("没有已放行的种子。从下面「保留中」里放行，它们才会进入这里。") }
         }
         items(lists.marked, key = { "marked-${it.downloadId}" }) { item ->
-            CleanupRow(item, detail = "${item.name} · ${item.sizeText}") {
-                StatusPill(
-                    item.deletesAtText?.let { "已标记 · $it 后删除" } ?: "已标记",
-                    UninDanger,
-                )
-            }
+            CleanupRow(
+                item,
+                detail = "${item.name} · ${item.sizeText}",
+                status = (item.deletesAtText?.let { "已标记 · $it 后删除" } ?: "已标记") to UninDanger,
+            )
         }
         items(lists.queued, key = { "queued-${it.downloadId}" }) { item ->
-            CleanupRow(item, detail = "${item.name} · ${item.sizeText} · ${item.seedingText}") {
-                Column(horizontalAlignment = Alignment.End) {
-                    StatusPill(if (cleanup.deleting) "下一轮标记" else "启用后标记", UninBlue)
-                    TextButton(
-                        onClick = { callbacks.onSetCleanupHold(item.downloadId, true) },
-                        enabled = canOperate && !busy,
-                    ) { Text("保留") }
-                }
+            CleanupRow(
+                item,
+                detail = "${item.name} · ${item.sizeText} · ${item.seedingText}",
+                status = (if (cleanup.deleting) "下一轮标记" else "启用后标记") to UninBlue,
+            ) {
+                TextButton(
+                    onClick = { callbacks.onSetCleanupHold(item.downloadId, true) },
+                    enabled = canOperate && !busy,
+                ) { Text("保留") }
             }
         }
         items(lists.waiting, key = { "waiting-${it.downloadId}" }) { item ->
@@ -325,19 +327,37 @@ private fun saveWarning(cleanup: CleanupUi): String = buildList {
 private fun CleanupSummary(cleanup: CleanupUi) {
     val lists = cleanup.lists
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SummaryTile(
                 "当前状态",
                 cleanup.statusTitle,
                 cleanup.statusDetail,
-                if (cleanup.deleting) UninDanger else if (cleanup.saved.enabled) UninWarning else UninSuccess,
-                Modifier.weight(1f),
+                if (cleanup.deleting) UninWarning else MaterialTheme.colorScheme.onSurface,
+                Modifier.weight(1f).fillMaxHeight(),
             )
-            SummaryTile("待删除", "${lists.pending.size} 项", totalSize(lists.pending), UninDanger, Modifier.weight(1f))
+            SummaryTile(
+                "待删除",
+                "${lists.pending.size} 项",
+                totalSize(lists.pending),
+                MaterialTheme.colorScheme.onSurface,
+                Modifier.weight(1f).fillMaxHeight(),
+            )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            SummaryTile("保留中，可放行", "${lists.heldReady.size} 项", totalSize(lists.heldReady), UninBlue, Modifier.weight(1f))
-            SummaryTile("删除前观察", "${cleanup.saved.graceDays} 天", "打上标签后等这么久才删", UninBlue, Modifier.weight(1f))
+        Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SummaryTile(
+                "保留中，可放行",
+                "${lists.heldReady.size} 项",
+                totalSize(lists.heldReady),
+                MaterialTheme.colorScheme.onSurface,
+                Modifier.weight(1f).fillMaxHeight(),
+            )
+            SummaryTile(
+                "删除前观察",
+                "${cleanup.saved.graceDays} 天",
+                "打上标签后等这么久才删",
+                MaterialTheme.colorScheme.onSurface,
+                Modifier.weight(1f).fillMaxHeight(),
+            )
         }
     }
 }
@@ -510,6 +530,7 @@ private fun BulkReleaseBar(
 private fun CleanupRow(
     item: CleanupItemUi,
     detail: String,
+    status: Pair<String, androidx.compose.ui.graphics.Color>? = null,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
@@ -540,6 +561,10 @@ private fun CleanupRow(
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
+                status?.let { (text, color) ->
+                    Spacer(Modifier.height(6.dp))
+                    StatusPill(text, color)
+                }
             }
             trailing?.let {
                 Spacer(Modifier.width(6.dp))

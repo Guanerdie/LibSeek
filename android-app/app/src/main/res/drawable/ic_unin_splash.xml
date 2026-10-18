@@ -3,11 +3,7 @@
     <item android:width="96dp" android:height="96dp" android:gravity="center">
         <shape android:shape="rectangle">
             <corners android:radius="26dp" />
-            <gradient
-                android:angle="315"
-                android:startColor="@color/unin_primary"
-                android:centerColor="@color/unin_purple"
-                android:endColor="@color/unin_cyan" />
+            <solid android:color="@color/unin_primary" />
         </shape>
     </item>
     <item

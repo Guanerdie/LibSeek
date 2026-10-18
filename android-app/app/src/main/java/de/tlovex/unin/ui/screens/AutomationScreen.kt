@@ -16,6 +16,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -164,7 +165,7 @@ fun AutomationScreen(
         item {
             NeumorphicCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Text("筛选条件", style = MaterialTheme.typography.titleLarge)
+                    Text("选种门槛", style = MaterialTheme.typography.titleLarge)
                     PolicySlider("最低匹配评分", "${policy.minimumScore}%", policy.minimumScore.toFloat(), 50f..100f, 49) {
                         callbacks.onMinimumScoreChanged(it.roundToInt())
                     }
@@ -183,7 +184,37 @@ fun AutomationScreen(
                     PolicySlider("每日提交上限", "${policy.dailyLimit} 项", policy.dailyLimit.toFloat(), 1f..20f, 18) {
                         callbacks.onDailyLimitChanged(it.roundToInt())
                     }
-                    Text("完整策略范围", style = MaterialTheme.typography.titleMedium)
+                    if (policy.enabled && !policy.dryRun) {
+                        Text(
+                            "实时自动化会在服务端允许 qB 写入时自动提交下载，请确认预算和筛选条件后保存。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = UninWarning,
+                        )
+                    }
+                    GradientPrimaryButton(
+                        text = "保存策略",
+                        onClick = {
+                            if (policy.enabled && !policy.dryRun) {
+                                liveConfirmation = LiveAutomationConfirmation.Save
+                            } else {
+                                callbacks.onSaveAutomationPolicy()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        loading = state.isBusy,
+                    )
+                }
+            }
+        }
+        item {
+            NeumorphicCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("策略范围", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "以下设置在网页的「自动化策略」页修改。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     PolicySummaryRow("搜索站点", policy.siteNames)
                     PolicySummaryRow("媒体类型", policy.mediaTypesText)
                     PolicySummaryRow("选择范围", policy.scopeText)
@@ -208,25 +239,6 @@ fun AutomationScreen(
                     PolicySummaryRow("综艺", policy.varietyText)
                     PolicySummaryRow("画质权重", policy.qualityWeightsText)
                     PolicySummaryRow("做种数下限", "${policy.seederFloor} 人")
-                    if (policy.enabled && !policy.dryRun) {
-                        Text(
-                            "实时自动化会在服务端允许 qB 写入时自动提交下载，请确认预算和筛选条件后保存。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = UninWarning,
-                        )
-                    }
-                    GradientPrimaryButton(
-                        text = "保存策略",
-                        onClick = {
-                            if (policy.enabled && !policy.dryRun) {
-                                liveConfirmation = LiveAutomationConfirmation.Save
-                            } else {
-                                callbacks.onSaveAutomationPolicy()
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        loading = state.isBusy,
-                    )
                 }
             }
         }
@@ -365,7 +377,16 @@ private fun PolicySlider(
             Text(label, style = MaterialTheme.typography.bodyLarge)
             Text(valueLabel, style = MaterialTheme.typography.labelLarge, color = UninBlue)
         }
-        Slider(value = value.coerceIn(range), onValueChange = onValueChange, valueRange = range, steps = steps)
+        Slider(
+            value = value.coerceIn(range),
+            onValueChange = onValueChange,
+            valueRange = range,
+            steps = steps,
+            colors = SliderDefaults.colors(
+                activeTickColor = Color.Transparent,
+                inactiveTickColor = Color.Transparent,
+            ),
+        )
     }
 }
 
@@ -411,7 +432,7 @@ private fun AutomationRunCard(
             Column(Modifier.weight(1f)) {
                 Text(run.title, style = MaterialTheme.typography.titleMedium)
                 Text(run.detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(run.timeText, style = MaterialTheme.typography.labelMedium, color = UninWarning)
+                Text(run.timeText, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Column(horizontalAlignment = Alignment.End) {
                 StatusPill(label, color)

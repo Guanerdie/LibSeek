@@ -49,6 +49,7 @@ import de.tlovex.unin.ui.components.GradientPrimaryButton
 import de.tlovex.unin.ui.components.NeumorphicCard
 import de.tlovex.unin.ui.components.SectionHeading
 import de.tlovex.unin.ui.components.StatusPill
+import de.tlovex.unin.ui.components.UninProgressBar
 import de.tlovex.unin.ui.theme.UninBlue
 import de.tlovex.unin.ui.theme.UninDanger
 import de.tlovex.unin.ui.theme.UninSuccess
@@ -172,9 +173,9 @@ private fun BatchCard(batch: ImportBatchUi, canOperate: Boolean, onCancel: () ->
             )
             Text(batch.summary, style = MaterialTheme.typography.bodyMedium)
             if (batch.isRunning && batch.items.isNotEmpty()) {
-                LinearProgressIndicator(
-                    progress = { batch.items.count { it.isFinished }.toFloat() / batch.items.size },
-                    modifier = Modifier.fillMaxWidth(),
+                UninProgressBar(
+                    progress = batch.items.count { it.isFinished }.toFloat() / batch.items.size,
+                    color = UninBlue,
                 )
             }
         }

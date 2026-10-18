@@ -844,22 +844,26 @@ private fun ConnectionCard(connection: ConnectionUi, callbacks: UninCallbacks, m
         ConnectionState.NotConfigured -> "未配置" to UninWarning
     }
     NeumorphicCard(modifier) {
-        Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 6.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(Modifier.weight(1f)) {
-                Text(connection.name, style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(connection.name, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.size(8.dp))
+                    StatusPill(label, color)
+                }
+                Spacer(Modifier.height(2.dp))
                 Text(connection.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Column(horizontalAlignment = Alignment.End) {
-                StatusPill(label, color)
-                TextButton(
-                    onClick = { callbacks.onTestConnection(connection) },
-                    enabled = connection.state != ConnectionState.Checking && connection.state != ConnectionState.NotConfigured,
-                    modifier = Modifier.height(48.dp),
-                ) {
-                    Icon(Icons.Outlined.Refresh, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.size(5.dp))
-                    Text("测试")
-                }
+            TextButton(
+                onClick = { callbacks.onTestConnection(connection) },
+                enabled = connection.state != ConnectionState.Checking && connection.state != ConnectionState.NotConfigured,
+            ) {
+                Icon(Icons.Outlined.Refresh, null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.size(5.dp))
+                Text("测试")
             }
         }
     }

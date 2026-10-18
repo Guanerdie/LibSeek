@@ -1,5 +1,6 @@
 package de.tlovex.unin.ui
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -29,7 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import de.tlovex.unin.ui.components.UninWordmark
+import de.tlovex.unin.ui.components.UninMark
 import de.tlovex.unin.ui.screens.ActivityScreen
 import de.tlovex.unin.ui.screens.AutomationScreen
 import de.tlovex.unin.ui.screens.CleanupScreen
@@ -40,6 +42,8 @@ import de.tlovex.unin.ui.screens.MissingMediaScreen
 import de.tlovex.unin.ui.screens.ResourceCandidatesScreen
 import de.tlovex.unin.ui.screens.SettingsScreen
 import de.tlovex.unin.ui.theme.UninTheme
+import de.tlovex.unin.ui.theme.uninPalette
+import androidx.compose.foundation.layout.Column
 
 private data class NavigationItem(
     val destination: UninDestination,
@@ -71,7 +75,7 @@ fun UninApp(
     state: UninUiState,
     callbacks: UninCallbacks,
     modifier: Modifier = Modifier,
-    darkTheme: Boolean = false,
+    darkTheme: Boolean = isSystemInDarkTheme(),
 ) {
     UninTheme(darkTheme = darkTheme) {
         val snackbarHostState = remember { SnackbarHostState() }
@@ -114,10 +118,10 @@ fun UninApp(
                         state = state,
                         callbacks = callbacks,
                         contentPadding = PaddingValues(
-                            start = 18.dp,
-                            top = scaffoldPadding.calculateTopPadding() + 20.dp,
-                            end = 18.dp,
-                            bottom = scaffoldPadding.calculateBottomPadding() + 20.dp,
+                            start = 16.dp,
+                            top = scaffoldPadding.calculateTopPadding() + 16.dp,
+                            end = 16.dp,
+                            bottom = scaffoldPadding.calculateBottomPadding() + 16.dp,
                         ),
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -155,7 +159,12 @@ private fun ScreenContent(
 
 @Composable
 private fun PhoneNavigationBar(selected: UninDestination, onSelected: (UninDestination) -> Unit) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+    Column {
+    HorizontalDivider(color = uninPalette.line)
+    NavigationBar(
+        containerColor = uninPalette.surface,
+        tonalElevation = 0.dp,
+    ) {
         primaryDestinations.forEach { item ->
             val isSelected = selected.navigationParent() == item.destination
             NavigationBarItem(
@@ -163,20 +172,26 @@ private fun PhoneNavigationBar(selected: UninDestination, onSelected: (UninDesti
                 onClick = { onSelected(item.destination) },
                 icon = { Icon(item.icon, contentDescription = item.label) },
                 label = { Text(item.label) },
-                colors = NavigationBarItemDefaults.colors(indicatorColor = MaterialTheme.colorScheme.primaryContainer),
+                colors = NavigationBarItemDefaults.colors(
+                    indicatorColor = uninPalette.accentSoft,
+                    selectedIconColor = uninPalette.accent,
+                    selectedTextColor = uninPalette.accent,
+                    unselectedIconColor = uninPalette.inkMuted,
+                    unselectedTextColor = uninPalette.inkMuted,
+                ),
             )
         }
+    }
     }
 }
 
 @Composable
 private fun TabletNavigationRail(selected: UninDestination, onSelected: (UninDestination) -> Unit) {
     NavigationRail(
-        containerColor = MaterialTheme.colorScheme.surface,
-        header = {
-            UninWordmark(Modifier.padding(horizontal = 18.dp, vertical = 20.dp))
-            HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
-        },
+        containerColor = uninPalette.surface,
+        // The rail is as wide as its widest child; a full-width header once
+        // stretched it across the whole tablet and hid the page.
+        header = { UninMark(Modifier.padding(top = 20.dp, bottom = 16.dp)) },
     ) {
         primaryDestinations.forEach { item ->
             val isSelected = selected.navigationParent() == item.destination
@@ -186,7 +201,15 @@ private fun TabletNavigationRail(selected: UninDestination, onSelected: (UninDes
                 icon = { Icon(item.icon, contentDescription = item.label) },
                 label = { Text(item.label) },
                 alwaysShowLabel = true,
+                colors = NavigationRailItemDefaults.colors(
+                    indicatorColor = uninPalette.accentSoft,
+                    selectedIconColor = uninPalette.accent,
+                    selectedTextColor = uninPalette.accent,
+                    unselectedIconColor = uninPalette.inkMuted,
+                    unselectedTextColor = uninPalette.inkMuted,
+                ),
             )
         }
     }
 }
+

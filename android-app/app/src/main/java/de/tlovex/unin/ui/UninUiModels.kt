@@ -32,6 +32,8 @@ data class MissingMediaUi(
     val kind: MediaKind,
     val missingDescription: String,
     val posterUrl: String? = null,
+    // 欧美、大陆、港台、韩国、日本、亚太 as NextFind classifies them.
+    val regions: List<String> = emptyList(),
     val tmdbConfirmed: Boolean = false,
     val candidateCount: Int = 0,
     val downloadActive: Boolean = false,
