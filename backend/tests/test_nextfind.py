@@ -604,6 +604,44 @@ def test_library_details_schema_normalizes_matrix_and_exact_missing_codes() -> N
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_discovery_skips_the_done_segment_ending_each_page(
+    adapter: NextFindAdapter,
+) -> None:
+    """The stream NextFind has sent since 2026-10: data, then a done marker.
+
+    The marker has no title.  Read as an item it failed validation, so each
+    page added a warning and no listing was ever trusted.
+    """
+    respx.post(f"{BASE_URL}/api/admin/login").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+
+    def discover(request: httpx.Request) -> httpx.Response:
+        raw_type = "movie" if request.url.params["type"] == "电影" else "tv"
+        return httpx.Response(
+            200,
+            content=(
+                f'{{"data":[{{"id":42,"type":"{raw_type}","title":"One"}}],'
+                '"current_page":1,"total_pages":1,"next_cursor":null}\n'
+                '{"type":"done","scope":"catalogue","total_pages":1}\n'
+            ).encode(),
+            headers={"content-type": "application/x-ndjson"},
+        )
+
+    respx.get(f"{BASE_URL}/api/discover").mock(side_effect=discover)
+
+    result = await adapter.list_missing_media()
+
+    assert [(item.tmdb_id, item.media_type) for item in result.items] == [
+        (42, MediaType.MOVIE),
+        (42, MediaType.TV),
+    ]
+    assert result.warnings == []
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_discovery_requests_both_nextfind_types_and_merges_them(
     adapter: NextFindAdapter,
 ) -> None:

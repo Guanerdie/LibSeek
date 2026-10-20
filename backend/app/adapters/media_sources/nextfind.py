@@ -42,6 +42,11 @@ _DISCOVER_CONTROL_KEYS = frozenset(
     {
         "type",
         "status",
+        # Since 2026-10 every page ends with {"type": "done", "scope":
+        # "catalogue", "total_pages": N}.  Unrecognised, it was read as an item
+        # with no title, so every listing carried warnings and was never
+        # trusted: no library confirmations, no cleanup.
+        "scope",
         "current_page",
         "total_pages",
         "page_size",
@@ -341,7 +346,7 @@ class NextFindAdapter(MediaSourceAdapter):
 
     @staticmethod
     def _has_valid_discover_probe_control_fields(payload: dict[Any, Any]) -> bool:
-        for key in ("type", "status"):
+        for key in ("type", "status", "scope"):
             if key in payload and (
                 not isinstance(payload[key], str) or not payload[key].strip()
             ):
