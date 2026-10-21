@@ -473,7 +473,9 @@ async def test_sync_records_confirmations_only_where_a_download_depends_on_them(
         assert [row.media_id for row in confirmed] == [downloaded.id]
         # Both titles were confirmed; only one was worth a row of its own.
         assert synced.details["newly_confirmed"] == 2
+        assert "warning_codes" not in synced.details
         assert library_listing_is_fresh(timedelta(minutes=15))
+        assert integrations.library_sync_status().listing_problem is None
 
 
 @pytest.mark.asyncio
@@ -556,6 +558,80 @@ async def test_a_short_listing_confirms_nothing_and_is_not_fresh(session_factory
         assert not library_listing_is_fresh(timedelta(minutes=15))
 
 
+def _control_line_warning() -> DiscoveryWarning:
+    return DiscoveryWarning(
+        line_number=2,
+        error_code="UNRECOGNISED_CONTROL_LINE",
+        message="已隔离无法识别的控制行（键：type, scope, total_pages）",
+        keys=["type", "scope", "total_pages"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_warned_listing_says_what_the_warnings_were(session_factory) -> None:
+    """From 2026-10-13 the log said "79 warnings" for a week, and nothing more."""
+
+    class _NewControlLine(_FakeNextFind):
+        async def list_missing_media(self) -> MediaDiscoveryResult:
+            listing = await super().list_missing_media()
+            listing.warnings = [
+                *(_control_line_warning() for _ in range(79)),
+                DiscoveryWarning(
+                    line_number=1, error_code="ITEM_VALIDATION_ERROR", message="已隔离"
+                ),
+            ]
+            return listing
+
+    async with session_factory() as session:
+        media = await _media(session, "unread", "Unread Title")
+        await _download_for(session, media)
+        await session.commit()
+
+        await sync_nextfind(session, _NewControlLine(missing=[]))  # type: ignore[arg-type]
+        await session.refresh(media)
+        synced = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "NEXTFIND_SYNCED")
+            )
+        ).one()
+
+        problem = (
+            "NextFind 列表含 79 行无法识别的控制行（键：type, scope, total_pages）、"
+            "1 条字段不完整的数据项"
+        )
+        assert synced.details["warnings"] == 80
+        assert synced.details["warning_codes"] == {
+            "UNRECOGNISED_CONTROL_LINE": 79,
+            "ITEM_VALIDATION_ERROR": 1,
+        }
+        assert synced.details["unrecognised_control_keys"] == [["type", "scope", "total_pages"]]
+        assert synced.message == f"{problem}，本次不更新入库状态"
+        assert integrations.library_sync_status().listing_problem == problem
+        # Naming the warnings changes nothing about believing them.
+        assert media.library_confirmed_at is None
+        assert not library_listing_is_fresh(timedelta(minutes=15))
+
+
+def test_listing_warnings_are_described_commonest_first() -> None:
+    other_keys = _control_line_warning().model_copy(update={"keys": ["kind", "end"]})
+    warnings = [
+        DiscoveryWarning(error_code="SOMETHING_NEW", message="?"),
+        _control_line_warning(),
+        other_keys,
+        _control_line_warning(),
+        DiscoveryWarning(error_code="PAGINATION_LIMIT_REACHED", message="?"),
+        DiscoveryWarning(error_code="SOMETHING_NEW", message="?"),
+        DiscoveryWarning(error_code="SOMETHING_NEW", message="?"),
+        DiscoveryWarning(error_code="SOMETHING_NEW", message="?"),
+    ]
+
+    assert integrations.describe_listing_warnings(warnings) == (
+        "4 条 SOMETHING_NEW 警告、"
+        "3 行无法识别的控制行（键：type, scope, total_pages；kind, end）、"
+        "1 次页数达到安全上限"
+    )
+
+
 async def _many_missing(session: AsyncSession, count: int) -> list[LibraryMediaItem]:
     items = []
     for index in range(count):
@@ -595,7 +671,11 @@ async def test_a_listing_that_empties_out_is_not_believed(session_factory) -> No
         assert synced.details["rejected_confirmations"] == 60
         assert synced.details["confirmation_limit"] == 50
         assert synced.details["warnings"] == 1
+        assert synced.details["warning_codes"] == {"LISTING_SHRANK": 1}
         assert "列表异常" in synced.message
+        assert integrations.library_sync_status().listing_problem == (
+            "NextFind 列表异常：60 部影视同时不再缺失，超过上限 50"
+        )
         # Cleanup asks exactly this before deleting anything.
         assert not library_listing_is_fresh(timedelta(minutes=15))
 

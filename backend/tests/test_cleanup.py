@@ -18,8 +18,9 @@ from app.core.config import Settings
 from app.core.time import utc_now
 from app.errors import AppError
 from app.models.enums import MediaType
+from app.schemas.adapters import DiscoveryWarning, MediaDiscoveryResult
 from app.schemas.qbittorrent import QbTorrent
-from app.simple import cleanup
+from app.simple import cleanup, integrations
 from app.simple.automation import get_policy
 from app.simple.cleanup import CLEANUP_TAG, run_cleanup_cycle
 from app.simple.models import (
@@ -856,6 +857,63 @@ async def test_failed_library_refresh_stops_the_whole_cycle(session_factory) -> 
         assert fresh.cleanup_state == DownloadCleanupState.NONE
         assert len(skipped) == 1
         assert "NextFind 无法连接" in skipped[0].message
+
+
+class _ListingWithUnknownLines:
+    """Every page ending in a line nobody recognises, as on 2026-10-13."""
+
+    async def authenticate(self) -> None:
+        return None
+
+    async def list_missing_media(self) -> MediaDiscoveryResult:
+        return MediaDiscoveryResult(
+            items=[],
+            warnings=[
+                DiscoveryWarning(
+                    line_number=2,
+                    error_code="UNRECOGNISED_CONTROL_LINE",
+                    message="已隔离无法识别的控制行（键：type, scope, total_pages）",
+                    keys=["type", "scope", "total_pages"],
+                )
+                for _ in range(79)
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_untrusted_listing_skip_names_what_nextfind_sent(
+    monkeypatch: pytest.MonkeyPatch, session_factory
+) -> None:
+    """The skip used to say only "列表不完整", which hid the cause for a week."""
+
+    monkeypatch.setattr(integrations, "_library_sync", integrations.LibrarySyncStatus())
+    monkeypatch.setattr(cleanup, "build_nextfind", _ListingWithUnknownLines)
+    async with session_factory() as session:
+        due = await _seed(
+            session,
+            source_item_id="due-untrusted",
+            info_hash="c6" * 20,
+            cleanup_state=DownloadCleanupState.MARKED,
+            marked_days_ago=5,
+        )
+        await _enable(session)
+        qb = RecordingQb([_torrent("c6" * 20, seeding_days=30, tags=CLEANUP_TAG)])
+
+        result = await _run_with_refresh(session, qb, cleanup.refresh_library_confirmations)
+        await session.refresh(due)
+        skipped = (
+            await session.scalars(
+                select(ActivityLog).where(ActivityLog.event == "DOWNLOAD_CLEANUP_SKIPPED")
+            )
+        ).one()
+
+        assert qb.tagged == [] and qb.deleted == []
+        assert result.total == 0
+        assert due.cleanup_state == DownloadCleanupState.MARKED
+        assert skipped.message == (
+            "无法刷新入库确认，本轮不清理："
+            "NextFind 列表含 79 行无法识别的控制行（键：type, scope, total_pages）"
+        )
 
 
 @pytest.mark.asyncio

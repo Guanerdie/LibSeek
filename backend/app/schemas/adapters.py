@@ -108,6 +108,9 @@ class DiscoveryWarning(BaseModel):
     line_number: int | None = None
     error_code: str
     message: str
+    # The key names (never the values) of a line that could not be read, so a
+    # line the source started sending can be recognised from the activity log.
+    keys: list[str] | None = None
 
 
 class MediaItemData(BaseModel):

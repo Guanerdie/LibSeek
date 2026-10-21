@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
@@ -24,6 +25,7 @@ from app.core.security import validate_external_url
 from app.core.time import utc_now
 from app.errors import AppError
 from app.schemas.adapters import (
+    DiscoveryWarning,
     MediaItemData,
     MetadataRecord,
     SeasonRecord,
@@ -66,6 +68,20 @@ _QB_MISSING_GRACE = timedelta(minutes=15)
 #: that is taken as a truncated listing rather than a very busy day.
 _MAX_CONFIRM_FRACTION = 0.05
 _MIN_CONFIRM_BATCH = 50
+#: How each NextFind warning reads on the activity page, by count.
+_LISTING_WARNING_TEXT: dict[str, str] = {
+    "UNRECOGNISED_CONTROL_LINE": "{count} 行无法识别的控制行",
+    "ITEM_VALIDATION_ERROR": "{count} 条字段不完整的数据项",
+    "NDJSON_BAD_LINE": "{count} 行损坏的数据",
+    "NDJSON_LINE_TOO_LARGE": "{count} 行超出大小限制的数据",
+    "PAGINATION_METADATA_INVALID": "{count} 处无效的分页信息",
+    "PAGINATION_METADATA_CONFLICT": "{count} 处不一致的分页信息",
+    "PAGINATION_LOOP_ISOLATED": "{count} 次重复分页",
+    "CURSOR_LOOP_ISOLATED": "{count} 次重复游标",
+    "PAGINATION_LIMIT_REACHED": "{count} 次页数达到安全上限",
+}
+#: Distinct unrecognised key sets worth naming; more would only repeat.
+_MAX_REPORTED_KEY_SETS = 3
 _download_submission_lock = asyncio.Lock()
 _nextfind_sync_lock = asyncio.Lock()
 
@@ -236,6 +252,9 @@ class LibrarySyncStatus:
     # How many times NextFind said its listing was cut short.  Anything above
     # zero means "absent from the list" proves nothing.
     warnings: int = 0
+    # Why the listing was not trusted, in the words the activity page uses, so
+    # a cleanup that stops on it can say more than "incomplete".
+    listing_problem: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -259,6 +278,7 @@ def mark_library_sync_started() -> None:
     _library_sync.created = 0
     _library_sync.updated = 0
     _library_sync.warnings = 0
+    _library_sync.listing_problem = None
     _library_sync.error_message = None
     _library_sync.started_at = utc_now()
     _library_sync.finished_at = None
@@ -269,12 +289,14 @@ def mark_library_sync_finished(
     created: int = 0,
     updated: int = 0,
     warnings: int = 0,
+    listing_problem: str | None = None,
     error_message: str | None = None,
 ) -> None:
     _library_sync.state = "FAILED" if error_message is not None else "SUCCEEDED"
     _library_sync.created = created
     _library_sync.updated = updated
     _library_sync.warnings = warnings
+    _library_sync.listing_problem = listing_problem
     _library_sync.error_message = error_message
     _library_sync.finished_at = utc_now()
 
@@ -313,19 +335,53 @@ async def sync_nextfind(session: AsyncSession, adapter: MediaSourceAdapter) -> t
     async with _nextfind_sync_lock:
         mark_library_sync_started()
         try:
-            created, updated, warnings = await _sync_nextfind_locked(session, adapter)
+            created, updated, warnings, listing_problem = await _sync_nextfind_locked(
+                session, adapter
+            )
         except BaseException as exc:
             mark_library_sync_finished(
                 error_message=exc.message if isinstance(exc, AppError) else "缺失影视同步失败"
             )
             raise
-        mark_library_sync_finished(created=created, updated=updated, warnings=warnings)
+        mark_library_sync_finished(
+            created=created,
+            updated=updated,
+            warnings=warnings,
+            listing_problem=listing_problem,
+        )
         return created, updated
+
+
+def describe_listing_warnings(warnings: Sequence[DiscoveryWarning]) -> str:
+    """What NextFind's warnings were, commonest first, for the activity page.
+
+    Counts per kind, and for lines nobody recognised the key names they held.
+    """
+
+    parts: list[str] = []
+    for code, count in Counter(warning.error_code for warning in warnings).most_common():
+        template = _LISTING_WARNING_TEXT.get(code)
+        text = template.format(count=count) if template else f"{count} 条 {code} 警告"
+        if code == "UNRECOGNISED_CONTROL_LINE":
+            key_sets = _unrecognised_key_sets(warnings)
+            if key_sets:
+                text += "（键：" + "；".join(", ".join(keys) for keys in key_sets) + "）"
+        parts.append(text)
+    return "、".join(parts)
+
+
+def _unrecognised_key_sets(warnings: Sequence[DiscoveryWarning]) -> list[list[str]]:
+    distinct = dict.fromkeys(
+        tuple(warning.keys)
+        for warning in warnings
+        if warning.error_code == "UNRECOGNISED_CONTROL_LINE" and warning.keys is not None
+    )
+    return [list(keys) for keys in distinct][:_MAX_REPORTED_KEY_SETS]
 
 
 async def _sync_nextfind_locked(
     session: AsyncSession, adapter: MediaSourceAdapter
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, str | None]:
     settings = get_settings()
     await adapter.authenticate()
     result = await adapter.list_missing_media()
@@ -477,23 +533,38 @@ async def _sync_nextfind_locked(
         "confirmation_revoked": revoked,
         "id_collisions": id_collisions,
     }
+    # The total alone said "79 warnings" for a week without saying of what.
+    warning_codes = dict(Counter(warning.error_code for warning in result.warnings))
+    if listing_shrank:
+        warning_codes["LISTING_SHRANK"] = 1
+    if warning_codes:
+        details["warning_codes"] = warning_codes
+    key_sets = _unrecognised_key_sets(result.warnings)
+    if key_sets:
+        details["unrecognised_control_keys"] = key_sets
+    problems: list[str] = []
+    if result.warnings:
+        problems.append(f"NextFind 列表含 {describe_listing_warnings(result.warnings)}")
     if listing_shrank:
         details["rejected_confirmations"] = would_confirm
         details["confirmation_limit"] = confirm_limit
+        problems.append(
+            f"NextFind 列表异常：{would_confirm} 部影视同时不再缺失，超过上限 {confirm_limit}"
+        )
+    listing_problem = "；".join(problems) or None
     session.add(
         ActivityLog(
             event="NEXTFIND_SYNCED",
             message=(
-                f"NextFind 列表异常：{would_confirm} 部影视同时不再缺失，"
-                f"超过上限 {confirm_limit}，本次不更新入库状态"
-                if listing_shrank
+                f"{listing_problem}，本次不更新入库状态"
+                if listing_problem is not None
                 else f"NextFind 同步完成：新增 {created}，更新 {updated}"
             ),
             details=details,
         )
     )
     await session.commit()
-    return created, updated, warning_count
+    return created, updated, warning_count, listing_problem
 
 
 def _apply_discovery_item(target: LibraryMediaItem, item: MediaItemData) -> None:

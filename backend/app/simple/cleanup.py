@@ -45,6 +45,7 @@ from app.simple.integrations import (
     build_nextfind,
     close_adapter,
     library_listing_is_fresh,
+    library_sync_status,
     sync_nextfind,
 )
 from app.simple.models import (
@@ -438,9 +439,11 @@ async def refresh_library_confirmations(session: AsyncSession) -> None:
     finally:
         await close_adapter(adapter)
     if not library_listing_is_fresh(_LISTING_MAX_AGE):
+        # Becomes the skipped cycle's activity line, which is where the
+        # operator looks to learn why nothing was deleted.
         raise AppError(
             "NEXTFIND_LISTING_INCOMPLETE",
-            "NextFind 返回的缺失列表不完整",
+            library_sync_status().listing_problem or "NextFind 返回的缺失列表不完整",
             status_code=502,
             retryable=True,
         )

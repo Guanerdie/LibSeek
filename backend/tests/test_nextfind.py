@@ -640,6 +640,72 @@ async def test_discovery_skips_the_done_segment_ending_each_page(
     await adapter.aclose()
 
 
+def _ndjson(*lines: bytes) -> httpx.Response:
+    return httpx.Response(
+        200,
+        content=b"\n".join(lines) + b"\n",
+        headers={"content-type": "application/x-ndjson"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_line_without_a_title_is_reported_by_its_keys(
+    adapter: NextFindAdapter,
+) -> None:
+    """The next "scope": the listing stays untrusted, but the log says why."""
+
+    response = _ndjson(
+        b'{"data":[{"id":1,"type":"movie","title":"First"}],"total_pages":1}',
+        b'{"type":"done","phase":"catalogue-v2","total_pages":1}',
+    )
+
+    items, warnings, _ = await adapter._parse_stream(response, expected_page=1)
+
+    assert [item.tmdb_id for item in items] == [1]
+    assert [(w.line_number, w.error_code, w.keys) for w in warnings] == [
+        (2, "UNRECOGNISED_CONTROL_LINE", ["type", "phase", "total_pages"])
+    ]
+    assert warnings[0].message == "已隔离无法识别的控制行（键：type, phase, total_pages）"
+    # Key names only: a value could be anything, a token included.
+    assert "catalogue-v2" not in warnings[0].message
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "line",
+    (
+        b'{"id":7,"type":"movie"}',
+        b'{"tmdb_id":7,"type":"movie"}',
+        b'{"source_item_id":"abc","type":"movie"}',
+        b'{"name":null,"type":"movie"}',
+        b'{"title":"Bad Year","type":"movie","year":1500}',
+    ),
+)
+async def test_a_damaged_item_is_still_an_item_validation_error(
+    adapter: NextFindAdapter, line: bytes
+) -> None:
+    """Anything carrying a title or an id may be a real title gone missing."""
+
+    _, warnings, _ = await adapter._parse_stream(_ndjson(line), expected_page=1)
+
+    assert [(w.error_code, w.keys) for w in warnings] == [("ITEM_VALIDATION_ERROR", None)]
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reported_key_names_are_bounded(adapter: NextFindAdapter) -> None:
+    payload = {"x" * 100: 1, **{f"k{index}": index for index in range(15)}}
+
+    _, warnings, _ = await adapter._parse_stream(
+        httpx.Response(200, json=payload), expected_page=1
+    )
+
+    assert [w.error_code for w in warnings] == ["UNRECOGNISED_CONTROL_LINE"]
+    assert warnings[0].keys == ["x" * 40, *(f"k{index}" for index in range(11)), "…"]
+    await adapter.aclose()
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_discovery_requests_both_nextfind_types_and_merges_them(

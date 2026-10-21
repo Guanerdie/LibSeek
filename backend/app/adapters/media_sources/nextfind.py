@@ -54,6 +54,15 @@ _DISCOVER_CONTROL_KEYS = frozenset(
         "next_cursor",
     }
 )
+# An entry holding none of these cannot describe a title.  When one fails
+# validation it is far more likely a control line NextFind has started sending
+# than a damaged item, and saying so -- with its key names -- is what turns the
+# next "scope" into a log line rather than a week of silently skipped cleanup.
+_ITEM_IDENTITY_KEYS = frozenset(
+    {"title", "name", "original_title", "original_name", "id", "tmdb_id", "source_item_id"}
+)
+_MAX_REPORTED_KEYS = 12
+_MAX_REPORTED_KEY_CHARS = 40
 _MAX_ORIGIN_COUNTRY_JSON_CHARS = 1024
 _MAX_ORIGIN_COUNTRY_CODES = 64
 _MISSING_MEDIA_TYPES = ("电影", "电视剧")
@@ -830,13 +839,7 @@ class NextFindAdapter(MediaSourceAdapter):
                 try:
                     records.append(self._normalize(NextFindRawItem.model_validate(raw_item)))
                 except (ValidationError, ValueError):
-                    warnings.append(
-                        DiscoveryWarning(
-                            line_number=line_number,
-                            error_code="ITEM_VALIDATION_ERROR",
-                            message="已隔离字段不完整的数据项",
-                        )
-                    )
+                    warnings.append(self._rejected_item_warning(raw_item, line_number))
 
         async for chunk in self._iter_response_bytes(response):
             total += len(chunk)
@@ -948,6 +951,26 @@ class NextFindAdapter(MediaSourceAdapter):
                 _DISCOVER_CONTROL_KEYS
                 | envelope_keys
             )
+        )
+
+    @staticmethod
+    def _rejected_item_warning(raw_item: dict[str, Any], line_number: int) -> DiscoveryWarning:
+        if raw_item.keys() & _ITEM_IDENTITY_KEYS:
+            return DiscoveryWarning(
+                line_number=line_number,
+                error_code="ITEM_VALIDATION_ERROR",
+                message="已隔离字段不完整的数据项",
+            )
+        # Still a warning, so the listing stays untrusted: until someone has
+        # looked, a line nobody recognises may be why titles are missing.
+        keys = [str(key)[:_MAX_REPORTED_KEY_CHARS] for key in raw_item]
+        if len(keys) > _MAX_REPORTED_KEYS:
+            keys = [*keys[:_MAX_REPORTED_KEYS], "…"]
+        return DiscoveryWarning(
+            line_number=line_number,
+            error_code="UNRECOGNISED_CONTROL_LINE",
+            message=f"已隔离无法识别的控制行（键：{', '.join(keys) or '无'}）",
+            keys=keys,
         )
 
     @staticmethod
