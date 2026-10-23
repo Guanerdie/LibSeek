@@ -5,7 +5,9 @@ from uuid import uuid4
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from alembic import command
 
@@ -71,6 +73,11 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     assert automation_job_columns["retry_of_job_id"]["nullable"] is True
     assert automation_job_columns["superseded_at"]["nullable"] is True
     assert automation_job_columns["error_code"]["nullable"] is True
+    automation_run_columns = {
+        column["name"]: column for column in inspector.get_columns("automation_runs")
+    }
+    assert automation_run_columns["skipped_existing_count"]["nullable"] is False
+    assert automation_run_columns["awaiting_library_count"]["nullable"] is False
     automation_policy_columns = {
         column["name"] for column in inspector.get_columns("automation_policy")
     }
@@ -95,8 +102,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     # SQLite rebuilds the whole table for every batch_alter_table, so the
     # constraints that were already there have to survive the new ones.
     policy_checks = {
-        constraint["name"]
-        for constraint in inspector.get_check_constraints("automation_policy")
+        constraint["name"] for constraint in inspector.get_check_constraints("automation_policy")
     }
     assert {
         "ck_automation_retry_delay",
@@ -138,9 +144,7 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
         )
         for item in inspector.get_foreign_keys("automation_jobs")
     }
-    download_columns = {
-        column["name"]: column for column in inspector.get_columns("downloads")
-    }
+    download_columns = {column["name"]: column for column in inspector.get_columns("downloads")}
     assert download_columns["content_size_bytes"]["nullable"] is True
     assert download_columns["submitted_at"]["nullable"] is True
     download_checks = {
@@ -153,24 +157,18 @@ def test_initial_migration_builds_and_drops_the_simplified_schema(
     engine = create_engine(sqlite_url(database, async_driver=False))
     inspector = inspect(engine)
     assert "automation_runs" not in inspector.get_table_names()
-    download_columns = {
-        column["name"]: column for column in inspector.get_columns("downloads")
-    }
+    download_columns = {column["name"]: column for column in inspector.get_columns("downloads")}
     assert "content_size_bytes" not in download_columns
     assert "submitted_at" not in download_columns
     library_columns = {column["name"] for column in inspector.get_columns("library_media")}
     assert "search_titles" not in library_columns
     assert "imdb_id" not in library_columns
     assert "library_confirmed_at" not in library_columns
-    candidate_columns = {
-        column["name"] for column in inspector.get_columns("release_candidates")
-    }
+    candidate_columns = {column["name"] for column in inspector.get_columns("release_candidates")}
     assert "download_factor" not in candidate_columns
     assert "collection_type" not in candidate_columns
     assert "file_count" not in candidate_columns
-    automation_job_columns = {
-        column["name"] for column in inspector.get_columns("automation_jobs")
-    }
+    automation_job_columns = {column["name"] for column in inspector.get_columns("automation_jobs")}
     assert "retry_of_job_id" not in automation_job_columns
     assert "superseded_at" not in automation_job_columns
     assert "error_code" not in automation_job_columns
@@ -381,9 +379,11 @@ def test_held_downloads_are_told_apart_by_why_they_are_held(
                 text("SELECT id, cleanup_hold_reason FROM downloads ORDER BY id")
             ).all()
         )
-        release_backlog = connection.execute(
-            text("SELECT cleanup_release_backlog FROM automation_policy")
-        ).scalars().all()
+        release_backlog = (
+            connection.execute(text("SELECT cleanup_release_backlog FROM automation_policy"))
+            .scalars()
+            .all()
+        )
     engine.dispose()
     assert reasons == {"d1": "BACKLOG", "d2": "MANUAL", "d3": None, "d4": None}
     # Off for everyone after the upgrade; nothing starts on its own.
@@ -391,3 +391,162 @@ def test_held_downloads_are_told_apart_by_why_they_are_held(
 
     command.downgrade(config, "20261005_0026")
     database.unlink()
+
+
+def test_download_history_upgrade_preserves_rows_and_only_deduplicates_active_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backend_root = Path(__file__).parents[1]
+    database = tmp_path / "download-history.db"
+    monkeypatch.setenv("DATABASE_URL", sqlite_url(database, async_driver=True))
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    command.upgrade(config, "20261007_0027")
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    stamp = "2026-10-20 00:00:00"
+    download_insert = text(
+        "INSERT INTO downloads (id, media_id, candidate_id, name, state, progress,"
+        " download_speed, upload_speed, ratio, info_hash, seeding_seconds,"
+        " cleanup_state, created_at, updated_at)"
+        " VALUES (:did, 'm1', :cid, 'Example.mkv', 'COMPLETED', 1, 0, 0, 1.5,"
+        " :hash, 0, :state, :stamp, :stamp)"
+    )
+    with engine.begin() as connection:
+        connection.execute(text("PRAGMA foreign_keys=ON"))
+        connection.execute(
+            text(
+                "INSERT INTO automation_runs (id, trigger, state, created_count, succeeded_count,"
+                " failed_count, deferred_count, created_at)"
+                " VALUES ('r1', 'scheduled', 'SUCCEEDED', 20, 20, 0, 0, :stamp)"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO library_media (id, source, source_item_id, media_type, title,"
+                " state, discovered_at, updated_at, country_codes)"
+                " VALUES ('m1', 'nextfind', 'm1', 'movie', 'm1', 'MISSING', :stamp, :stamp, '[]')"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO searches (id, media_id, site_ids, state, created_at)"
+                " VALUES ('s1', 'm1', '[\"avistaz\"]', 'SUCCEEDED', :stamp)"
+            ),
+            {"stamp": stamp},
+        )
+        for index, state in enumerate(("DELETED", "NONE", "VANISHED"), start=1):
+            connection.execute(
+                text(
+                    "INSERT INTO release_candidates (id, search_id, site_id, torrent_id, title,"
+                    " season_coverage, episode_coverage, score, reasons, warnings, created_at)"
+                    " VALUES (:cid, 's1', 'avistaz', :cid, 'Example', '[]', '[]', 0.9,"
+                    " '[]', '[]', :stamp)"
+                ),
+                {"cid": f"c{index}", "stamp": stamp},
+            )
+            connection.execute(
+                download_insert,
+                {
+                    "did": f"d{index}",
+                    "cid": f"c{index}",
+                    "hash": str(index) * 40,
+                    "state": state,
+                    "stamp": stamp,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO automation_jobs (id, run_id, media_id, search_id,"
+                " selected_candidate_id,"
+                " download_id, state, trigger, attempt_count, decision, created_at)"
+                " VALUES ('j1', 'r1', 'm1', 's1', 'c1', 'd1',"
+                " 'SUCCEEDED', 'scheduled', 1, '{}', :stamp)"
+            ),
+            {"stamp": stamp},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO episodes (id, media_id, season_number, episode_number, state)"
+                " VALUES ('e1', 'm1', 1, 1, 'MISSING')"
+            )
+        )
+    engine.dispose()
+
+    def enable_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    event.listen(Engine, "connect", enable_foreign_keys)
+    try:
+        command.upgrade(config, "head")
+    finally:
+        event.remove(Engine, "connect", enable_foreign_keys)
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.begin() as connection:
+        connection.execute(text("PRAGMA foreign_keys=ON"))
+        assert connection.execute(text("PRAGMA foreign_key_check")).all() == []
+        assert connection.execute(
+            text(
+                "SELECT download_id, selected_candidate_id, search_id"
+                " FROM automation_jobs WHERE id='j1'"
+            )
+        ).one() == ("d1", "c1", "s1")
+        assert (
+            connection.execute(text("SELECT media_id FROM episodes WHERE id='e1'")).scalar_one()
+            == "m1"
+        )
+        assert connection.execute(
+            text(
+                "SELECT skipped_existing_count, awaiting_library_count, succeeded_count "
+                "FROM automation_runs WHERE id = 'r1'"
+            )
+        ).one() == (0, 0, 20)
+        for index in (1, 3):
+            connection.execute(
+                download_insert,
+                {
+                    "did": f"retry{index}",
+                    "cid": f"c{index}",
+                    "hash": str(index) * 40,
+                    "state": "NONE",
+                    "stamp": stamp,
+                },
+            )
+        assert connection.execute(text("SELECT COUNT(*) FROM downloads")).scalar_one() == 5
+        assert dict(
+            connection.execute(
+                text("SELECT id, cleanup_state FROM downloads WHERE id IN ('d1', 'd3')")
+            ).all()
+        ) == {"d1": "DELETED", "d3": "VANISHED"}
+    for candidate, info_hash in (("c2", "z" * 40), ("c1", "2" * 40)):
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                download_insert,
+                {
+                    "did": "duplicate",
+                    "cid": candidate,
+                    "hash": info_hash,
+                    "state": "NONE",
+                    "stamp": stamp,
+                },
+            )
+    engine.dispose()
+
+    # A rollback must refuse rather than delete history or leave one index dropped.
+    with pytest.raises(RuntimeError, match="re-download history"):
+        command.downgrade(config, "20261023_0028")
+    engine = create_engine(sqlite_url(database, async_driver=False))
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM downloads")).scalar_one() == 5
+        for sql in connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master WHERE name IN "
+                "('uq_download_candidate', 'uq_download_info_hash')"
+            )
+        ).scalars():
+            assert "WHERE cleanup_state NOT IN" in sql
+    engine.dispose()

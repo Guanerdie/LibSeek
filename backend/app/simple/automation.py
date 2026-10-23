@@ -26,6 +26,11 @@ from app.services.variety import (
     is_within_latest_window,
     single_episode_number,
 )
+from app.simple.automation_coverage import (
+    ExistingDownloadCoverage,
+    candidate_adds_missing_content,
+    existing_download_coverage,
+)
 from app.simple.integrations import (
     close_adapter,
     identify_media,
@@ -40,6 +45,7 @@ from app.simple.models import (
     AutomationRun,
     AutomationRunState,
     Download,
+    DownloadCleanupState,
     DownloadState,
     Episode,
     EpisodeState,
@@ -261,9 +267,7 @@ async def quick_fill_media(
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
     if media.tmdb_id is None:
         if metadata_factory is None:
-            raise AppError(
-                "MEDIA_IDENTITY_REQUIRED", "请先确认 TMDB 影视信息", status_code=409
-            )
+            raise AppError("MEDIA_IDENTITY_REQUIRED", "请先确认 TMDB 影视信息", status_code=409)
         provider = metadata_factory()
         try:
             media = await identify_media(session, media.id, provider)
@@ -310,9 +314,7 @@ async def quick_fill_media(
     return search, selected, rejected, download
 
 
-def _selection_reason(
-    origin: str, candidate: ReleaseCandidate, candidate_count: object
-) -> str:
+def _selection_reason(origin: str, candidate: ReleaseCandidate, candidate_count: object) -> str:
     """Why this release, in the words the activity page shows."""
 
     pool = f"在 {candidate_count} 个候选中" if isinstance(candidate_count, int) else ""
@@ -338,9 +340,7 @@ async def set_media_subscriptions(
 
     policy = await get_policy(session)
     known = set(
-        await session.scalars(
-            select(LibraryMediaItem.id).where(LibraryMediaItem.id.in_(media_ids))
-        )
+        await session.scalars(select(LibraryMediaItem.id).where(LibraryMediaItem.id.in_(media_ids)))
     )
     current = list(policy.selected_media_ids)
     if subscribed:
@@ -632,10 +632,33 @@ async def run_automation(
             # must not also pick up unrelated due jobs or start a fresh scan.
             queued_statement = queued_statement.where(AutomationJob.run_id == run_id)
         queued_sources = list(
-            await session.scalars(queued_statement.order_by(AutomationJob.created_at).limit(limit))
+            await session.scalars(queued_statement.order_by(AutomationJob.created_at))
         )
+        queued_media = (
+            list(
+                await session.scalars(
+                    select(LibraryMediaItem).where(
+                        LibraryMediaItem.id.in_({job.media_id for job in queued_sources})
+                    )
+                )
+            )
+            if queued_sources
+            else []
+        )
+        queued_coverage = await existing_download_coverage(session, queued_media)
+        confirmed_media_ids = {
+            item.id for item in queued_media if item.library_confirmed_at is not None
+        }
         queued_jobs: list[AutomationJob] = []
+        queued_search_count = 0
         for source in queued_sources:
+            coverage = queued_coverage.get(source.media_id)
+            confirmed = source.media_id in confirmed_media_ids
+            covered = confirmed or (coverage is not None and coverage.skip)
+            if not covered and queued_search_count >= limit:
+                continue
+            if not covered:
+                queued_search_count += 1
             if run_record is None or source.run_id == run_id:
                 queued_jobs.append(source)
                 continue
@@ -660,12 +683,13 @@ async def run_automation(
                 )
             ),
         )
-        remaining = 0 if retry_only else max(0, limit - len(queued_jobs))
+        remaining = 0 if retry_only else max(0, limit - queued_search_count)
         media_types = [MediaType(value) for value in policy.media_types]
         statement = (
             select(LibraryMediaItem)
             .where(
                 LibraryMediaItem.media_type.in_(media_types),
+                LibraryMediaItem.library_confirmed_at.is_(None),
                 LibraryMediaItem.state.in_(
                     (
                         MediaState.READY,
@@ -679,7 +703,11 @@ async def run_automation(
                     LibraryMediaItem.next_search_at <= now,
                 ),
             )
-            .order_by(LibraryMediaItem.updated_at.asc())
+            .order_by(
+                LibraryMediaItem.last_searched_at.asc().nulls_first(),
+                LibraryMediaItem.discovered_at.asc(),
+                LibraryMediaItem.id.asc(),
+            )
         )
         if not policy.auto_identify or metadata_factory is None:
             statement = statement.where(LibraryMediaItem.tmdb_id.is_not(None))
@@ -690,7 +718,21 @@ async def run_automation(
         if policy.scope_mode == "selected":
             statement = statement.where(LibraryMediaItem.id.in_(policy.selected_media_ids))
         candidates = list(await session.scalars(statement)) if remaining else []
-        media = [item for item in candidates if _media_in_policy_scope(policy, item)][:remaining]
+        in_scope = [item for item in candidates if _media_in_policy_scope(policy, item)]
+        coverage_by_media = await existing_download_coverage(session, in_scope)
+        eligible = []
+        for item in in_scope:
+            coverage = coverage_by_media.get(item.id)
+            if coverage is None or not coverage.skip:
+                eligible.append(item)
+                continue
+            _mark_covered_media(item, coverage)
+            if run_record is not None:
+                if coverage.waiting_for_library:
+                    run_record.awaiting_library_count += 1
+                else:
+                    run_record.skipped_existing_count += 1
+        media = eligible[:remaining]
 
         new_jobs = [
             AutomationJob(run_id=run_id, media_id=item.id, trigger=trigger) for item in media
@@ -755,6 +797,56 @@ async def run_dry_run(
     return await run_automation(session, adapter_factory=adapter_factory, limit=limit)
 
 
+def _mark_covered_media(media: LibraryMediaItem, coverage: ExistingDownloadCoverage) -> None:
+    # Only NextFind can confirm library import. A completed transfer is still
+    # actionable information while it appears in the missing-library snapshot.
+    if media.library_confirmed_at is not None:
+        return
+    media.attention_reason = coverage.reason
+    media.state = (
+        MediaState.NEEDS_ATTENTION
+        if coverage.waiting_for_library or coverage.awaiting_confirmation
+        else MediaState.DOWNLOADING
+    )
+
+
+async def _exclude_covered_candidates(
+    session: AsyncSession,
+    candidates: list[ReleaseCandidate],
+    coverage: ExistingDownloadCoverage | None,
+) -> tuple[list[ReleaseCandidate], list[dict[str, object]]]:
+    if coverage is None:
+        return candidates, []
+    rows = await session.execute(
+        select(Download.info_hash, ReleaseCandidate.site_id, ReleaseCandidate.torrent_id)
+        .join(ReleaseCandidate, ReleaseCandidate.id == Download.candidate_id)
+        .where(Download.id.in_(coverage.download_ids))
+    )
+    hashes: set[str] = set()
+    torrents: set[tuple[str, str]] = set()
+    for info_hash, site_id, torrent_id in rows:
+        if info_hash:
+            hashes.add(info_hash.casefold())
+        torrents.add((site_id, torrent_id))
+    available = []
+    rejected: list[dict[str, object]] = []
+    for candidate in candidates:
+        duplicate = (candidate.site_id, candidate.torrent_id) in torrents or (
+            candidate.info_hash is not None and candidate.info_hash.casefold() in hashes
+        )
+        if duplicate or not candidate_adds_missing_content(candidate, coverage):
+            rejected.append(
+                {
+                    "candidate_id": candidate.id,
+                    "title": candidate.title,
+                    "reasons": ["已有有效下载，不补充当前缺失内容"],
+                }
+            )
+        else:
+            available.append(candidate)
+    return available, rejected
+
+
 async def _execute_job(
     session: AsyncSession,
     *,
@@ -786,8 +878,19 @@ async def _execute_job(
         media = await session.get(LibraryMediaItem, job.media_id)
         if media is None:
             raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
+        if media.library_confirmed_at is not None:
+            job.decision = {
+                "mode": "dry-run" if policy.dry_run else "live",
+                "outcome": "skipped",
+                "download_skipped": "NextFind 已确认入库，无需再次自动下载",
+            }
+            job.state = AutomationJobState.SUCCEEDED
+            job.finished_at = utc_now()
+            await session.commit()
+            return True
         if not _media_in_policy_scope(policy, media):
             job.decision = {
+                "outcome": "skipped",
                 "mode": "dry-run" if policy.dry_run else "live",
                 "candidate_count": 0,
                 "selected_title": None,
@@ -800,6 +903,46 @@ async def _execute_job(
                     }
                 ],
             }
+            job.state = AutomationJobState.SUCCEEDED
+            job.finished_at = utc_now()
+            await session.commit()
+            return True
+        coverage = (await existing_download_coverage(session, [media])).get(media.id)
+        if coverage is not None and coverage.skip:
+            _mark_covered_media(media, coverage)
+            job.download_id = coverage.download_ids[0]
+            if coverage.awaiting_confirmation:
+                uncertain_download = await session.scalar(
+                    select(Download)
+                    .where(
+                        Download.id.in_(coverage.download_ids),
+                        Download.state.in_(
+                            (DownloadState.SUBMITTING, DownloadState.OUTCOME_UNKNOWN)
+                        ),
+                    )
+                    .order_by(Download.created_at, Download.id)
+                    .limit(1)
+                )
+                if uncertain_download is not None:
+                    job.download_id = uncertain_download.id
+            job.decision = {
+                "mode": "dry-run" if policy.dry_run else "live",
+                "outcome": "awaiting_library"
+                if coverage.waiting_for_library
+                else "existing_download",
+                "download_skipped": coverage.reason,
+            }
+            await session.commit()
+            if coverage.awaiting_confirmation:
+                download = await session.get(Download, job.download_id)
+                unknown = download is not None and download.state == DownloadState.OUTCOME_UNKNOWN
+                raise AppError(
+                    "QB_ADD_OUTCOME_UNKNOWN" if unknown else "DOWNLOAD_SUBMISSION_INCOMPLETE",
+                    "qBittorrent 写入结果未知，请等待状态对账"
+                    if unknown
+                    else "已有下载仍处于提交中状态，请先同步或处理原任务",
+                    status_code=409,
+                )
             job.state = AutomationJobState.SUCCEEDED
             job.finished_at = utc_now()
             await session.commit()
@@ -825,20 +968,34 @@ async def _execute_job(
         existing_download = (
             await session.get(Download, job.download_id) if job.download_id else None
         )
+        if existing_download is not None and existing_download.cleanup_state in {
+            DownloadCleanupState.DELETED,
+            DownloadCleanupState.VANISHED,
+        }:
+            existing_download = None
+            job.download_id = None
         if existing_download is None and selected is not None:
             existing_download = await session.scalar(
-                select(Download).where(Download.candidate_id == selected.id)
+                select(Download).where(
+                    Download.candidate_id == selected.id,
+                    Download.cleanup_state.not_in(
+                        (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                    ),
+                )
             )
             if existing_download is not None:
                 job.download_id = existing_download.id
-        should_refresh_selection = selected is None or (
-            existing_download is None or existing_download.state == DownloadState.ERROR
+        should_refresh_selection = (
+            selected is None
+            or (existing_download is None or existing_download.state == DownloadState.ERROR)
+            or coverage is not None
         )
         previous_selection = selected
         if should_refresh_selection:
             if media.media_type.value not in policy.media_types:
                 selected = None
                 job.decision = {
+                    "outcome": "skipped",
                     "mode": "dry-run" if policy.dry_run else "live",
                     "candidate_count": 0,
                     "selected_title": None,
@@ -866,11 +1023,14 @@ async def _execute_job(
                         metadata_factory=metadata_factory,
                     )
                 _, candidates = await get_search(session, search.id)
+                available_candidates, coverage_rejected = await _exclude_covered_candidates(
+                    session, candidates, coverage
+                )
                 season_context = await _season_context(session, media)
                 media_is_variety = is_variety(media.genre_ids)
                 selected, rejected = _choose_candidate(
                     policy,
-                    candidates,
+                    available_candidates,
                     media_type=media.media_type,
                     require_known_size=(
                         not policy.dry_run and policy.daily_download_bytes is not None
@@ -891,15 +1051,25 @@ async def _execute_job(
                     selected = previous_selection
                 job.selected_candidate_id = selected.id if selected else None
                 job.decision = {
+                    "outcome": (
+                        "no_match"
+                        if selected is None
+                        else "dry_run"
+                        if policy.dry_run
+                        else "unknown"
+                    ),
                     "mode": "dry-run" if policy.dry_run else "live",
                     "candidate_count": len(candidates),
                     "selected_title": selected.title if selected else None,
                     "selected_score": selected.score if selected else None,
-                    "rejected": rejected,
+                    "rejected": [*coverage_rejected, *rejected],
                 }
-                _record_search_outcome(
-                    media, found_candidate=selected is not None, policy=policy
-                )
+                if existing_download is not None and (
+                    selected is None or selected.id != existing_download.candidate_id
+                ):
+                    existing_download = None
+                    job.download_id = None
+                _record_search_outcome(media, found_candidate=selected is not None, policy=policy)
                 if selected is None and media.next_search_at is not None:
                     job.decision = {
                         **job.decision,
@@ -911,6 +1081,14 @@ async def _execute_job(
             if existing_download is not None and existing_download.state != DownloadState.ERROR:
                 job.decision = {
                     **job.decision,
+                    "outcome": "awaiting_library"
+                    if existing_download.state
+                    in {
+                        DownloadState.COMPLETED,
+                        DownloadState.SEEDING,
+                    }
+                    and media.library_confirmed_at is None
+                    else "existing_download",
                     "download_state": existing_download.state.value,
                 }
                 if existing_download.state == DownloadState.OUTCOME_UNKNOWN:
@@ -940,7 +1118,11 @@ async def _execute_job(
                 ),
             )
             if budget_reason is not None:
-                job.decision = {**job.decision, "download_skipped": budget_reason}
+                job.decision = {
+                    **job.decision,
+                    "outcome": "skipped",
+                    "download_skipped": budget_reason,
+                }
                 tomorrow = utc_now().astimezone(_SHANGHAI).date() + timedelta(days=1)
                 job.state = AutomationJobState.RETRY_WAIT
                 job.next_attempt_at = datetime.combine(
@@ -1064,6 +1246,7 @@ async def _execute_job(
                     ),
                     details={"job_id": job_id},
                 ):
+                    submission_started = utc_now()
                     download = await submit_download(
                         session,
                         candidate_id=selected.id,
@@ -1088,6 +1271,31 @@ async def _execute_job(
                         "下载记录未成功提交，请先处理原任务",
                         status_code=409,
                     )
+                submitted = await session.scalar(
+                    select(ActivityLog.id)
+                    .where(
+                        ActivityLog.event == "DOWNLOAD_SUBMITTED",
+                        ActivityLog.details["job_id"].as_string() == job.id,
+                        ActivityLog.details["download_id"].as_string() == download.id,
+                        ActivityLog.created_at >= submission_started,
+                    )
+                    .limit(1)
+                )
+                job.decision = {
+                    **job.decision,
+                    "outcome": "downloaded"
+                    if submitted is not None
+                    else (
+                        "awaiting_library"
+                        if download.state
+                        in {
+                            DownloadState.COMPLETED,
+                            DownloadState.SEEDING,
+                        }
+                        and media.library_confirmed_at is None
+                        else "existing_download"
+                    ),
+                }
 
         job.state = AutomationJobState.SUCCEEDED
         job.finished_at = utc_now()
@@ -1389,19 +1597,17 @@ def _choose_candidate(
             episode = single_episode_number(candidate.title) if variety else None
             if episode is None:
                 reasons.append(
-                    "综艺资源既不是整季包也不是单集" if variety
+                    "综艺资源既不是整季包也不是单集"
+                    if variety
                     else "无法确认资源为全集包或完整季包"
                 )
             elif newest_episode is None or not is_within_latest_window(
                 episode, newest_episode, latest_episode_window
             ):
-                reasons.append(
-                    f"第 {episode} 集不在最新 {latest_episode_window} 集范围内"
-                )
+                reasons.append(f"第 {episode} 集不在最新 {latest_episode_window} 集范围内")
         if candidate.score < score_floor:
             reasons.append(
-                "评分低于本片单独设置的门槛" if minimum_score is not None
-                else "评分低于策略门槛"
+                "评分低于本片单独设置的门槛" if minimum_score is not None else "评分低于策略门槛"
             )
         if (candidate.seeders or 0) <= 0:
             reasons.append("当前没有做种，不能自动下载")
@@ -1425,9 +1631,7 @@ def _choose_candidate(
         if soft_warnings and not policy.allow_warnings:
             reasons.append("候选包含风险提示")
         if media_type == MediaType.TV:
-            season_reason = _season_pack_reason(
-                candidate, seasons=seasons or SeasonContext()
-            )
+            season_reason = _season_pack_reason(candidate, seasons=seasons or SeasonContext())
             if season_reason is not None:
                 reasons.append(season_reason)
         if reasons:

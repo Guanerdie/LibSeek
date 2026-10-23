@@ -357,6 +357,8 @@ export interface AutomationPolicy {
 }
 
 export type AutomationJobState = 'PENDING' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCEEDED' | 'FAILED'
+export type AutomationJobOutcome = 'downloaded' | 'existing_download' | 'awaiting_library' | 'no_match' | 'dry_run' | 'skipped' | 'unknown' | 'failed'
+export type AutomationOutcomeCounts = Record<Exclude<AutomationJobOutcome, 'failed'>, number>
 
 export interface AutomationJob {
   id: string
@@ -364,6 +366,7 @@ export interface AutomationJob {
   media_id: string
   media_title: string
   state: AutomationJobState
+  outcome?: AutomationJobOutcome | null
   search_id: string | null
   selected_candidate_id: string | null
   download_id: string | null
@@ -372,6 +375,7 @@ export interface AutomationJob {
   attempt_count: number
   next_attempt_at: string | null
   decision: {
+    outcome?: AutomationJobOutcome
     mode?: string
     candidate_count?: number
     selected_title?: string | null
@@ -396,6 +400,7 @@ export interface AutomationRun {
   succeeded: number
   failed: number
   deferred: number
+  outcomes?: AutomationOutcomeCounts
   error_message: string | null
   created_at: string
   started_at: string | null
@@ -426,6 +431,7 @@ export interface StatsRun {
   state: AutomationRunState
   created_count: number
   succeeded_count: number
+  outcomes?: AutomationRun['outcomes']
   failed_count: number
   deferred_count: number
   created_at: string

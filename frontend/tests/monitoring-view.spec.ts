@@ -138,6 +138,22 @@ describe('monitoring page', () => {
     const row = wrapper.get('.run-table tbody tr')
     expect(row.text()).toContain('scheduled')
     expect(row.text()).toContain('12.5s')
+    expect(row.text()).toContain('结果待核实 2 项')
+  })
+
+  it('separates real submissions from completed automation jobs', async () => {
+    const report = stats()
+    report.recent_runs[0].outcomes = {
+      downloaded: 1, existing_download: 0, awaiting_library: 12,
+      no_match: 1, dry_run: 0, skipped: 0, unknown: 0,
+    }
+    mocks.overview.mockResolvedValueOnce(report)
+    const wrapper = mount(MonitoringView)
+    await flushPromises()
+    const row = wrapper.get('.run-table tbody tr')
+    expect(row.text()).toContain('新增下载 1 项')
+    expect(row.text()).toContain('待入库核查 12 项')
+    expect(row.text()).toContain('未匹配 1 项')
   })
 
   it('reports a failure instead of rendering an empty dashboard', async () => {

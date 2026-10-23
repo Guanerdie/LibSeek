@@ -211,6 +211,51 @@ class GuardAwareQb:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("already_present", [False, True])
+async def test_outcome_requires_an_actual_new_qb_submission(session_factory, already_present):
+    payload, info_hash = torrent_with_size(20_000)
+
+    class ResultQb(GuardAwareQb):
+        async def add_torrent(self, payload: bytes, **kwargs: object) -> QbAddResult:
+            if already_present:
+                return QbAddResult(info_hash=info_hash, outcome="ALREADY_PRESENT")
+            return await super().add_torrent(payload, **kwargs)
+
+    async with session_factory() as session:
+        media = LibraryMediaItem(
+            source_item_id="outcome-proof",
+            media_type=MediaType.MOVIE,
+            tmdb_id=999,
+            title="Movie 999",
+            year=2026,
+            state=MediaState.READY,
+        )
+        session.add(media)
+        await session.commit()
+        await update_policy(
+            session,
+            AutomationPolicyUpdate(
+                enabled=True,
+                dry_run=False,
+                minimum_score=0.5,
+            ),
+        )
+        candidate = movie_candidate(999, "outcome-proof")
+        qb = ResultQb()
+        result = await run_automation(
+            session,
+            adapter_factory=lambda _: AvistaZMockAdapter(fixtures=[candidate]),
+            pt_factory=lambda _: cast(PtSiteAdapter, TorrentPayloadSource(payload)),
+            qb_factory=lambda: cast(QbittorrentAdapter, qb),
+        )
+        assert result[1:] == (1, 1, 0)
+        job = await session.scalar(select(AutomationJob))
+        assert job is not None
+        assert job.decision["outcome"] == ("existing_download" if already_present else "downloaded")
+        assert qb.add_calls == (0 if already_present else 1)
+
+
+@pytest.mark.asyncio
 async def test_automation_is_disabled_by_default(session_factory) -> None:
     async with session_factory() as session:
         policy = await get_policy(session)
@@ -2210,6 +2255,9 @@ async def test_unknown_qb_add_outcome_is_linked_and_never_submitted_twice(
         assert job.download_id == download.id
         assert download.state == DownloadState.OUTCOME_UNKNOWN
         assert job.state == AutomationJobState.FAILED
+        # A later reconciliation may finish this job. Until there is proof of
+        # a submission it must not be labeled as an empty search or new add.
+        assert job.decision["outcome"] == "unknown"
 
         retry, retry_run = await retry_job(session, job.id)
         _, created, succeeded, failed = await run_automation(
@@ -2318,6 +2366,14 @@ async def test_known_duplicate_hash_links_the_job_without_reporting_false_succes
             qb_factory=unexpected_qb,
         )
 
+        if existing_state in {DownloadState.SUBMITTING, DownloadState.OUTCOME_UNKNOWN}:
+            # Pending writes are filtered before searching, without inventing
+            # a successful download or using another search slot.
+            assert (created, succeeded, failed) == (0, 0, 0)
+            assert await session.scalar(select(AutomationJob)) is None
+            assert media.library_confirmed_at is None
+            assert media.attention_reason == "已有下载提交结果待确认，等待下载器同步"
+            return
         assert (created, succeeded, failed) == (1, 0, 1)
         job = await session.scalar(select(AutomationJob).where(AutomationJob.media_id == media.id))
         assert job is not None

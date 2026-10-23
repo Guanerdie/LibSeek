@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import utc_now
+from app.simple.automation_state import automation_run_outcomes
 from app.simple.models import (
     AutomationRun,
     Download,
@@ -113,6 +114,7 @@ async def _recent_runs(session: AsyncSession) -> list[dict[str, object]]:
         )
     )
     history: list[dict[str, object]] = []
+    outcomes = await automation_run_outcomes(session, runs)
     for run in runs:
         duration: float | None = None
         if run.started_at is not None and run.finished_at is not None:
@@ -126,6 +128,7 @@ async def _recent_runs(session: AsyncSession) -> list[dict[str, object]]:
                 "state": run.state.value,
                 "created_count": run.created_count,
                 "succeeded_count": run.succeeded_count,
+                "outcomes": outcomes[run.id],
                 "failed_count": run.failed_count,
                 "deferred_count": run.deferred_count,
                 "created_at": _as_utc(run.created_at).isoformat(),

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { ApiError, automationApi, dailyApi, statsApi } from '../api/client'
+import AutomationRunOutcomes from '../components/AutomationRunOutcomes.vue'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import Pagination from '../components/Pagination.vue'
@@ -16,6 +17,7 @@ import type {
   DailyMediaType,
   ScoreDistribution,
 } from '../types'
+import { automationJobLabel, automationRunResultText } from '../utils/automation'
 import { formatShanghai } from '../utils/format'
 
 const form = reactive({
@@ -272,8 +274,7 @@ function isActive(run: AutomationRun): boolean {
 }
 
 function runSummary(run: AutomationRun): string {
-  const summary = `自动搜索${run.state === 'FAILED' ? '失败' : '完成'}：处理 ${run.created} 项，成功 ${run.succeeded} 项，失败 ${run.failed} 项`
-  return run.deferred > 0 ? `${summary}，等待后续执行 ${run.deferred} 项` : summary
+  return `自动搜索${run.state === 'FAILED' ? '失败' : '完成'}：处理 ${run.created} 项，${automationRunResultText(run)}`
 }
 
 function stopPolling(): void {
@@ -538,10 +539,10 @@ onBeforeUnmount(() => {
         {{ currentRun.trigger === 'scheduled' ? '周期任务' : '手动运行' }} ·
         {{ formatShanghai(currentRun.started_at ?? currentRun.created_at) }}
       </p>
-      <p>
-        已完成 {{ runCompleted }} / {{ currentRun.created }} 项 · 成功 {{ currentRun.succeeded }} 项 ·
-        失败 {{ currentRun.failed }} 项 · 等待后续 {{ currentRun.deferred }} 项
-      </p>
+      <div class="automation-run-counts">
+        <span>已完成 {{ runCompleted }} / {{ currentRun.created }} 项</span>
+        <AutomationRunOutcomes :run="currentRun" />
+      </div>
       <div class="progress-track" :aria-label="`自动搜索进度 ${runProgress}%`">
         <span :style="{ width: `${runProgress}%` }"></span>
       </div>
@@ -942,10 +943,8 @@ onBeforeUnmount(() => {
               <span class="muted">{{ runItem.trigger === 'scheduled' ? '周期自动搜索' : '手动自动搜索' }}</span>
             </div>
             <div class="automation-run-counts">
-              <strong>共 {{ runItem.created }} 项</strong>
-              <span class="success-text">成功 {{ runItem.succeeded }} 项</span>
-              <span v-if="runItem.failed" class="danger-text">失败 {{ runItem.failed }} 项</span>
-              <span v-if="runItem.deferred" class="warning-text">等待 {{ runItem.deferred }} 项</span>
+              <strong>任务 {{ runItem.created }} 项</strong>
+              <AutomationRunOutcomes :run="runItem" />
             </div>
             <StatusPill :status="runItem.state" />
             <RouterLink class="button secondary small" :to="`/automation/runs/${runItem.id}`">
@@ -978,7 +977,7 @@ onBeforeUnmount(() => {
                 重新执行
               </button>
             </div>
-            <StatusPill :status="job.superseded_at ? 'SUPERSEDED' : job.state" />
+            <StatusPill :status="job.superseded_at ? 'SUPERSEDED' : job.state" :label="automationJobLabel(job)" />
           </article>
         </div>
       </template>

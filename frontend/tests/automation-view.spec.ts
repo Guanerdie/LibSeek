@@ -144,6 +144,41 @@ afterEach(() => {
 })
 
 describe('automation run links', () => {
+  it('shows downloads, pre-search skips, and searches without conflating success with downloads', async () => {
+    mocks.latestRun.mockResolvedValue(automationRun({
+      state: 'SUCCEEDED', created: 5, succeeded: 4, failed: 1,
+      outcomes: {
+        downloaded: 1, existing_download: 12, awaiting_library: 8,
+        no_match: 2, dry_run: 1, skipped: 0, unknown: 0,
+      },
+    }))
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    const summary = wrapper.get('.automation-run-progress')
+    expect(summary.text()).toContain('已完成 5 / 5 项')
+    expect(summary.text()).toContain('新增下载 1 项')
+    expect(summary.text()).toContain('已有下载跳过 12 项')
+    expect(summary.text()).toContain('待入库核查 8 项')
+    expect(summary.text()).toContain('未匹配 2 项')
+    expect(summary.text()).toContain('演练 1 项')
+    expect(summary.text()).toContain('失败 1 项')
+    expect(summary.text()).not.toContain('成功 4 项')
+    wrapper.unmount()
+  })
+
+  it('labels an existing download as skipped in the compatibility job list', async () => {
+    mocks.jobs.mockResolvedValue({
+      items: [automationJob({ state: 'SUCCEEDED', outcome: 'existing_download', error_message: null })],
+      total: 1, page: 1, page_size: 30,
+    })
+    const wrapper = mount(AutomationView)
+    await flushPromises()
+
+    expect(wrapper.get('.download-card').text()).toContain('已有下载跳过')
+    wrapper.unmount()
+  })
+
   it('opens the current run inside the app instead of reloading the page', async () => {
     mocks.latestRun.mockResolvedValue(
       automationRun({
@@ -431,7 +466,7 @@ describe('automation settings', () => {
     await flushPromises()
 
     expect(mocks.runStatus).toHaveBeenCalledWith('run-1')
-    expect(wrapper.text()).toContain('自动搜索完成：处理 4 项，成功 3 项，失败 1 项')
+    expect(wrapper.text()).toContain('自动搜索完成：处理 4 项，结果待核实 3 项，失败 1 项')
     expect(mocks.jobs).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })

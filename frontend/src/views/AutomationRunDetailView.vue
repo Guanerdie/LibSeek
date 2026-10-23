@@ -3,11 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { ApiError, automationApi } from '../api/client'
+import AutomationRunOutcomes from '../components/AutomationRunOutcomes.vue'
 import PageHeader from '../components/PageHeader.vue'
 import PageState from '../components/PageState.vue'
 import Pagination from '../components/Pagination.vue'
 import StatusPill from '../components/StatusPill.vue'
 import type { AutomationJob, AutomationRun } from '../types'
+import { automationJobLabel } from '../utils/automation'
 import { formatShanghai, statusLabel } from '../utils/format'
 
 const route = useRoute()
@@ -182,12 +184,11 @@ onBeforeUnmount(() => {
           <StatusPill :status="run.state" :label="statusLabel(run.state)" />
         </div>
         <div class="automation-run-counts">
-          <strong>共 {{ run.created }} 项</strong>
-          <span class="success-text">成功 {{ run.succeeded }} 项</span>
-          <span v-if="run.failed" class="danger-text">失败 {{ run.failed }} 项</span>
-          <span v-if="run.deferred" class="warning-text">等待 {{ run.deferred }} 项</span>
+          <strong>任务 {{ run.created }} 项</strong>
+          <AutomationRunOutcomes :run="run" />
           <span class="muted">已完成 {{ completed }} / {{ run.created }} 项</span>
         </div>
+        <p v-if="run.outcomes?.existing_download || run.outcomes?.awaiting_library" class="muted">搜索前跳过的已有下载不占搜索名额；下载完成仍缺失的影视需核查入库。</p>
         <div class="progress-track" :aria-label="`自动搜索进度 ${progress}%`"><span :style="{ width: `${progress}%` }"></span></div>
         <p v-if="run.error_message" class="inline-warning">{{ run.error_message }}</p>
       </article>
@@ -208,7 +209,7 @@ onBeforeUnmount(() => {
               </div>
               <StatusPill
                 :status="job.superseded_at ? 'SUPERSEDED' : job.state"
-                :label="statusLabel(job.superseded_at ? 'SUPERSEDED' : job.state)"
+                :label="automationJobLabel(job)"
               />
             </div>
             <div class="automation-job-meta">
@@ -217,7 +218,9 @@ onBeforeUnmount(() => {
               <span v-if="job.decision.download_skipped" class="warning-text">{{ job.decision.download_skipped }}</span>
             </div>
             <p v-if="job.error_message" class="inline-warning">{{ job.error_message }}</p>
-            <p v-if="!job.error_message && job.state === 'SUCCEEDED' && !job.decision.selected_title" class="muted">没有候选满足当前策略</p>
+            <p v-if="job.outcome === 'no_match'" class="muted">没有候选满足当前策略</p>
+            <p v-if="job.outcome === 'awaiting_library'" class="muted">下载已完成，NextFind 仍报告缺失，请核查入库。</p>
+            <p v-if="job.state === 'SUCCEEDED' && (!job.outcome || job.outcome === 'unknown')" class="muted">历史记录不足，无法确认本次是否新增下载。</p>
             <ul v-if="rejectedReasons(job).length" class="reason-list">
               <li v-for="reason in rejectedReasons(job)" :key="reason">{{ reason }}</li>
             </ul>

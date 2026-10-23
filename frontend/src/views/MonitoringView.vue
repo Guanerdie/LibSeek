@@ -6,6 +6,7 @@ import PageState from '../components/PageState.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { ApiError, statsApi } from '../api/client'
 import type { AutomationStats } from '../types'
+import { automationOutcomeEntries } from '../utils/automation'
 import { statusLabel } from '../utils/format'
 
 const stats = ref<AutomationStats | null>(null)
@@ -305,7 +306,7 @@ onMounted(load)
               <th scope="col">触发</th>
               <th scope="col">状态</th>
               <th scope="col">创建</th>
-              <th scope="col">成功</th>
+              <th scope="col">执行结果</th>
               <th scope="col">失败</th>
               <th scope="col">推迟</th>
               <th scope="col">耗时</th>
@@ -317,7 +318,11 @@ onMounted(load)
               <td>{{ run.trigger }}</td>
               <td><StatusPill :status="run.state" :label="statusLabel(run.state)" /></td>
               <td>{{ run.created_count }}</td>
-              <td>{{ run.succeeded_count }}</td>
+              <td>
+                <div v-for="entry in automationOutcomeEntries({ succeeded: run.succeeded_count, outcomes: run.outcomes })" :key="entry.key">
+                  {{ entry.label }} {{ entry.count }} 项
+                </div>
+              </td>
               <td>{{ run.failed_count }}</td>
               <td>{{ run.deferred_count }}</td>
               <td>{{ seconds(run.duration_seconds) }}</td>

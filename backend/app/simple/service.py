@@ -14,6 +14,7 @@ from app.simple.models import (
     ActivityLog,
     AutomationJob,
     Download,
+    DownloadCleanupState,
     DownloadState,
     Episode,
     LibraryMediaItem,
@@ -314,29 +315,24 @@ async def queue_download(
     if media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
 
-    existing = await session.scalar(select(Download).where(Download.candidate_id == candidate.id))
-    if existing is not None:
-        if existing.state == DownloadState.ERROR:
-            existing.state = DownloadState.SUBMITTING
-            existing.error_message = None
-            media.state = MediaState.DOWNLOADING
-            media.attention_reason = None
-            session.add(
-                ActivityLog(
-                    media_id=media.id,
-                    event="DOWNLOAD_RETRYING",
-                    message=f"重新提交资源：{candidate.title}",
-                    details={"site_id": candidate.site_id},
-                )
-            )
-            await session.commit()
-            await session.refresh(existing)
+    existing = await session.scalar(
+        select(Download).where(
+            Download.candidate_id == candidate.id,
+            Download.cleanup_state.not_in(
+                (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+            ),
+        )
+    )
+    if existing is not None and existing.state != DownloadState.ERROR:
         return existing
 
-    active_for_media = await session.scalar(
+    active_statement = (
         select(Download)
         .where(
             Download.media_id == media.id,
+            Download.cleanup_state.not_in(
+                (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+            ),
             Download.state.in_(
                 (
                     DownloadState.SUBMITTING,
@@ -350,6 +346,13 @@ async def queue_download(
         )
         .order_by(Download.created_at.desc())
     )
+    if media.media_type == MediaType.TV:
+        # Seeding an earlier season must not prevent filling a later one.
+        # Pending or uncertain submissions still block all parallel writes.
+        active_statement = active_statement.where(
+            (Download.state != DownloadState.SEEDING) | (Download.progress < 1)
+        )
+    active_for_media = await session.scalar(active_statement)
     if active_for_media is not None:
         raise AppError(
             "MEDIA_DOWNLOAD_ACTIVE",
@@ -357,6 +360,25 @@ async def queue_download(
             status_code=409,
             details={"existing_download_id": active_for_media.id},
         )
+
+    if existing is not None:
+        # Retrying an old failed candidate is a new write too. Check the other
+        # seasons above before restarting it alongside an unfinished transfer.
+        existing.state = DownloadState.SUBMITTING
+        existing.error_message = None
+        media.state = MediaState.DOWNLOADING
+        media.attention_reason = None
+        session.add(
+            ActivityLog(
+                media_id=media.id,
+                event="DOWNLOAD_RETRYING",
+                message=f"重新提交资源：{candidate.title}",
+                details={"site_id": candidate.site_id},
+            )
+        )
+        await session.commit()
+        await session.refresh(existing)
+        return existing
 
     download = Download(
         media_id=media.id,

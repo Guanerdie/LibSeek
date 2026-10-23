@@ -33,6 +33,7 @@ from app.simple.models import (
     AutomationRun,
     AutomationRunState,
     Download,
+    DownloadCleanupState,
     DownloadState,
     LibraryMediaItem,
     MediaState,
@@ -359,4 +360,5 @@ async def test_a_completed_download_removed_from_qb_is_not_an_error(
         assert updated == 1
         assert download.state == DownloadState.COMPLETED
         assert download.error_message is None
-        assert media.state == MediaState.COMPLETE
+        assert download.cleanup_state == DownloadCleanupState.VANISHED
+        assert media.state == MediaState.READY

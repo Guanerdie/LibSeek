@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     event,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -332,8 +333,20 @@ class ReleaseCandidate(Base):
 class Download(Base):
     __tablename__ = "downloads"
     __table_args__ = (
-        Index("uq_download_candidate", "candidate_id", unique=True),
-        Index("uq_download_info_hash", "info_hash", unique=True),
+        Index(
+            "uq_download_candidate",
+            "candidate_id",
+            unique=True,
+            sqlite_where=text("cleanup_state NOT IN ('DELETED', 'VANISHED')"),
+            postgresql_where=text("cleanup_state NOT IN ('DELETED', 'VANISHED')"),
+        ),
+        Index(
+            "uq_download_info_hash",
+            "info_hash",
+            unique=True,
+            sqlite_where=text("cleanup_state NOT IN ('DELETED', 'VANISHED')"),
+            postgresql_where=text("cleanup_state NOT IN ('DELETED', 'VANISHED')"),
+        ),
         CheckConstraint("progress >= 0 AND progress <= 1", name="ck_download_progress_range"),
         CheckConstraint("download_speed >= 0", name="ck_download_speed_nonnegative"),
         CheckConstraint("upload_speed >= 0", name="ck_upload_speed_nonnegative"),
@@ -492,6 +505,9 @@ class AutomationRun(Base):
     succeeded_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     deferred_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Pre-filtered items do not create jobs or consume the search batch limit.
+    skipped_existing_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    awaiting_library_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True

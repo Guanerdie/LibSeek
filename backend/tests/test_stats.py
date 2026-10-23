@@ -186,6 +186,8 @@ async def test_run_history_reports_duration_and_counts(session_factory) -> None:
         assert run["state"] == "SUCCEEDED"
         assert (run["created_count"], run["succeeded_count"], run["failed_count"]) == (3, 2, 1)
         assert run["duration_seconds"] == 12.0
+        assert run["outcomes"]["downloaded"] == 0
+        assert run["outcomes"]["unknown"] == 2
 
 
 @pytest.mark.asyncio

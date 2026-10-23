@@ -1170,17 +1170,22 @@ async def _submit_download_unlocked(
             )
             download.state = DownloadState.QUEUED
             download.info_hash = result.info_hash
+            submitted = result.outcome == "SUBMITTED"
             session.add(
                 ActivityLog(
                     media_id=download.media_id,
-                    event="DOWNLOAD_SUBMITTED",
-                    message=f"已提交到 qBittorrent：{download.name}",
+                    event="DOWNLOAD_SUBMITTED" if submitted else "DOWNLOAD_ALREADY_PRESENT",
+                    message=(
+                        f"已提交到 qBittorrent：{download.name}"
+                        if submitted else f"qBittorrent 已有该资源，未重复提交：{download.name}"
+                    ),
                     details={
                         "download_id": download.id,
                         "site_id": candidate.site_id,
                         "info_hash": result.info_hash,
                         "size_bytes": download.content_size_bytes,
                         "category": category,
+                        "outcome": result.outcome,
                     },
                 )
             )
@@ -1263,7 +1268,11 @@ async def retry_download(
                 "提交结果尚未确认，请先同步下载状态后再处理",
                 status_code=409,
             )
-        if existing.state != DownloadState.ERROR:
+        if (
+            existing.state != DownloadState.ERROR
+            and existing.cleanup_state
+            not in {DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED}
+        ):
             return existing
         return await _submit_download_unlocked(
             session,
@@ -1288,16 +1297,22 @@ async def sync_download_statuses(
     downloads = list(
         await session.scalars(
             select(Download).where(
-                Download.state.not_in((DownloadState.COMPLETED, DownloadState.ERROR))
+                Download.state != DownloadState.ERROR,
+                Download.cleanup_state.not_in(
+                    (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                ),
             )
         )
     )
     updated = 0
     now = utc_now()
+    finished_media_ids: set[str] = set()
     for download in downloads:
         if download.info_hash is None:
             continue
         torrent = by_hash.get(download.info_hash.casefold())
+        if download.progress >= 1 or (torrent is not None and torrent.progress >= 1):
+            finished_media_ids.add(download.media_id)
         if torrent is None:
             if await _release_vanished_download(session, download, now=now):
                 updated += 1
@@ -1356,6 +1371,31 @@ async def sync_download_statuses(
                 )
                 run.finished_at = utc_now()
         updated += 1
+    if finished_media_ids:
+        # Several seasons can coexist now. Processing an old completed season
+        # last must not make a newer transfer disappear from the media status.
+        active_media_ids = await session.scalars(
+            select(Download.media_id).where(
+                Download.media_id.in_(finished_media_ids),
+                Download.cleanup_state.not_in(
+                    (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                ),
+                Download.state.in_(
+                    (
+                        DownloadState.SUBMITTING,
+                        DownloadState.OUTCOME_UNKNOWN,
+                        DownloadState.QUEUED,
+                        DownloadState.DOWNLOADING,
+                        DownloadState.PAUSED,
+                    )
+                ),
+            ).distinct()
+        )
+        for media_id in active_media_ids:
+            media = await session.get(LibraryMediaItem, media_id)
+            if media is not None:
+                media.state = MediaState.DOWNLOADING
+                media.attention_reason = None
     await session.commit()
     return updated
 
@@ -1383,24 +1423,65 @@ async def _release_vanished_download(
     download.download_speed = 0
     download.upload_speed = 0
     if finished:
-        # It completed and was then removed from the client; that is not an error.
+        # A completed record is still useful history after the torrent vanishes,
+        # but it no longer proves that a copy is available for a missing title.
         download.state = DownloadState.COMPLETED
         download.error_message = None
+        download.cleanup_state = DownloadCleanupState.VANISHED
+        download.cleanup_hold_reason = None
+        session.add(
+            ActivityLog(
+                media_id=download.media_id,
+                event="DOWNLOAD_RECORD_RETIRED",
+                message=f"{download.name} 已不在 qBittorrent 中，旧下载记录不再用于判重",
+                reason="下载状态对账：已完成任务从下载器中消失",
+                details={"download_id": download.id, "info_hash": download.info_hash},
+            )
+        )
     else:
         download.state = DownloadState.ERROR
         download.error_message = "下载器中已不存在该任务"
 
     media = await session.get(LibraryMediaItem, download.media_id)
-    if media is not None and media.state == MediaState.DOWNLOADING:
-        if finished:
+    if media is not None:
+        if finished and media.library_confirmed_at is None:
+            other_active = await session.scalar(
+                select(Download.id).where(
+                    Download.media_id == media.id,
+                    Download.id != download.id,
+                    Download.state.in_(
+                        (
+                            DownloadState.SUBMITTING,
+                            DownloadState.OUTCOME_UNKNOWN,
+                            DownloadState.QUEUED,
+                            DownloadState.DOWNLOADING,
+                            DownloadState.PAUSED,
+                        )
+                    ),
+                    Download.cleanup_state.not_in(
+                        (DownloadCleanupState.DELETED, DownloadCleanupState.VANISHED)
+                    ),
+                ).limit(1)
+            )
+            if other_active is None and media.state not in {
+                MediaState.SEARCHING,
+                MediaState.CANDIDATES,
+            }:
+                media.state = (
+                    MediaState.READY if media.tmdb_id is not None else MediaState.NEEDS_ATTENTION
+                )
+                media.attention_reason = (
+                    None if media.tmdb_id is not None else "需要确认 TMDB 影视信息"
+                )
+                media.next_search_at = None
+        elif media.state == MediaState.DOWNLOADING and finished:
             media.state = settled_media_state(media)
             media.attention_reason = None
-        else:
+        elif media.state == MediaState.DOWNLOADING:
             media.state = MediaState.NEEDS_ATTENTION
             media.attention_reason = "qBittorrent 中已不存在该下载任务"
 
-    if not finished:
-        await _supersede_jobs_for_download(session, download)
+    await _supersede_jobs_for_download(session, download)
     return True
 
 

@@ -518,6 +518,7 @@ class AutomationJobView(BaseModel):
     attempt_count: int
     next_attempt_at: datetime | None
     decision: dict[str, object]
+    outcome: str | None = None
     error_code: str | None
     error_message: str | None
     created_at: datetime
@@ -532,6 +533,16 @@ class AutomationJobPage(BaseModel):
     page_size: int
 
 
+class AutomationOutcomeCounts(BaseModel):
+    downloaded: int = 0
+    existing_download: int = 0
+    awaiting_library: int = 0
+    no_match: int = 0
+    dry_run: int = 0
+    skipped: int = 0
+    unknown: int = 0
+
+
 class AutomationRunView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -542,6 +553,7 @@ class AutomationRunView(BaseModel):
     succeeded: int = Field(validation_alias="succeeded_count")
     failed: int = Field(validation_alias="failed_count")
     deferred: int = Field(validation_alias="deferred_count")
+    outcomes: AutomationOutcomeCounts = Field(default_factory=AutomationOutcomeCounts)
     error_message: str | None
     created_at: datetime
     started_at: datetime | None

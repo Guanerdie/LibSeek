@@ -12,6 +12,7 @@ from app.db.session import get_session
 from app.errors import AppError
 from app.models.enums import MediaType
 from app.simple import activity, automation, bulk_import, cleanup, service, stats
+from app.simple.automation_state import automation_job_outcomes, automation_run_outcomes
 from app.simple.background import queue_library_sync, queue_release_search
 from app.simple.integrations import (
     build_nextfind,
@@ -30,6 +31,7 @@ from app.simple.integrations import (
 )
 from app.simple.models import (
     AutomationJob,
+    AutomationRun,
     DownloadCleanupState,
     DownloadState,
     LibraryMediaItem,
@@ -637,6 +639,28 @@ async def save_automation_policy(
     return AutomationPolicyView.model_validate(policy)
 
 
+async def _automation_job_views(
+    session: AsyncSession, rows: list[tuple[AutomationJob, str]]
+) -> list[AutomationJobView]:
+    outcomes = await automation_job_outcomes(session, [job for job, _ in rows])
+    return [
+        AutomationJobView.model_validate(
+            {**job.__dict__, "media_title": title, "outcome": outcomes[job.id]}
+        )
+        for job, title in rows
+    ]
+
+
+async def _automation_run_views(
+    session: AsyncSession, runs: list[AutomationRun]
+) -> list[AutomationRunView]:
+    outcomes = await automation_run_outcomes(session, runs)
+    return [
+        AutomationRunView.model_validate({**run.__dict__, "outcomes": outcomes[run.id]})
+        for run in runs
+    ]
+
+
 @router.get("/automation/jobs", response_model=AutomationJobPage)
 async def automation_jobs(
     session: Session,
@@ -650,10 +674,7 @@ async def automation_jobs(
         session, page=page, page_size=page_size, run_id=run_id
     )
     return AutomationJobPage(
-        items=[
-            AutomationJobView.model_validate({**job.__dict__, "media_title": title})
-            for job, title in rows
-        ],
+        items=await _automation_job_views(session, rows),
         total=total,
         page=page,
         page_size=page_size,
@@ -671,7 +692,7 @@ async def run_automation(
     del principal
     run = await automation.create_automation_run(session, trigger="manual")
     queue_manual_automation_run(run.id)
-    return AutomationRunView.model_validate(run)
+    return (await _automation_run_views(session, [run]))[0]
 
 
 @router.get("/automation/runs", response_model=AutomationRunPage)
@@ -693,7 +714,7 @@ async def automation_runs(
         session, page=page, page_size=page_size
     )
     return AutomationRunPage(
-        items=[AutomationRunView.model_validate(run) for run in runs],
+        items=await _automation_run_views(session, runs),
         total=total,
         page=page,
         page_size=page_size,
@@ -706,7 +727,7 @@ async def latest_automation_run(
 ) -> AutomationRunView | None:
     del principal
     run = await automation.get_latest_automation_run(session)
-    return AutomationRunView.model_validate(run) if run is not None else None
+    return (await _automation_run_views(session, [run]))[0] if run is not None else None
 
 
 @router.get("/automation/runs/{run_id}", response_model=AutomationRunView)
@@ -715,7 +736,7 @@ async def automation_run_status(
 ) -> AutomationRunView:
     del principal
     run = await automation.get_automation_run(session, run_id)
-    return AutomationRunView.model_validate(run)
+    return (await _automation_run_views(session, [run]))[0]
 
 
 @router.get("/automation/runs/{run_id}/jobs", response_model=AutomationJobPage)
@@ -736,10 +757,7 @@ async def automation_run_jobs(
         session, run_id, page=page, page_size=page_size
     )
     return AutomationJobPage(
-        items=[
-            AutomationJobView.model_validate({**job.__dict__, "media_title": title})
-            for job, title in rows
-        ],
+        items=await _automation_job_views(session, rows),
         total=total,
         page=page,
         page_size=page_size,
@@ -756,7 +774,7 @@ async def retry_automation_job(
     media = await session.get(LibraryMediaItem, job.media_id)
     if media is None:
         raise AppError("MEDIA_NOT_FOUND", "影视条目不存在", status_code=404)
-    return AutomationJobView.model_validate({**job.__dict__, "media_title": media.title})
+    return (await _automation_job_views(session, [(job, media.title)]))[0]
 
 
 @router.get("/stats")
